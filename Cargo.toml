@@ -1,62 +1,65 @@
+[workspace]
+resolver = "2"
+
 [package]
 name = "hydrolysis"
 version = "0.1.0"
-edition.workspace = true
-authors.workspace = true
-rust-version.workspace = true
-license.workspace = true
-readme.workspace = true
-repository.workspace = true
-description.workspace = true
-keywords.workspace = true
-categories.workspace = true
+edition = "2024"
+authors = ["Lexo Liu"]
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/water-rs/hydrolysis"
+description = "GPU-required self-drawn backend for WaterUI"
+keywords = ["ui", "graphics", "gpu", "waterui", "vello"]
+categories = ["gui", "graphics"]
 
 [dependencies]
-waterui-core.workspace = true
-waterui-assets.workspace = true
+waterui-core = "0.3.0"
+waterui-assets = "0.1.0"
 # Decodes the CLI-staged window icon (always written as 8-bit RGBA PNG).
 png = "0.18"
-waterui = { version = "0.3.0", path = "../..", default-features = false, features = ["gpu", "inspector"] }
-tracing.workspace = true
+waterui = { version = "0.3.0", default-features = false, features = ["gpu", "inspector"] }
+tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-nami.workspace = true
-waterui-graphics = { workspace = true, features = ["gpu"] }
-shaderloom.workspace = true
+nami = "0.11.0"
+waterui-graphics = { version = "0.3.0", default-features = false, features = ["gpu"] }
+shaderloom = "0.1.2"
 # `font-collection` for the one `parley` collection this runner builds and
 # installs into the environment; the faces come from the resource loader and
 # the system source `parley/system` provides, so `system-fonts` is not needed.
-waterui-text = { workspace = true, features = ["font-collection"] }
-waterui-icon.workspace = true
-waterui-shape.workspace = true
-waterui-map.workspace = true
-waterui-webview.workspace = true
-waterui-layout = { workspace = true }
-waterui-controls.workspace = true
-waterui-form.workspace = true
-waterui-backend-core = { workspace = true, features = ["widgets", "gestures"] }
-waterkit-clipboard.workspace = true
-waterui-locale.workspace = true
-vello.workspace = true
-parley = { workspace = true, features = ["system"] }
-wgpu.workspace = true
-lru.workspace = true
+waterui-text = { version = "0.3.0", features = ["font-collection"] }
+waterui-icon = "0.3.0"
+waterui-shape = { version = "0.1.0", default-features = false }
+waterui-map = "0.1.0"
+waterui-webview = "0.3.0"
+waterui-layout = "0.3.0"
+waterui-controls = "0.3.0"
+waterui-form = "0.3.0"
+waterui-backend-core = { version = "0.1.0", default-features = false, features = ["widgets", "gestures"] }
+waterkit-clipboard = "0.1.1"
+waterui-locale = "0.1.0"
+vello = "0.9"
+parley = { version = "0.11", default-features = false, features = ["system"] }
+wgpu = "29.0.4"
+lru = "0.18"
 rayon = "1.12"
-pollster.workspace = true
-executor-core.workspace = true
-rustc-hash.workspace = true
+pollster = "1.0"
+executor-core = { version = "0.7.1", features = ["std"] }
+rustc-hash = "2.1.3"
 unicode-segmentation = "1.13"
 async-task = "4.7"
-native-executor.workspace = true
+native-executor = "0.8.0"
 winit = { version = "0.30", optional = true }
-keyboard-types.workspace = true
-ui-events-winit = { workspace = true, optional = true }
+keyboard-types = { version = "0.8.3", default-features = false }
+ui-events-winit = { version = "0.3.0", optional = true }
 accesskit = { version = "0.25", optional = true }
-waterui-inspector-protocol.workspace = true
+waterui-inspector-protocol = "0.1.0"
 accesskit_winit = { version = "0.34.0", optional = true }
 
 [build-dependencies]
 cfg_aliases = "0.2.2"
-shaderloom = { workspace = true, features = ["build"] }
+shaderloom = { version = "0.1.2", features = ["build"] }
 
 # Termination signals for the windowed desktop runner. No windowing system
 # delivers SIGINT/SIGTERM/SIGHUP (or the Windows console close events) to winit,
@@ -71,7 +74,7 @@ ctrlc = { version = "3.5", features = ["termination"], optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", optional = true }
 cookie = { version = "0.18", optional = true }
-futures = { workspace = true, optional = true }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"], optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = [
     "NSAnimation",
@@ -129,11 +132,9 @@ objc2-web-kit = { version = "0.3.2", optional = true, default-features = false, 
 ] }
 serde_json = { version = "1", optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-serde = { workspace = true, features = ["derive"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
@@ -160,18 +161,16 @@ web-sys = { version = "0.3", optional = true, features = [
 # The renderer itself knows nothing about `Canvas`: it resolves to a
 # `SceneView` before it reaches layout. The tests still author canvases, which
 # is what keeps that resolution honest.
-waterui-canvas.workspace = true
-# The wayland examples need a widget theme; m3 is the one this workspace ships.
-# A dev-dependency back onto a crate that depends on this one is a cycle cargo
-# allows, and it keeps the examples next to the renderer they exercise.
-hydrolysis-m3 = { path = "../hydrolysis_m3" }
-waterui-testing = { path = "../../testing" }
-waterui-navigation = { path = "../../components/foundation/navigation" }
-jiff.workspace = true
+waterui-canvas = "0.1.1"
+# The wayland examples need a widget theme; m3 is independently maintained.
+hydrolysis-m3 = "0.1.0"
+waterui-testing = "0.3.0"
+waterui-navigation = "0.3.0"
+jiff = { version = "0.2", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-waterui = { path = "../..", default-features = false, features = ["flow-markdown", "gpu"] }
+waterui = { version = "0.3.0", default-features = false, features = ["flow-markdown", "gpu"] }
 base64 = "0.22"
-executor-core = { workspace = true, features = ["async-executor"] }
+executor-core = { version = "0.7.1", features = ["std", "async-executor"] }
 tiny_http = "0.12"
 
 # `WKWebView` is `MainThreadOnly` and libtest runs tests on worker threads, so
@@ -208,6 +207,50 @@ winit = [
     "dep:objc2-quartz-core",
 ]
 web = ["accessibility", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys"]
-# `shaderloom` is used directly by build.rs; cargo-machete 0.9 does not scan build.rs.
+
+# Development and CI certify one immutable WaterUI foundation revision: every
+# framework package in the graph comes from the same commit. The published
+# requirements above remain the distribution contract; Cargo only applies
+# patches from the consuming graph's root manifest.
+[patch.crates-io]
+hydrolysis-m3 = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-assets = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-assets-macros = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-assets-planner = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-backend-core = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-controls = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-core = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-dylib = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-form = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-graphics = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-icon = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-inspector-protocol = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-internal = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-layout = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-locale = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-macros = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-map = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-media = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-navigation = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-preview-protocol = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-shape = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-str = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-svg = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-testing = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-text = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-url = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-video = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-watcher-set = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+waterui-webview = { git = "https://github.com/water-rs/waterui.git", rev = "3255af7d4763033f543d31d1d5988501f8013dce" }
+
+# `waterui-testing` hosts its suites on this renderer; inside the pinned
+# framework checkout that is a path dependency, so it is redirected to this
+# crate rather than linking a second copy.
+[patch."https://github.com/water-rs/waterui.git"]
+hydrolysis = { path = "." }
+
+
 [package.metadata.cargo-machete]
 ignored = ["cfg_aliases", "shaderloom"]
+
