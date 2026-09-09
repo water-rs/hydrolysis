@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        # The Noto faces are not headers: the renderer shapes a script Roboto
+        # does not cover through the platform's own font fallback, and the
+        # coverage tests assert that a Han, Arabic, Hebrew, Thai or Devanagari
+        # sample shapes to real glyphs rather than to `.notdef`. A runner with
+        # no such face installed fails them for want of a font.
+        run: |
+          sudo apt-get update -o Dir::Etc::SourceList=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::SourceParts=/dev/null
+          sudo apt-get install -y libfontconfig1-dev libva-dev libpipewire-0.3-dev libegl-dev libgbm-dev libwayland-dev libxkbcommon-dev libvulkan-dev fonts-noto-core fonts-noto-cjk
+      - name: Install DirectX Shader Compiler
+        if: runner.os == 'Windows'
+        uses: tracel-ai/github-actions/install-dxc@295f2fdbae5271f4f8ad56d634e4ff6a95daafc8
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --features accessibility,inspector-signals,testing,web,winit -- -D warnings
+      - run: cargo test --locked --features accessibility,inspector-signals,testing,web,winit
+
+  wasm:
+    name: Check / wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --target wasm32-unknown-unknown --features web -- -D warnings

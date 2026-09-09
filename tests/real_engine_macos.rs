@@ -58,16 +58,12 @@ mod real {
     /// ordinary number rather than being tagged along with the one above.
     const REPRESENTABLE: u64 = 42;
 
-    // The pages live with the shared webview crate because they exercise the
-    // shared bridge contract; every real-engine suite loads the same ones.
-    const FIRST_HTML: &str =
-        include_str!("../../../components/platform/webview/tests/pages/first.html");
-    const SECOND_HTML: &str =
-        include_str!("../../../components/platform/webview/tests/pages/second.html");
-    const CHECKS_JS: &str =
-        include_str!("../../../components/platform/webview/tests/pages/checks.js");
-    const STATE_SEED_JS: &str =
-        include_str!("../../../components/platform/webview/tests/pages/state_seed.js");
+    // The pages belong to this backend's real-engine suite and exercise the
+    // shared public webview bridge contract without reaching into another repo.
+    const FIRST_HTML: &str = include_str!("pages/first.html");
+    const SECOND_HTML: &str = include_str!("pages/second.html");
+    const CHECKS_JS: &str = include_str!("pages/checks.js");
+    const STATE_SEED_JS: &str = include_str!("pages/state_seed.js");
 
     /// The local executor the page's handler replies are spawned onto.
     ///
