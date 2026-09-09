@@ -60,14 +60,10 @@ mod real {
 
     // The pages belong to this backend's real-engine suite and exercise the
     // shared public webview bridge contract without reaching into another repo.
-    const FIRST_HTML: &str =
-        include_str!("pages/first.html");
-    const SECOND_HTML: &str =
-        include_str!("pages/second.html");
-    const CHECKS_JS: &str =
-        include_str!("pages/checks.js");
-    const STATE_SEED_JS: &str =
-        include_str!("pages/state_seed.js");
+    const FIRST_HTML: &str = include_str!("pages/first.html");
+    const SECOND_HTML: &str = include_str!("pages/second.html");
+    const CHECKS_JS: &str = include_str!("pages/checks.js");
+    const STATE_SEED_JS: &str = include_str!("pages/state_seed.js");
 
     /// The local executor the page's handler replies are spawned onto.
     ///
