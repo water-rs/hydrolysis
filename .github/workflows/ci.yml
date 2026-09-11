@@ -46,6 +46,15 @@ jobs:
         run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --features accessibility,inspector-signals,testing,web,winit -- -D warnings
       - run: cargo test --locked --features accessibility,inspector-signals,testing,web,winit
+      # The macOS WKWebView bridge. `webview-system` is the one feature the
+      # sweep above cannot carry — it compiles only where WKWebView exists —
+      # so without this step nothing pointed a compiler at it, which is how a
+      # `compile_error!` that made the crate impossible to document reached a
+      # release run. The suite is `harness = false` (WKWebView is
+      # MainThreadOnly and libtest runs tests on worker threads), so `cargo
+      # test` runs the binary on the real process main thread.
+      - if: runner.os == 'macOS'
+        run: cargo test --locked --features webview-system,winit --test real_engine_macos
 
   wasm:
     name: Check / wasm32
