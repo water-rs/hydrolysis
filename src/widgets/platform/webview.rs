@@ -9,14 +9,29 @@
 //! A build with neither still renders the component: it occupies its layout slot
 //! and publishes its accessibility node, which is the configuration the testing
 //! harness runs in.
+//!
+//! On a target that has no `WKWebView`, `webview-system` selects nothing and the
+//! component renders that same way. The feature names a platform bridge, so it
+//! is meaningful only where the platform supplies one.
 
-#[cfg(all(feature = "webview-system", not(hydrolysis_macos_system_webview)))]
+// Only macOS can act on this: there the feature names a bridge that exists and
+// the diagnostic tells the reader what is missing. Everywhere else the platform
+// has no WKWebView to bridge, and the feature selects nothing — which is what
+// the module documents above. It has to stay buildable there, because every
+// tool that reads a crate whole turns on every feature on Linux: docs.rs,
+// `cargo hack`, and the `cargo semver-checks` release-plz runs before it
+// publishes. A hard error on those targets makes the crate impossible to
+// document and impossible to release, and protects nobody.
+#[cfg(all(
+    feature = "webview-system",
+    target_os = "macos",
+    not(hydrolysis_macos_system_webview)
+))]
 compile_error!(
     "the `webview-system` feature selects the macOS WKWebView bridge, which needs \
-     `target_os = \"macos\"` and the `winit` feature (WKWebView is composed into the \
-     winit window's AppKit view). Enable `winit`, build for macOS, or link a browser \
-     engine crate (`waterui-browser-cef`, `waterui-browser-wpe`) in the application \
-     instead."
+     the `winit` feature (WKWebView is composed into the winit window's AppKit \
+     view). Enable `winit`, or link a browser engine crate \
+     (`waterui-browser-cef`, `waterui-browser-wpe`) in the application instead."
 );
 
 use std::cell::RefCell;
