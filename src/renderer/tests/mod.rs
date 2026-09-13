@@ -1007,6 +1007,81 @@ fn a_label_survives_the_environment_snapshot_a_view_hook_takes() {
     assert_eq!(labelled[0].1.role(), AccessibilityNodeRole::Image);
 }
 
+/// A `WebView` created under an application-provided controller exists — the
+/// controller permits it — but on a build bridging no engine there is nothing
+/// to draw it with, and the backend fails rather than occupying a layout slot
+/// with no page behind it.
+#[cfg(not(hydrolysis_macos_system_webview))]
+#[test]
+#[should_panic(expected = "no web engine is bridged")]
+fn a_webview_with_no_engine_to_draw_it_panics() {
+    use std::future::{Future, ready};
+
+    use waterui_core::{Signal, Str};
+    use waterui_webview::{
+        BackendEvent, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime,
+        ScriptMessageHandler, WatcherGuard, WatcherSet, WebView, WebViewController, WebViewHandle,
+    };
+
+    /// The smallest controller that can still create a `WebView`: the handle
+    /// answers what construction asks and discards the rest, because the
+    /// assertion only needs the view to exist long enough for the backend to
+    /// refuse it.
+    struct TestWebViewController;
+
+    impl CustomWebViewController for TestWebViewController {
+        fn open(&self) -> impl WebViewHandle {
+            TestWebViewHandle {
+                watchers: WatcherSet::new(),
+            }
+        }
+    }
+
+    struct TestWebViewHandle {
+        watchers: WatcherSet<BackendEvent>,
+    }
+
+    impl WebViewHandle for TestWebViewHandle {
+        fn go_back(&self) {}
+        fn go_forward(&self) {}
+        fn go_to(&self, _url: &waterui_webview::Url) {}
+        fn stop(&self) {}
+        fn refresh(&self) {}
+        fn set_user_agent(&self, _user_agent: &str) {}
+        fn can_go_back(&self) -> bool {
+            false
+        }
+        fn can_go_forward(&self) -> bool {
+            false
+        }
+        fn inject_script(&self, _key: &str, _script: &str, _time: ScriptInjectionTime) {}
+        fn add_handler(&self, _name: &str, _handler: Box<ScriptMessageHandler>) {}
+        fn remove_handler(&self, _name: &str) {}
+        fn set_bridge_origins(&self, _policy: OriginPolicy) {}
+        fn set_cookie(&self, _cookie: Cookie<'static>) {}
+        fn set_redirects_enabled(&self, _enabled: impl Signal<Output = bool>) {}
+        fn watch(&self, f: impl Fn(BackendEvent) + 'static) -> WatcherGuard {
+            self.watchers.insert(f)
+        }
+        fn get_cookies(&self) -> impl Future<Output = Vec<Cookie<'static>>> {
+            ready(Vec::new())
+        }
+        fn run_javascript(&self, _script: &str) -> impl Future<Output = Result<Str, Str>> {
+            ready(Err(Str::from_static("no page")))
+        }
+        fn call_async_javascript(&self, _body: &str) -> impl Future<Output = Result<Str, Str>> {
+            ready(Err(Str::from_static("no page")))
+        }
+    }
+
+    let mut env = test_environment();
+    env.insert(WebViewController::new(TestWebViewController));
+    let mut renderer = test_renderer();
+    let view = WebView::open("https://github.com/water-rs/waterui");
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+}
+
 /// A reactive collection is a container too. Rows are how a tab bar, a menu, or a
 /// sidebar is actually written, so a container node that only appeared for fixed
 /// tuple children would still leave every dynamic list unannounced.
