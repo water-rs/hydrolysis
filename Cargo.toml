@@ -234,7 +234,7 @@ hydrolysis = { path = "." }
 # the waterui branch below removes; the companion branch migrated to the
 # fixed-radius shapes this backend resolves. Drop this entry once a release
 # carries the migration.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "c2eb228d0dd50de453d99a8d99a7395b49395303" }
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "6f142c274ac0c303fcece7256cc9cda479a1f7a9" }
 
 # The absolute-radius `ShapeKind` variants this branch resolves ship with the
 # next `waterui-shape` release (water-rs/waterui#617); until it lands on
