@@ -109,6 +109,7 @@ pub(crate) fn restore_a11y_naming_scope(
     }
     restore!(
         AccessibilityLabel,
+        AccessibilityValue,
         AccessibilityRole,
         AccessibilityChildren,
         ScopedAccessibilityIdentifier,
@@ -216,6 +217,7 @@ pub(crate) fn passthrough_content(view: &AnyView) -> Option<&AnyView> {
         MaterialBackground,
         AccessibilityIdentifier,
         AccessibilityLabel,
+        AccessibilityValue,
         AccessibilityRole,
         AccessibilityHidden,
         AccessibilityChildren,
@@ -347,6 +349,7 @@ fn normalize_layout_view_with_budget(
         MaterialBackground,
         AccessibilityIdentifier,
         AccessibilityLabel,
+        AccessibilityValue,
         AccessibilityRole,
         AccessibilityChildren
     );

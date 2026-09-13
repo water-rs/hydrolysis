@@ -311,6 +311,9 @@ impl HydrolysisRenderer {
             {
                 node.set_label(label);
             }
+            if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+                node.set_value(value);
+            }
             node.add_action(AccessibilityAction::Focus);
             let action_target = if disabled {
                 node.set_disabled();

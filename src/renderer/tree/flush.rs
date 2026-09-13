@@ -268,12 +268,23 @@ impl RenderNode {
                 renderer.pop_accessibility_owner();
             }
             RenderNode::SceneView(node) => {
-                // The drawing's own name, read every flush: content that follows
-                // a signal answers with what it currently draws.
-                let content_label = node.content.borrow().accessibility_label();
+                // The drawing's own name and what it says, read every flush:
+                // content that follows a signal answers with what it currently
+                // draws. The value is a channel beside the name, so an
+                // application label cannot silence it.
+                let (content_label, content_value) = {
+                    let content = node.content.borrow();
+                    (content.accessibility_label(), content.accessibility_value())
+                };
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, ctx, env, content_label);
+                emit_graphics_image_accessibility(
+                    renderer,
+                    ctx,
+                    env,
+                    content_label,
+                    content_value,
+                );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 let mut scene = vello::Scene::new();
@@ -302,7 +313,23 @@ impl RenderNode {
             RenderNode::GpuSurface(node) => {
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, ctx, env, None);
+                // What the embedded GPU view names itself and says about
+                // itself — `None` while its asynchronous setup still owns the
+                // surface, exactly like the FFI hosts' accessor contract.
+                let (content_label, content_value) = {
+                    let runtime = node.runtime.borrow();
+                    (
+                        runtime.accessibility_label(),
+                        runtime.accessibility_value(),
+                    )
+                };
+                emit_graphics_image_accessibility(
+                    renderer,
+                    ctx,
+                    env,
+                    content_label,
+                    content_value,
+                );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 node.flush(renderer, ctx);

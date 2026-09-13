@@ -836,13 +836,20 @@ impl TextNode {
         }
         let plain = styled.to_semantic().to_string();
         let default_label = (!plain.is_empty()).then_some(plain);
-        let Some(label) = renderer.resolve_accessibility_label(env, default_label) else {
+        let label = renderer.resolve_accessibility_label(env, default_label);
+        let value = renderer.resolve_accessibility_value(env, None);
+        if label.is_none() && value.is_none() {
             return;
-        };
+        }
         let mut node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
         );
-        node.set_label(label);
+        if let Some(label) = label {
+            node.set_label(label);
+        }
+        if let Some(value) = value {
+            node.set_value(value);
+        }
         let _ = renderer.register_accessibility_node(
             node,
             transformed_rect(ctx.hit_transform, ctx.bounds),
@@ -868,21 +875,27 @@ impl TextNode {
 
 /// Emit an `Image`-role accessibility node for a self-drawn graphics leaf
 /// (`Canvas`/`SceneView`, `GpuSurface`, shapes/gradients) at its bounds, reading
-/// the role/label scoped into `env` by any `.a11y_role()` / `.a11y_label()`
-/// wrappers. These leaves draw their own pixels, so the node tree is the only place
-/// their semantic node can be emitted — mirroring `TextNode::emit_accessibility`
-/// for the text leaf. Suppressed when the subtree is accessibility-hidden.
+/// the role/label/value scoped into `env` by any `.a11y_role()` /
+/// `.a11y_label()` / `.a11y_value()` wrappers. These leaves draw their own
+/// pixels, so the node tree is the only place their semantic node can be
+/// emitted — mirroring `TextNode::emit_accessibility` for the text leaf.
+/// Suppressed when the subtree is accessibility-hidden.
 ///
-/// `default_label` is what the drawing says about itself
-/// ([`SceneContent::accessibility_label`](waterui_graphics::SceneContent::accessibility_label)):
-/// a formula's `MathML`, say. It names the node only when the application named
-/// nothing, so `.a11y_label(…)` still wins.
+/// `default_label` is the name the drawing offers and `default_value` is what
+/// it says about itself
+/// ([`SceneContent::accessibility_label`](waterui_graphics::SceneContent::accessibility_label)
+/// and
+/// [`SceneContent::accessibility_value`](waterui_graphics::SceneContent::accessibility_value)):
+/// a formula's spoken mathematics, say. They fill in only where the
+/// application supplied neither, so `.a11y_label(…)` and `.a11y_value(…)`
+/// still win.
 #[cfg(feature = "accessibility")]
 pub(super) fn emit_graphics_image_accessibility(
     renderer: &mut HydrolysisRenderer,
     ctx: RenderContext,
     env: &Environment,
     default_label: Option<String>,
+    default_value: Option<String>,
 ) {
     if env
         .get::<AccessibilityHidden>()
@@ -895,6 +908,9 @@ pub(super) fn emit_graphics_image_accessibility(
     );
     if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
         node.set_label(label);
+    }
+    if let Some(value) = renderer.resolve_accessibility_value(env, default_value) {
+        node.set_value(value);
     }
     let _ = renderer.register_accessibility_node(
         node,
@@ -910,5 +926,6 @@ pub(super) fn emit_graphics_image_accessibility(
     _ctx: RenderContext,
     _env: &Environment,
     _default_label: Option<String>,
+    _default_value: Option<String>,
 ) {
 }

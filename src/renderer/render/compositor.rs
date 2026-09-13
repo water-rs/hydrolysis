@@ -766,6 +766,27 @@ impl EmbeddedGpuSurfaceRuntime {
         self.surface.as_ref().and_then(GpuSurface::ime_caret)
     }
 
+    /// What the embedded GPU view names itself, for a screen reader.
+    ///
+    /// `None` while the renderer's asynchronous setup still owns the surface —
+    /// the same window the FFI backends' accessor reports as the empty answer.
+    pub(crate) fn accessibility_label(&self) -> Option<String> {
+        self.surface
+            .as_ref()
+            .and_then(GpuSurface::accessibility_label)
+    }
+
+    /// What the embedded GPU view says about itself, for a screen reader.
+    ///
+    /// The value channel's counterpart to [`Self::accessibility_label`]: the
+    /// content's own semantic payload, published beside whatever the surface is
+    /// named. `None` while the asynchronous setup still owns the surface.
+    pub(crate) fn accessibility_value(&self) -> Option<String> {
+        self.surface
+            .as_ref()
+            .and_then(GpuSurface::accessibility_value)
+    }
+
     pub(crate) fn handle_trackpad_pan(&mut self, dx: f32, dy: f32, phase: TouchPhase) -> bool {
         match phase {
             TouchPhase::Started => {

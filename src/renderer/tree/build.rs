@@ -182,6 +182,13 @@ impl RenderNode {
             Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
             Err(view) => view,
         };
+        // `.a11y_value(..)` is naming metadata like the label: the node that
+        // represents the wrapped view owns the semantic payload — once — and a
+        // container that no control spoke for synthesizes the node carrying it.
+        let view = match view.downcast::<IgnorableMetadata<AccessibilityValue>>() {
+            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
+            Err(view) => view,
+        };
         let view = match view.downcast::<IgnorableMetadata<AccessibilityIdentifier>>() {
             Ok(meta) => {
                 let IgnorableMetadata { content, value } = *meta;

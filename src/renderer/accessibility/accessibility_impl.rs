@@ -427,6 +427,7 @@ impl AccessibilityBuilder {
             return;
         };
         let label = container.label().map(str::to_owned);
+        let value = container.value().map(str::to_owned);
         let author_id = container.author_id().map(str::to_owned);
         let role = container.role();
         let bounds = container.bounds();
@@ -437,6 +438,9 @@ impl AccessibilityBuilder {
             .expect("hydrolysis accessibility container child is not registered");
         if let Some(label) = label {
             child.set_label(label);
+        }
+        if let Some(value) = value {
+            child.set_value(value);
         }
         // The scope's automation id was claimed by the container, so it would
         // vanish with it. A child that carries its own id keeps it, matching
@@ -533,10 +537,13 @@ impl AccessibilityContainerScope {
 /// once for the bar.
 #[cfg(feature = "accessibility")]
 pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Option<Environment> {
-    // A role or a label names the container. Identifier/hidden/state metadata are
-    // subtree-scoped and name nothing on their own, so they never make a bare
-    // container into a semantic node.
-    if env.get::<AccessibilityRole>().is_none() && env.get::<AccessibilityLabel>().is_none() {
+    // A role, a label, or a value names the container. Identifier/hidden/state
+    // metadata are subtree-scoped and name nothing on their own, so they never
+    // make a bare container into a semantic node.
+    if env.get::<AccessibilityRole>().is_none()
+        && env.get::<AccessibilityLabel>().is_none()
+        && env.get::<AccessibilityValue>().is_none()
+    {
         return None;
     }
 
@@ -544,6 +551,7 @@ pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Op
     child_env.remove::<ScopedAccessibilitySemantics>();
     child_env.remove::<ScopedAccessibilityIdentifier>();
     child_env.remove::<AccessibilityLabel>();
+    child_env.remove::<AccessibilityValue>();
     child_env.remove::<AccessibilityRole>();
     child_env.remove::<AccessibilityHidden>();
     child_env.remove::<AccessibilityChildren>();
@@ -789,7 +797,7 @@ impl HydrolysisRenderer {
     ) -> AccessibilityContainerScope {
         debug_assert!(
             accessibility_container_child_environment(env).is_some(),
-            "hydrolysis accessibility container scope requires a role or a label"
+            "hydrolysis accessibility container scope requires a role, a label, or a value"
         );
 
         if env
@@ -817,6 +825,9 @@ impl HydrolysisRenderer {
         );
         if let Some(label) = self.resolve_accessibility_label(env, None) {
             node.set_label(label);
+        }
+        if let Some(value) = self.resolve_accessibility_value(env, None) {
+            node.set_value(value);
         }
         let state_hidden = env
             .get::<AccessibilityStateSignal>()
@@ -1055,6 +1066,27 @@ impl HydrolysisRenderer {
         signal
             .map(|signal| self.read_signal(&signal).as_str().to_owned())
             .or(default_label)
+    }
+
+    /// Resolves the accessibility value `env` scopes onto the emitting node,
+    /// falling back to `default_value` — what the node's own content says —
+    /// when the application published none.
+    ///
+    /// Same contract as [`Self::resolve_accessibility_label`]: reading the
+    /// value through `read_signal` subscribes it, so a reactive value
+    /// republishes without a subtree rebuild.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn resolve_accessibility_value(
+        &mut self,
+        env: &Environment,
+        default_value: Option<String>,
+    ) -> Option<String> {
+        let signal = env
+            .get::<AccessibilityValue>()
+            .map(|value| value.signal().clone());
+        signal
+            .map(|signal| self.read_signal(&signal).as_str().to_owned())
+            .or(default_value)
     }
 
     #[cfg(feature = "accessibility")]
