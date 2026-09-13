@@ -1,8 +1,10 @@
+pub(crate) mod webview;
+
+#[cfg(hydrolysis_macos_system_webview)]
 use waterui_core::Environment;
 
+#[cfg(hydrolysis_macos_system_webview)]
 use crate::renderer::WidgetRenderContext;
-
-pub(crate) mod webview;
 
 /// Publishes the accessibility node for a component whose content is web page
 /// content.
@@ -13,6 +15,7 @@ pub(crate) mod webview;
 /// `WebView` and `ChromiumView` alike — because the node they owe the tree is
 /// the same one: the role (a group unless `a11y_role` overrides it), the label
 /// from `a11y_label`, and the bounds.
+#[cfg(hydrolysis_macos_system_webview)]
 pub(crate) fn register_web_surface_accessibility(
     ctx: &mut WidgetRenderContext<'_>,
     env: &Environment,
