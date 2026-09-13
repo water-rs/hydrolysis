@@ -309,17 +309,18 @@ pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -
     }
 }
 
+/// Runs one frame and reports whether it was presented to the surface — an
+/// idle frame, or one whose surface had to be reconfigured, is not.
 pub(super) fn render_window<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     drain_local_tasks: &mut dyn FnMut() -> bool,
-) {
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
+) -> bool {
     let result = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
-    let _ = (result.rebuilt, result.snapshot, result.profile);
+    // The rebuild flag and the snapshot belong to the headless harness; a live
+    // window only asks whether the frame reached its surface.
+    let _ = (result.rebuilt, result.snapshot);
+    result.profile.counters.rendered
 }
 
 pub(super) const fn surface_error_requires_reconfigure(

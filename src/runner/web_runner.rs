@@ -96,12 +96,18 @@ async fn load_web_fonts() -> parley::FontContext {
         panic!("hydrolysis web font manifest parse failed for `{WEB_FONT_MANIFEST_PATH}`: {error}")
     });
 
+    // Every font file is in flight at once; registration order follows the
+    // manifest so the collection is the same as a serial load would build.
+    let font_files = futures::future::join_all(manifest.fonts.iter().map(|font| {
+        let font_path = format!("fonts/{}", font.file_name);
+        async move { fetch_bytes(&font_path).await }
+    }))
+    .await;
+
     let mut default_family_ids = Vec::new();
     let mut resource_fonts = ResourceFontFamilies::default();
     let mut font_cx = parley::FontContext::new();
-    for font in manifest.fonts {
-        let font_path = format!("fonts/{}", font.file_name);
-        let font_data = fetch_bytes(&font_path).await;
+    for (font, font_data) in manifest.fonts.iter().zip(font_files) {
         let families = font_cx.collection.register_fonts(
             Blob::new(Arc::new(font_data)),
             Some(FontInfoOverride {
@@ -158,6 +164,9 @@ struct BrowserRunner {
     runnable_queue: Rc<RefCell<VecDeque<Runnable>>>,
     accessibility_actions: Rc<RefCell<VecDeque<AccessibilityActionRequest>>>,
     accessibility_bridge: WebAccessibilityBridge,
+    /// Whether the page has been told its first frame is up, which ends the
+    /// launch screen the page shows until then.
+    first_frame_announced: bool,
 }
 
 impl BrowserRunner {
@@ -190,9 +199,13 @@ impl BrowserRunner {
             return false;
         }
         let _ = advance_runtime(&mut self.runtime, &self.env, Instant::now());
-        render_window(&mut self.runtime, &self.env, &mut || {
+        let presented = render_window(&mut self.runtime, &self.env, &mut || {
             Self::drain_runnable_queue(&self.runnable_queue)
         });
+        if presented && !self.first_frame_announced {
+            self.first_frame_announced = true;
+            self.runtime.platform.announce_first_frame();
+        }
         if let Some(update) = self.runtime.renderer.take_accessibility_tree_update() {
             self.accessibility_bridge.update(update);
         }
@@ -292,17 +305,21 @@ pub fn run(app: App) {
             crate::view_renderer::HydrolysisViewRenderer::default(),
         ));
 
-        let mut platform = BrowserWindow::new(Rc::clone(&browser_schedule)).await;
+        // The application's fonts are fetched while the GPU adapter and device
+        // are requested; neither waits on the other. The window's renderer is
+        // seeded from the collection, and a self-drawn component that typesets
+        // text itself reads it out of the environment instead of building a
+        // collection of its own.
+        let (mut platform, font_cx) = futures::join!(
+            BrowserWindow::new(Rc::clone(&browser_schedule)),
+            load_web_fonts()
+        );
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
             HydrolysisRenderer::new(surface.adapter(), surface.device())
         };
-        // The application's fonts, fetched once. The window's renderer is
-        // seeded from this collection, and a self-drawn component that typesets
-        // text itself reads it out of the environment instead of building a
-        // collection of its own.
-        let fonts = FontCollection::new(load_web_fonts().await);
+        let fonts = FontCollection::new(font_cx);
         fonts.clone().install(&mut env);
         super::fonts::seed_renderer(&mut renderer, &fonts);
         let runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);
@@ -315,6 +332,7 @@ pub fn run(app: App) {
             runnable_queue,
             accessibility_actions,
             accessibility_bridge,
+            first_frame_announced: false,
         };
 
         let handle = Rc::new(BrowserRunnerHandle {
