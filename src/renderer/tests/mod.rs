@@ -16,7 +16,7 @@ mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
 mod tree;
-use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii};
+use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii, Vec2};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
@@ -1639,6 +1639,15 @@ impl DrawContext for NoopDrawContext {
     fn fill_circle(&mut self, _center: Point, _radius: f64, _brush: &Brush) {}
     fn fill_path(&mut self, _path: &BezPath, _brush: &Brush) {}
     fn stroke_path(&mut self, _path: &BezPath, _brush: &Brush, _width: f64) {}
+    fn draw_shadow(
+        &mut self,
+        _rect: Rect,
+        _radii: RoundedRectRadii,
+        _offset: Vec2,
+        _blur: f64,
+        _color: vello::peniko::Color,
+    ) {
+    }
     fn push_layer(&mut self, _alpha: f32, _clip: Option<&Rect>) {}
     fn pop_layer(&mut self) {}
     fn push_transform(&mut self, _affine: Affine) {}
