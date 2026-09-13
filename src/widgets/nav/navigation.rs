@@ -207,6 +207,9 @@ pub(crate) fn navigation_view_accessibility(
         if let Some(label) = bar_label {
             bar_node.set_label(label);
         }
+        if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+            bar_node.set_value(value);
+        }
         let title_height = if matches!(display_mode, NavigationTitleDisplayMode::Large) {
             metrics.large_title_height
         } else {

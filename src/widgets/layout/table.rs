@@ -195,6 +195,9 @@ pub(crate) fn table_accessibility(
         if let Some(label) = table_label {
             table_node.set_label(label);
         }
+        if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+            table_node.set_value(value);
+        }
         table_node.set_scroll_x(scroll_metrics.offset_x);
         table_node.set_scroll_x_min(0.0);
         table_node.set_scroll_x_max(scroll_metrics.max_x);

@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use nami::{Signal as _, SignalExt};
 use waterui::ViewExt as _;
-use waterui::accessibility::{AccessibilityLabel, AccessibilityRole};
+use waterui::accessibility::{AccessibilityLabel, AccessibilityRole, AccessibilityValue};
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native};
 use waterui_graphics::Gradient;
@@ -24,6 +24,13 @@ fn map_surface_label(env: &Environment) -> String {
     env.get::<AccessibilityLabel>()
         .map(|label| label.signal().get().as_str().to_owned())
         .unwrap_or_else(|| String::from("Map viewport"))
+}
+
+/// What the application says the map's semantic payload is — `None` when it
+/// published none, so the surface emits no value rather than an empty one.
+fn map_surface_value(env: &Environment) -> Option<String> {
+    env.get::<AccessibilityValue>()
+        .map(|value| value.signal().get().as_str().to_owned())
 }
 
 fn map_style_name(style: MapStyle) -> &'static str {
@@ -64,7 +71,12 @@ fn annotation_list_text(annotations: Vec<Annotation>) -> String {
     format!("Annotations: {joined}")
 }
 
-fn map_content(config: &MapConfig, surface_label: &str, env: &Environment) -> AnyView {
+fn map_content(
+    config: &MapConfig,
+    surface_label: &str,
+    surface_value: Option<&str>,
+    env: &Environment,
+) -> AnyView {
     let style = map_style_name(config.style);
     let shows_location = if config.user_location_visibility.is_visible() {
         "User location on"
@@ -99,22 +111,31 @@ fn map_content(config: &MapConfig, surface_label: &str, env: &Environment) -> An
     );
     let annotation_list = Text::display(config.annotations.clone().map(annotation_list_text));
 
+    let surface = Gradient::linear(
+        vec![
+            (0.0, Srgb::new(0.10, 0.42, 0.72).resolve()),
+            (0.5, Srgb::new(0.19, 0.60, 0.35).resolve()),
+            (1.0, Srgb::new(0.85, 0.91, 0.95).resolve()),
+        ],
+        [0.0, 0.0],
+        [1.0, 1.0],
+    )
+    .height(MAP_SURFACE_HEIGHT)
+    .a11y_role(AccessibilityRole::Image)
+    .a11y_label(surface_label.to_owned());
+    // The application's value belongs on the same node the name landed on —
+    // it is applied to the surface explicitly because `map_render_env` strips
+    // it for the interior texts, mirroring the label channel.
+    let surface = match surface_value {
+        Some(value) => AnyView::new(surface.a11y_value(value.to_owned())),
+        None => AnyView::new(surface),
+    };
+
     normalize_view_for_render(
         AnyView::new(
             vstack((
                 zstack((
-                    Gradient::linear(
-                        vec![
-                            (0.0, Srgb::new(0.10, 0.42, 0.72).resolve()),
-                            (0.5, Srgb::new(0.19, 0.60, 0.35).resolve()),
-                            (1.0, Srgb::new(0.85, 0.91, 0.95).resolve()),
-                        ],
-                        [0.0, 0.0],
-                        [1.0, 1.0],
-                    )
-                    .height(MAP_SURFACE_HEIGHT)
-                    .a11y_role(AccessibilityRole::Image)
-                    .a11y_label(surface_label.to_owned()),
+                    surface,
                     vstack((
                         Text::new(style),
                         Text::new(interactivity),
@@ -134,12 +155,14 @@ fn map_content(config: &MapConfig, surface_label: &str, env: &Environment) -> An
     )
 }
 
-/// Environment with the map's own accessibility label/role removed, so the inner
-/// content's render-driven a11y emits the surface label rather than inheriting the
-/// outer wrapper's. The map a11y is render-driven, so the inner content owns it.
+/// Environment with the map's own accessibility label/role/value removed, so the
+/// inner content's render-driven a11y emits the surface label rather than
+/// inheriting the outer wrapper's. The map a11y is render-driven, so the inner
+/// content owns it.
 fn map_render_env(env: &Environment) -> Environment {
     let mut render_env = env.clone();
     render_env.remove::<AccessibilityLabel>();
+    render_env.remove::<AccessibilityValue>();
     render_env.remove::<AccessibilityRole>();
     render_env
 }
@@ -162,7 +185,8 @@ impl MapRenderState {
     pub(crate) fn from_config(config: MapConfig, env: &Environment) -> Self {
         let render_env = map_render_env(env);
         let surface_label = map_surface_label(env);
-        let content = map_content(&config, &surface_label, &render_env);
+        let surface_value = map_surface_value(env);
+        let content = map_content(&config, &surface_label, surface_value.as_deref(), &render_env);
         Self {
             render_env,
             content: RetainedSubview::new(content),
@@ -182,8 +206,14 @@ impl HydroNativeView for Native<MapConfig> {
     fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
         let render_env = map_render_env(env);
         let surface_label = map_surface_label(env);
+        let surface_value = map_surface_value(env);
         measure_transient_view_intrinsic(
-            &map_content(view.as_inner(), &surface_label, &render_env),
+            &map_content(
+                view.as_inner(),
+                &surface_label,
+                surface_value.as_deref(),
+                &render_env,
+            ),
             state,
             &render_env,
         )
@@ -197,8 +227,14 @@ impl HydroNativeView for Native<MapConfig> {
     ) -> ViewDimensions {
         let render_env = map_render_env(env);
         let surface_label = map_surface_label(env);
+        let surface_value = map_surface_value(env);
         measure_view_dimensions_with_proposal(
-            &map_content(view.as_inner(), &surface_label, &render_env),
+            &map_content(
+                view.as_inner(),
+                &surface_label,
+                surface_value.as_deref(),
+                &render_env,
+            ),
             proposal,
             state,
             &render_env,

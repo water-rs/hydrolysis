@@ -77,6 +77,9 @@ pub(crate) fn toggle_accessibility(
         if let Some(label) = label {
             node.set_label(label);
         }
+        if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+            node.set_value(value);
+        }
         let checked = renderer.read_signal(&toggle.toggle);
         node.set_toggled(AccessibilityToggled::from(checked));
         node.add_action(AccessibilityAction::Focus);

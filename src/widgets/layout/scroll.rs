@@ -48,6 +48,9 @@ pub(crate) fn register_scroll_accessibility_node(
     if let Some(label) = label {
         node.set_label(label);
     }
+    if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+        node.set_value(value);
+    }
     node.set_scroll_x(metrics.offset_x);
     node.set_scroll_x_min(0.0);
     node.set_scroll_x_max(metrics.max_x);

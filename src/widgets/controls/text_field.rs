@@ -201,7 +201,12 @@ pub(crate) fn render_text_field_parts(
         if !prompt.is_empty() {
             node.set_placeholder(prompt);
         }
-        if !value.is_empty() {
+        // The field's own text is the default value; an explicit
+        // `.a11y_value` wins the same way `.a11y_label` wins the name.
+        if let Some(value) = ctx
+            .renderer_mut()
+            .resolve_accessibility_value(env, (!value.is_empty()).then_some(value))
+        {
             node.set_value(value);
         }
         if disabled {
@@ -489,7 +494,12 @@ pub(crate) fn render_secure_field_parts(
         if let Some(label) = label {
             node.set_label(label);
         }
-        node.set_value("*".repeat(secure_len));
+        if let Some(value) = ctx
+            .renderer_mut()
+            .resolve_accessibility_value(env, Some("*".repeat(secure_len)))
+        {
+            node.set_value(value);
+        }
         if disabled {
             node.set_disabled();
         } else {

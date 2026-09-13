@@ -632,6 +632,9 @@ pub(crate) fn list_accessibility(
         if let Some(label) = list_label {
             list_node.set_label(label);
         }
+        if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+            list_node.set_value(value);
+        }
         list_node.set_scroll_y(metrics.offset_y);
         list_node.set_scroll_y_min(0.0);
         list_node.set_scroll_y_max(metrics.max_y);
