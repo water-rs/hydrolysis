@@ -7,8 +7,8 @@ that reaches the backend without a realization — e.g. `Native<MapConfig>`
 because no `Hook<MapConfig>` (such as `waterui_map_gpu::install`) was
 installed — is a programmer error and must panic at the earliest point it is
 seen (measure or node build) with a message naming the missing piece and how to
-install it. See `unsupported_system_icon` and `unsupported_map` in
-`src/renderer/native_measure.rs` for the pattern.
+install it. See `unsupported_system_icon`, `unsupported_map`, and
+`unsupported_webview` in `src/renderer/native_measure.rs` for the pattern.
 
 Do not add gradient/color/mock substitutes, silent no-ops, or fallback
 renderings for unsupported primitives — a stand-in that merely *looks* like the

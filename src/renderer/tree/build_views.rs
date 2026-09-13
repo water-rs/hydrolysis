@@ -52,6 +52,7 @@ impl_widget_behavior!(
     crate::renderer::render_morph_shape_node,
     crate::renderer::measure_morph_shape_node
 );
+#[cfg(hydrolysis_macos_system_webview)]
 impl_widget_behavior!(
     crate::widgets::platform::webview::WebViewRenderState,
     crate::widgets::platform::webview::render_webview_node,
@@ -214,13 +215,10 @@ impl RenderNode {
         Self::build_widget(shape, stretch, env)
     }
 
-    /// Build a persistent webview node: the webview is a Rust-side composer whose
-    /// content (`vstack` of a gradient surface + reactive status/navigation `Text`s)
-    /// is built once into a [`RetainedSubview`] and re-flushed each frame. The
-    /// `event`/`can_go_back`/`can_go_forward` reactivity is carried by the inner
-    /// `Text` nodes, which become live `Dynamic`/`Text` nodes, so a navigation or load
-    /// event updates without rebuilding the node. A11y is render-driven (the inner
-    /// content's own dispatch emits it). Stretches to fill the proposal.
+    /// Build a persistent webview node for the platform bridge: retain the
+    /// semantic `WebView` and its `MacSystemWebViewHandle` so the AppKit view
+    /// host keeps drawing it across flushes. Stretches to fill the proposal.
+    #[cfg(hydrolysis_macos_system_webview)]
     pub(super) fn build_webview(
         webview: WebView,
         env: &Environment,
@@ -232,6 +230,17 @@ impl RenderNode {
         state.prebuild(renderer, env);
         let state = Rc::new(RefCell::new(state));
         Self::build_widget(state, stretch, env)
+    }
+
+    /// Without the platform bridge a `WebView` reaching the backend has no
+    /// engine to draw it — a missing realization, not a drawable stand-in.
+    #[cfg(not(hydrolysis_macos_system_webview))]
+    pub(super) fn build_webview(
+        _webview: WebView,
+        _env: &Environment,
+        _renderer: &mut HydrolysisRenderer,
+    ) -> RenderNode {
+        unsupported_webview()
     }
 
     /// Build a persistent spacer node: a no-op render with zero intrinsic; it
