@@ -1111,6 +1111,7 @@ fn accessibility_role_to_accesskit_role(role: AccessibilityRole) -> Accessibilit
         AccessibilityRole::Combobox => AccessibilityNodeRole::ComboBox,
         AccessibilityRole::Option => AccessibilityNodeRole::ListBoxOption,
         AccessibilityRole::Group => AccessibilityNodeRole::Group,
+        AccessibilityRole::Dialog => AccessibilityNodeRole::Dialog,
         _ => panic!("hydrolysis accessibility role variant is not implemented"),
     }
 }
