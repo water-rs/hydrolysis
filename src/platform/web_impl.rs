@@ -212,6 +212,19 @@ impl BrowserWindow {
         }
     }
 
+    /// Tells the page that the first frame is on the canvas, as a bubbling
+    /// `waterui:first-frame` event: the page's launch screen listens for it and
+    /// stands down.
+    pub(crate) fn announce_first_frame(&self) {
+        let init = web_sys::CustomEventInit::new();
+        init.set_bubbles(true);
+        let event = web_sys::CustomEvent::new_with_event_init_dict("waterui:first-frame", &init)
+            .expect("hydrolysis web platform: failed to build the first-frame event");
+        self.canvas
+            .dispatch_event(&event)
+            .expect("hydrolysis web platform: failed to dispatch the first-frame event");
+    }
+
     pub fn take_redraw_request(&self) -> bool {
         self.redraw_requested.replace(false)
     }
