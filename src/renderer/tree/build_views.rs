@@ -1,5 +1,5 @@
 //! Builders for structured and visual views (list, table, navigation, tabs,
-//! icon, gradient, shapes, map, webview, spacer, divider, plain text).
+//! icon, gradient, shapes, webview, spacer, divider, plain text).
 
 use super::*;
 
@@ -51,11 +51,6 @@ impl_widget_behavior!(
     ResolvedMorphShape,
     crate::renderer::render_morph_shape_node,
     crate::renderer::measure_morph_shape_node
-);
-impl_widget_behavior!(
-    crate::widgets::visual::map::MapRenderState,
-    crate::widgets::visual::map::render_map_node,
-    crate::widgets::visual::map::measure_map_node
 );
 impl_widget_behavior!(
     crate::widgets::platform::webview::WebViewRenderState,
@@ -217,27 +212,6 @@ impl RenderNode {
         let stretch = waterui_core::NativeView::stretch_axis(&shape);
         let shape = Rc::new(RefCell::new(shape));
         Self::build_widget(shape, stretch, env)
-    }
-
-    /// Build a persistent map node: the map is a Rust-side composer whose content
-    /// (`vstack` of a gradient surface + reactive region/annotation `Text`s) is
-    /// built once into a [`RetainedSubview`] and re-flushed at the node's bounds each
-    /// frame. Region/annotation reactivity is carried by the inner `Text` nodes
-    /// (`config.region.map(...)`), which become live `Dynamic`/`Text` nodes inside the
-    /// sub-view, so a region or annotation change updates without rebuilding the node.
-    /// A11y is render-driven (the inner content's own dispatch emits it). Stretches to
-    /// fill the proposal (`StretchAxis::Both`, read from the config).
-    pub(super) fn build_map(
-        config: MapConfig,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
-        use crate::widgets::visual::map::MapRenderState;
-        let stretch = waterui_core::NativeView::stretch_axis(&config);
-        let mut state = MapRenderState::from_config(config, env);
-        state.prebuild(renderer, env);
-        let state = Rc::new(RefCell::new(state));
-        Self::build_widget(state, stretch, env)
     }
 
     /// Build a persistent webview node: the webview is a Rust-side composer whose

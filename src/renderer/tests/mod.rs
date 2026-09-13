@@ -972,11 +972,15 @@ fn container_label_without_role_names_the_container_only() {
 #[cfg(feature = "accessibility")]
 #[test]
 fn a_label_survives_the_environment_snapshot_a_view_hook_takes() {
-    use waterui_core::{AnyView, Native};
+    use waterui_core::AnyView;
     use waterui_map::{Coordinate, Map, MapConfig, Region};
 
     let mut env = test_environment();
-    env.insert_hook::<MapConfig, AnyView>(|_env, config| AnyView::new(Native::new(config)));
+    // The hooked body stands in for a real map realization — `Native<MapConfig>`
+    // is unreachable because the backend has no map engine and panics on it.
+    env.insert_hook::<MapConfig, AnyView>(|_env, _config| {
+        AnyView::new(text("map").a11y_role(AccessibilityRole::Image))
+    });
     let mut renderer = test_renderer();
     // The frame matters: a layout container normalizes its children, and it is
     // normalization that resolves the hooked body — one level above the naming

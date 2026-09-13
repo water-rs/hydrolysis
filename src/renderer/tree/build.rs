@@ -620,7 +620,7 @@ impl RenderNode {
             Err(view) => view,
         };
         let view = match view.downcast::<Native<MapConfig>>() {
-            Ok(map) => return RenderNode::build_map((*map).into_inner(), env, renderer),
+            Ok(_) => unsupported_map(),
             Err(view) => view,
         };
         // This backend bridges the platform's own web engine, and it only wins
