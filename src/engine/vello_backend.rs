@@ -1,6 +1,6 @@
 use super::{Brush, DrawContext};
 use vello::kurbo::{
-    Affine, BezPath, Circle, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape,
+    Affine, BezPath, Circle, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Vec2,
 };
 
 pub struct VelloDrawContext<'a> {
@@ -107,6 +107,26 @@ impl DrawContext for VelloDrawContext<'_> {
 
     fn stroke_path(&mut self, path: &BezPath, brush: &Brush, width: f64) {
         self.stroke_shape(path, brush, width);
+    }
+
+    fn draw_shadow(
+        &mut self,
+        rect: Rect,
+        radii: RoundedRectRadii,
+        offset: Vec2,
+        blur: f64,
+        color: vello::peniko::Color,
+    ) {
+        let radius = radii
+            .as_single_radius()
+            .expect("vello blurred shadows require uniform corner radii");
+        self.scene.draw_blurred_rounded_rect(
+            self.transform(),
+            rect + offset,
+            color,
+            radius,
+            blur.max(0.0),
+        );
     }
 
     fn push_layer(&mut self, alpha: f32, clip: Option<&Rect>) {
