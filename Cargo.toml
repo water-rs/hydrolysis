@@ -163,7 +163,7 @@ web-sys = { version = "0.3", optional = true, features = [
 # is what keeps that resolution honest.
 waterui-canvas = "0.1.2"
 # The wayland examples need a widget theme; m3 is independently maintained.
-hydrolysis-m3 = "0.1.1"
+hydrolysis-m3 = "0.2.1"
 waterui-testing = "0.4.0"
 waterui-navigation = "0.3.1"
 jiff = { version = "0.2", features = ["serde"] }
@@ -229,6 +229,12 @@ glifo = { git = "https://github.com/lexoliu/vello", rev = "d68d9e9825bcd1ffee762
 # the registry would link two `hydrolysis` copies and render through a
 # different one than it builds. Redirect the registry copy at this crate.
 hydrolysis = { path = "." }
+
+# The registry `hydrolysis-m3` still reads the normalized `clip_radius` fields
+# the waterui branch below removes; the companion branch migrated to the
+# fixed-radius shapes this backend resolves. Drop this entry once a release
+# carries the migration.
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "260f1eafe8bf86f2a4d611ada2ca342cbc15dfaf" }
 
 # The absolute-radius `ShapeKind` variants this branch resolves ship with the
 # next `waterui-shape` release (water-rs/waterui#617); until it lands on
