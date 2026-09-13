@@ -5,33 +5,13 @@ use waterui::{
     color::{ResolvedColor, Srgb},
     theme::{ColorScheme, ColorSettings, FontSettings, Theme},
 };
-use waterui_core::{AnyView, Native};
-use waterui_map::MapConfig;
 
 fn color(rgb: u32) -> ResolvedColor {
     ResolvedColor::from_srgb(Srgb::from_u32(rgb))
 }
 
-/// Declares Hydrolysis's own semantic map as the test platform's map bridge.
-///
-/// `waterui_map_gpu::install` gives way to a backend that already registered a
-/// map bridge, and Hydrolysis is such a backend: it renders `Native<MapConfig>`
-/// itself, with the accessibility surface the semantic tests assert on.
-/// Registering that bridge here says so through the public mechanism — before a
-/// test installs any realization — where a marker type on the config used to
-/// say it.
-///
-/// Without this, a test binary that installs the GPU map gets that realization
-/// over Hydrolysis's, and every map test then dies on the `MapGpuOptions` an
-/// application, not a harness, is supposed to supply.
-fn install_map_bridge(env: &mut Environment) {
-    env.insert_hook::<MapConfig, AnyView>(|_env, config| AnyView::new(Native::new(config)));
-}
-
-/// Installs every theme token required by Hydrolysis rendering, and the
-/// component bridges the backend realizes natively.
+/// Installs every theme token required by Hydrolysis rendering.
 pub fn install_theme(env: &mut Environment) {
-    install_map_bridge(env);
     Theme::new()
         .color_scheme(ColorScheme::Light)
         .colors(

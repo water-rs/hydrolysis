@@ -33,6 +33,22 @@ impl HydroNativeView for Native<SystemIcon> {
     }
 }
 
+/// Reaching `Native<MapConfig>` means `Map::body` found no `Hook<MapConfig>` —
+/// no map realization was installed — and this backend ships no map engine of
+/// its own.
+pub(crate) fn unsupported_map() -> ! {
+    panic!(
+        "Map is unsupported on Hydrolysis because the backend has no map engine; install a \
+         map realization such as `waterui_map_gpu::install` before rendering a `Map`"
+    )
+}
+
+impl HydroNativeView for Native<MapConfig> {
+    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+        unsupported_map()
+    }
+}
+
 pub(crate) fn dimensions_for_native<V: HydroNativeView>(
     view: &AnyView,
     proposal: ProposalSize,
