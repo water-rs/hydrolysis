@@ -505,17 +505,21 @@ enum RegularClipShape {
 /// circular and a fully-rounded shape is a stadium rather than an ellipse.
 fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
     let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let uniform = |radius: f32| {
-        let corner = f64::from(radius.clamp(0.0, 0.5)) * min_side;
+    let rounded = |corner: f64| {
         Some(RegularClipShape::RoundedRect {
             rect: bounds,
             corner_width: corner,
             corner_height: corner,
         })
     };
+    let uniform = |radius: f32| rounded(f64::from(radius.clamp(0.0, 0.5)) * min_side);
+    // A fixed radius is already a length in points; only the
+    // half-shorter-side ceiling applies.
+    let fixed = |radius: f32| rounded(f64::from(radius.max(0.0)).min(min_side / 2.0));
     match kind {
         ShapeKind::Rect => Some(RegularClipShape::Rect(bounds)),
         ShapeKind::RoundedRect { corner_radius } => uniform(corner_radius),
+        ShapeKind::FixedRoundedRect { corner_radius } => fixed(corner_radius),
         ShapeKind::Capsule => uniform(0.5),
         // A circle is *inscribed* in the bounds, so only a square one is a
         // rounded rect: elsewhere `uniform(0.5)` describes a stadium filling
@@ -528,6 +532,7 @@ fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<Regula
         ShapeKind::Circle
         | ShapeKind::Ellipse
         | ShapeKind::UnevenRoundedRect { .. }
+        | ShapeKind::FixedUnevenRoundedRect { .. }
         | ShapeKind::CustomPath => None,
     }
 }
@@ -577,6 +582,59 @@ mod clip_shape_tests {
             kind_clip_shape(ShapeKind::Capsule, bounds),
             Some(RegularClipShape::RoundedRect { .. })
         ));
+    }
+
+    /// A fixed radius is a length in points: 12 stays 12 on a wide bar, and
+    /// only the half-shorter-side ceiling cuts it down.
+    #[test]
+    fn a_fixed_radius_clips_at_its_own_length_up_to_the_ceiling() {
+        let wide = Rect::new(0.0, 0.0, 200.0, 50.0);
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 12.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 12.0).abs() < f64::EPSILON
+                && (corner_height - 12.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 40.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 25.0).abs() < f64::EPSILON
+                && (corner_height - 25.0).abs() < f64::EPSILON
+        ));
+    }
+
+    /// Per-corner radii cannot be a uniform `RoundedRect` clip.
+    #[test]
+    fn a_fixed_uneven_kind_stays_on_the_path_mask() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert!(
+            kind_clip_shape(
+                ShapeKind::FixedUnevenRoundedRect {
+                    top_left: 0.0,
+                    top_right: 16.0,
+                    bottom_left: 0.0,
+                    bottom_right: 16.0,
+                },
+                bounds
+            )
+            .is_none()
+        );
     }
 }
 

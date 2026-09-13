@@ -2,7 +2,7 @@ use super::*;
 use core::ops::RangeInclusive;
 use core::time::Duration;
 use waterui::form::Calendar;
-use waterui::shape::{RoundedRectangle, ShapeExt as _};
+use waterui::shape::{FixedRoundedRectangle, RoundedRectangle, ShapeExt as _};
 use waterui::theme::color::Surface;
 use waterui_backend_core::widget::PickerMetrics;
 use waterui_controls::label::LabelDisplayMode;
@@ -260,7 +260,7 @@ pub(crate) fn popup_menu_window(
                 .alignment(HorizontalAlignment::Leading)
                 .spacing(0.0)
                 .background(
-                    RoundedRectangle::new((metrics.corner_radius / metrics.min_width) as f32)
+                    FixedRoundedRectangle::new(metrics.corner_radius as f32)
                         .fill(waterui::Color::new(Surface)),
                 ),
             group_for_content.clone(),
@@ -336,7 +336,7 @@ pub(crate) fn picker_menu_window(
                 .alignment(HorizontalAlignment::Leading)
                 .spacing(0.0)
                 .background(
-                    RoundedRectangle::new((metrics.popup_corner_radius / width) as f32)
+                    FixedRoundedRectangle::new(metrics.popup_corner_radius as f32)
                         .fill(Color::new(Surface).with_opacity(0.96)),
                 );
             AnyView::new(animated_popup_panel(panel, group_for_content.clone()))
