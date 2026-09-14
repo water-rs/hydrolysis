@@ -14,7 +14,7 @@ use waterui::graphics::Color;
 use waterui::style::{Shadow, Vector};
 use waterui::{Binding, View, ViewExt as _};
 use waterui_core::handler::AnyViewBuilder;
-use waterui_layout::stack::{hstack, vstack};
+use waterui_layout::padding::{EdgeInsets, Padding};
 use waterui_shape::{FixedRoundedRectangle, ShapeExt as _};
 
 use super::pumped_test_environment;
@@ -26,13 +26,11 @@ const SURFACE_RGB: [u8; 3] = [60, 120, 200];
 /// shadow (blur 1, no offset, corner radius 16).
 fn caster() -> impl View {
     ().size(56.0, 56.0)
-        .background(
-            FixedRoundedRectangle::new(16.0).fill(Color::srgb(
-                SURFACE_RGB[0],
-                SURFACE_RGB[1],
-                SURFACE_RGB[2],
-            )),
-        )
+        .background(FixedRoundedRectangle::new(16.0).fill(Color::srgb(
+            SURFACE_RGB[0],
+            SURFACE_RGB[1],
+            SURFACE_RGB[2],
+        )))
         .shadow(Shadow::new(
             Color::srgb(0, 0, 0),
             Vector::new(0.0, 0.0),
@@ -42,10 +40,9 @@ fn caster() -> impl View {
 }
 
 fn scene() -> impl View {
-    vstack((
-        ().size(120.0, 20.0),
-        hstack((().size(20.0, 56.0), caster())),
-    ))
+    // The padded block fills the 120×120 window exactly, so the caster lands
+    // at (20,20)–(76,76) no matter how the content is distributed.
+    Padding::new(EdgeInsets::new(20.0, 44.0, 20.0, 44.0), caster())
 }
 
 fn pixel(snapshot: &crate::runner::HeadlessSnapshot, x: u32, y: u32) -> [u8; 4] {
@@ -77,13 +74,13 @@ fn shadow_corner_follows_caster_radius() {
         "the surface must paint its top edge; got {edge:?}"
     );
 
-    // The probe sits inside the surface rect but outside its 16px corner arc
-    // ((20+4.24/√2≈23, 23) is 4.24px along the diagonal; the 16px arc begins
-    // covering at 6.6px). The surface is transparent there, so the pixel shows
+    // The probe sits inside the surface rect but well outside its 16px corner
+    // arc: (21,21) is 5.2px beyond the arc's diagonal reach, past the blur's
+    // 2.5σ≈2.5px falloff. The surface is transparent there, so the pixel shows
     // only whatever the shadow paints. With the blur-radius-as-corner-radius
-    // bug the shadow's 1px arc already covers 2.1px in, so the probe lands
-    // deep inside the shadow and darkens to near-black.
-    let notch = pixel(&snapshot, 23, 23);
+    // bug the shadow's nearly-square silhouette still covers the notch and
+    // darkens it to near-black.
+    let notch = pixel(&snapshot, 21, 21);
     let background = pixel(&snapshot, 110, 110);
     let darkening = background[0].abs_diff(notch[0]);
     assert!(
