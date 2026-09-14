@@ -192,7 +192,7 @@ impl HydrolysisRenderer {
             .text_editing
             .active_text_selection_drag
             .as_ref()
-            .is_none_or(|key| self.text_editing.index_of(key).is_some());
+            .is_none_or(|drag| self.text_editing.index_of(&drag.target).is_some());
         if !selection_drag_is_live {
             self.text_editing.active_text_selection_drag = None;
         }

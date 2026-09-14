@@ -723,10 +723,20 @@ impl HydrolysisRenderer {
                 match button {
                     PointerButton::Primary => {
                         let click_count = self.next_text_selection_click_count(index, point, at);
-                        changed |=
-                            self.apply_text_selection_click_gesture(index, point, click_count);
-                        self.text_editing.active_text_selection_drag =
-                            self.text_editing.key_at(index).cloned();
+                        if let Some((anchor, focus, gesture_changed)) =
+                            self.apply_text_selection_click_gesture(index, point, click_count)
+                        {
+                            changed |= gesture_changed;
+                            self.text_editing.active_text_selection_drag =
+                                self.text_editing.key_at(index).cloned().map(|target| {
+                                    ActiveTextSelectionDrag {
+                                        target,
+                                        click_count,
+                                        anchor,
+                                        focus,
+                                    }
+                                });
+                        }
                     }
                     PointerButton::Secondary => {
                         let keep_selection = {
@@ -1002,7 +1012,7 @@ impl HydrolysisRenderer {
         let mut refresh_requested = false;
         let mut drag_changed = false;
         if let Some(index) = self.text_editing.selection_drag_index() {
-            let text_drag_changed = self.update_text_selection_from_pointer(index, point, true);
+            let text_drag_changed = self.update_text_selection_drag(index, point);
             drag_changed |= text_drag_changed;
             refresh_requested |= text_drag_changed;
         }
