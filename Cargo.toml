@@ -249,14 +249,14 @@ hydrolysis = { path = "." }
 # carries the migration.
 hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "749cd3fc61f4b16a9f0f6e1db305154771e64ce9" }
 
-# `AccessibilityRole::Dialog` (water-rs/waterui#627) and
-# `DrawContext::draw_shadow` (water-rs/waterui#628) are merged on the contract
-# branch but not yet released; until releases land on crates.io the framework
-# crates resolve from that rev. Every `waterui-*` member of that repository
-# is pinned to the same revision so the graph carries exactly one copy of
-# each — a registry crate beside its git twin would compile duplicate
-# `View`/`Resolvable` types. Drop the entries and bump the requirements once
-# the releases carry them.
+# `AccessibilityRole::Dialog` (water-rs/waterui#627),
+# `DrawContext::draw_shadow` (water-rs/waterui#628), and `Shadow::corner_radius`
+# (water-rs/waterui#894) are merged on the contract branch but not yet released;
+# until releases land on crates.io the framework crates resolve from that rev.
+# Every `waterui-*` member of that repository is pinned to the same revision so
+# the graph carries exactly one copy of each — a registry crate beside its git
+# twin would compile duplicate `View`/`Resolvable` types. Drop the entries and
+# bump the requirements once the releases carry them.
 waterui = { git = "https://github.com/water-rs/waterui", rev = "7341b54ce6ce09d394600c2d539516be3cde8ac9" }
 waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "7341b54ce6ce09d394600c2d539516be3cde8ac9" }
 waterui-assets-macros = { git = "https://github.com/water-rs/waterui", rev = "7341b54ce6ce09d394600c2d539516be3cde8ac9" }
