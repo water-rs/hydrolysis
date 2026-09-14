@@ -121,9 +121,16 @@ fn themed_test_environment() -> Environment {
     let mut env = Environment::new();
     crate::testing::install_theme(&mut env);
     crate::localization::install(&mut env);
-    env.insert(Box::new(MinimalTestTheme) as Box<dyn WidgetTheme>);
+    let badge_draws = Rc::new(RefCell::new(Vec::new()));
+    env.insert(BadgeDrawLog(Rc::clone(&badge_draws)));
+    env.insert(Box::new(MinimalTestTheme { badge_draws }) as Box<dyn WidgetTheme>);
     env
 }
+
+/// Every badge indicator rect the test theme was asked to draw, in window
+/// coordinates. Tests read it back via `env.get::<BadgeDrawLog>()`.
+#[derive(Clone, Default)]
+pub(crate) struct BadgeDrawLog(pub Rc<RefCell<Vec<Rect>>>);
 
 #[derive(Clone, Copy)]
 struct RecursivelyErasedView;
@@ -1740,7 +1747,10 @@ impl DrawContext for NoopDrawContext {
     fn pop_transform(&mut self) {}
 }
 
-struct MinimalTestTheme;
+#[derive(Default)]
+struct MinimalTestTheme {
+    badge_draws: Rc<RefCell<Vec<Rect>>>,
+}
 
 impl WidgetTheme for MinimalTestTheme {
     fn interaction_motion(&self) -> InteractionMotion {
@@ -2116,9 +2126,9 @@ impl WidgetTheme for MinimalTestTheme {
             large_size: 16.0,
             large_horizontal_padding: 4.0,
             small_offset_x: 6.0,
-            small_offset_y: 4.0,
-            large_offset_x: 2.0,
-            large_offset_y: 1.0,
+            small_offset_y: 6.0,
+            large_offset_x: 12.0,
+            large_offset_y: 14.0,
         }
     }
 
@@ -2130,8 +2140,12 @@ impl WidgetTheme for MinimalTestTheme {
         waterui_text::font::Font::default()
     }
 
-    fn draw_badge_small(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_badge_large(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_badge_small(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+        self.badge_draws.borrow_mut().push(bounds);
+    }
+    fn draw_badge_large(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+        self.badge_draws.borrow_mut().push(bounds);
+    }
 
     fn list_metrics(&self) -> ListMetrics {
         ListMetrics {
@@ -2197,7 +2211,7 @@ fn widget_theme_can_be_replaced_in_environment() {
 #[test]
 fn ime_preedit_commit_and_disable_update_focused_text_target() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let selection = Rc::new(RefCell::new(TextSelectionSlot {
         anchor: 0,
         focus: 0,
@@ -2253,7 +2267,7 @@ fn ime_preedit_commit_and_disable_update_focused_text_target() {
 #[test]
 fn text_input_focus_stays_on_its_field_when_a_row_is_inserted_above_it() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let first = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let focused = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let emit = |renderer: &mut HydrolysisRenderer,
@@ -2315,7 +2329,7 @@ fn text_input_focus_stays_on_its_field_when_a_row_is_inserted_above_it() {
 #[test]
 fn text_input_focus_is_dropped_when_its_field_stops_being_emitted() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let survivor = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let removed = Rc::new(RefCell::new(TextSelectionSlot::default()));
     for (value, selection) in [("survivor", &survivor), ("removed", &removed)] {
@@ -2414,7 +2428,7 @@ fn caret_point_in_target(target: &TextInputTarget, byte_index: usize) -> Point {
 #[test]
 fn double_click_word_selection_survives_pointer_release() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let env = test_environment();
     let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let target = shaped_text_input_target("hello world", &selection, &env);
@@ -2444,7 +2458,7 @@ fn double_click_word_selection_survives_pointer_release() {
 #[test]
 fn double_click_drag_extends_selection_by_words() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let env = test_environment();
     let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let target = shaped_text_input_target("hello world", &selection, &env);
@@ -2757,4 +2771,69 @@ fn every_view_answers_the_three_point_probe_consistently() {
             );
         }
     }
+}
+
+/// `BadgeMetrics` offsets are anchored to the content's trailing edge — the
+/// badge's leading edge sits `offset_x` inside it, mirrored to the leading
+/// edge in RTL — and its bottom edge overlaps the top edge by `offset_y`,
+/// matching `BadgedBox` in Compose. They are not center offsets.
+#[test]
+fn badge_indicator_anchors_to_the_content_trailing_edge() {
+    use waterui::component::badge::Badge;
+    use waterui_core::layout::LayoutDirection;
+
+    /// `Badge` requires `Clone` content and `Frame` is not `Clone`, so the
+    /// anchor is a sized view produced from a `Clone` shell.
+    #[derive(Clone)]
+    struct FillAnchor;
+
+    impl View for FillAnchor {
+        fn body(self, _env: &Environment) -> impl View {
+            ().size(160.0, 160.0)
+        }
+    }
+
+    let mut env = test_environment();
+    let log = env
+        .get::<BadgeDrawLog>()
+        .expect("badge draw log is installed")
+        .clone();
+    let bounds = Rect::new(0.0, 0.0, 160.0, 160.0);
+    let anchor = FillAnchor;
+
+    // The renderer retains badge state by node, so each variant captures on a
+    // fresh renderer.
+    let capture = |view: Badge, env: &Environment| {
+        log.0.borrow_mut().clear();
+        let mut renderer = test_renderer();
+        capture_root_window(&mut renderer, view, env, bounds);
+        log.0.borrow().clone()
+    };
+
+    // Dot (value 0): leading edge 6 inside the trailing edge, top edge flush —
+    // the dot fills the content's top-trailing 6×6 corner.
+    assert_eq!(
+        capture(Badge::new(0, anchor.clone()), &env).as_slice(),
+        &[Rect::new(154.0, 0.0, 160.0, 6.0)]
+    );
+
+    // Count badge: leading edge 12 inside the trailing edge regardless of its
+    // width, bottom edge 14 below the content's top (its 16-high pill tops out
+    // 2 above the anchor).
+    let draws = capture(Badge::new(5, anchor.clone()), &env);
+    assert_eq!(draws.len(), 1, "one badge indicator draw, got {draws:?}");
+    assert_eq!(draws[0].x0, 148.0);
+    assert_eq!(draws[0].y0, -2.0);
+
+    // RTL mirrors the anchor to the leading edge.
+    env.insert(LayoutDirection::RightToLeft);
+    assert_eq!(
+        capture(Badge::new(0, anchor.clone()), &env).as_slice(),
+        &[Rect::new(0.0, 0.0, 6.0, 6.0)]
+    );
+
+    let draws = capture(Badge::new(5, anchor.clone()), &env);
+    assert_eq!(draws.len(), 1, "one badge indicator draw, got {draws:?}");
+    assert_eq!(draws[0].x1, 12.0);
+    assert_eq!(draws[0].y0, -2.0);
 }

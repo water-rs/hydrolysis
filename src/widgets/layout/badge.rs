@@ -1,4 +1,4 @@
-use nami::Computed;
+use nami::{Computed, Signal};
 use std::cell::RefCell;
 use std::rc::Rc;
 use waterui::component::badge::BadgeConfig;
@@ -121,39 +121,57 @@ pub(crate) fn render_badge_parts(
         let signal = state.borrow().value.clone();
         ctx.renderer_mut().read_signal(&signal)
     };
-    let content_width = ctx.bounds.width();
-    let x0 = if value == 0 {
-        ctx.bounds.x0 + content_width * 0.5 + metrics.small_offset_x
-    } else {
-        ctx.bounds.x0 + content_width * 0.5 + metrics.large_offset_x
-    };
-    let y0 = if value == 0 {
-        ctx.bounds.y0 + metrics.small_offset_y
-    } else {
-        ctx.bounds.y0 + metrics.large_offset_y
+
+    // Measure before placing: the badge's leading edge sits `offset_x` inside
+    // the content's trailing edge — mirrored to the leading edge in RTL — and
+    // its bottom edge overlaps the top edge by `offset_y`, matching
+    // `BadgedBox` in Compose.
+    let large = (value != 0).then(|| {
+        let label = badge_large_label(value, env);
+        let text_size = HydrolysisRenderer::measure_text_dimensions(
+            ctx.state_mut(),
+            label.clone(),
+            HorizontalAlignment::Center,
+            env,
+            None,
+            Some(1),
+        )
+        .size;
+        (label, text_size)
+    });
+
+    let (badge_width, badge_height, offset_x, offset_y) = match &large {
+        None => (
+            metrics.small_size,
+            metrics.small_size,
+            metrics.small_offset_x,
+            metrics.small_offset_y,
+        ),
+        Some((_, text_size)) => (
+            (f64::from(text_size.width) + metrics.large_horizontal_padding * 2.0)
+                .max(metrics.large_size),
+            metrics.large_size,
+            metrics.large_offset_x,
+            metrics.large_offset_y,
+        ),
     };
 
-    if value == 0 {
-        let rect =
-            vello::kurbo::Rect::new(x0, y0, x0 + metrics.small_size, y0 + metrics.small_size);
+    let x0 = if waterui_core::layout::layout_direction(env)
+        .get()
+        .is_right_to_left()
+    {
+        ctx.bounds.x0 + offset_x - badge_width
+    } else {
+        ctx.bounds.x1 - offset_x
+    };
+    let y0 = ctx.bounds.y0 + offset_y - badge_height;
+    let rect = vello::kurbo::Rect::new(x0, y0, x0 + badge_width, y0 + badge_height);
+
+    let Some((label, text_size)) = large else {
         let mut draw = ctx.draw_context();
         theme.draw_badge_small(&mut draw, rect);
         return;
-    }
-
-    let label = badge_large_label(value, env);
-    let text_size = HydrolysisRenderer::measure_text_dimensions(
-        ctx.state_mut(),
-        label.clone(),
-        HorizontalAlignment::Center,
-        env,
-        None,
-        Some(1),
-    )
-    .size;
-    let width = (f64::from(text_size.width) + metrics.large_horizontal_padding * 2.0)
-        .max(metrics.large_size);
-    let rect = vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + metrics.large_size);
+    };
     {
         let mut draw = ctx.draw_context();
         theme.draw_badge_large(&mut draw, rect);
