@@ -40,8 +40,8 @@ mod real {
     use tiny_http::{Header, Response, Server};
     use waterui_webview::{
         BackendEvent, BridgeOrigins, CustomWebViewController as _, IntoJsReply, JsReply, Json,
-        OriginPolicy, ScriptInjectionTime, ScriptMessageHandler, Url, WatcherGuard, WebViewEvent,
-        WebViewHandle,
+        OriginPolicy, ScriptInjectionTime, ScriptMessageHandler, Url, WatcherGuard, WebViewConfig,
+        WebViewEvent, WebViewHandle,
     };
 
     /// How long one wait may take before a scenario gives up.
@@ -119,7 +119,9 @@ mod real {
 
         // Exactly what the renderer gets: a genuine WKWebView behind the
         // shared handle contract.
-        let handle = MacSystemWebViewController.open();
+        let handle = MacSystemWebViewController.open(WebViewConfig {
+            asset_server: None,
+        });
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({
