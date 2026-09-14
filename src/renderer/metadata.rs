@@ -149,6 +149,7 @@ impl HydrolysisRenderer {
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let blur = f64::from(shadow.radius.max(0.0));
+        let corner_radius = f64::from(shadow.corner_radius.max(0.0));
         let offset_x = f64::from(shadow.offset.x);
         let offset_y = f64::from(shadow.offset.y);
         let shadow_rect = vello::kurbo::Rect::new(
@@ -163,7 +164,7 @@ impl HydrolysisRenderer {
             ctx.transform,
             shadow_rect,
             shadow_color,
-            blur,
+            corner_radius,
             blur,
         );
         render_content(renderer);
