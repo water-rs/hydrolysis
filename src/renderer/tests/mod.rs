@@ -2363,6 +2363,132 @@ fn text_selection_pointer_update_uses_transient_redraw_path() {
     );
 }
 
+/// A text-input target with real bounds and a real shaped layout, so click
+/// gestures resolve to actual caret/word/line ranges instead of an empty
+/// layout's index 0.
+fn shaped_text_input_target(
+    value: &str,
+    selection: &Rc<RefCell<TextSelectionSlot>>,
+    env: &Environment,
+) -> TextInputTarget {
+    let mut state = HydroState::default();
+    let layout = HydrolysisRenderer::build_text_layout(
+        &mut state,
+        StyledStr::plain(value.to_owned()),
+        HorizontalAlignment::Leading,
+        env,
+        Some(200.0),
+    );
+    let mut target = text_input_target(text_field_model(value, None), Rc::clone(selection));
+    target.bounds = Rect::new(0.0, 0.0, 200.0, 60.0);
+    target.text_bounds = Rect::new(0.0, 0.0, 200.0, 60.0);
+    target.text_clip_bounds = target.text_bounds;
+    target.cursor_area = target.text_bounds;
+    target.layout = layout;
+    target
+}
+
+/// The window point at the center of the caret geometry for `byte_index`, used
+/// to aim synthetic clicks inside a specific word.
+fn caret_point_in_target(target: &TextInputTarget, byte_index: usize) -> Point {
+    let cursor =
+        parley::Cursor::from_byte_index(&target.layout, byte_index, parley::Affinity::Downstream);
+    let geometry = cursor.geometry(&target.layout, 1.0);
+    Point::new(
+        target.text_bounds.x0 + (geometry.x0 + geometry.x1) * 0.5,
+        target.text_bounds.y0 + (geometry.y0 + geometry.y1) * 0.5,
+    )
+}
+
+/// The release event re-runs the drag-extension path before the drag is
+/// cleared. A double-click drag must keep its word granularity there — and for
+/// any jitter between down and up — instead of collapsing the word the gesture
+/// selected back to the caret under the pointer.
+#[test]
+fn double_click_word_selection_survives_pointer_release() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let env = test_environment();
+    let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
+    let target = shaped_text_input_target("hello world", &selection, &env);
+    let point = caret_point_in_target(&target, 8);
+    renderer.text_editing.text_input_targets.push(target);
+
+    renderer.handle_pointer_down(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    renderer.handle_pointer_up(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    renderer.handle_pointer_down(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11,
+        "double-click must select the whole word under the pointer"
+    );
+
+    renderer.handle_pointer_up(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11,
+        "releasing a double-click must not collapse the word selection to a caret"
+    );
+}
+
+/// Holding the button after a double-click extends the selection word by word,
+/// anchored on the word the gesture snapped to — matching platform text-field
+/// behavior.
+#[test]
+fn double_click_drag_extends_selection_by_words() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let env = test_environment();
+    let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
+    let target = shaped_text_input_target("hello world", &selection, &env);
+    let world_point = caret_point_in_target(&target, 8);
+    let hello_point = caret_point_in_target(&target, 2);
+    renderer.text_editing.text_input_targets.push(target);
+
+    renderer.handle_pointer_down(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    renderer.handle_pointer_up(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    // Second click stays held: this is a double-click-drag, not a third click.
+    renderer.handle_pointer_down(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11
+    );
+
+    // Still holding the second click's button, drag back across "hello": the
+    // selection grows to cover both whole words, not a caret at the pointer.
+    renderer.handle_pointer_move(hello_point.x as f32, hello_point.y as f32, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        0..11,
+        "double-click drag must extend the selection word by word"
+    );
+    renderer.handle_pointer_up(
+        hello_point.x as f32,
+        hello_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        0..11
+    );
+}
+
 #[test]
 fn secure_text_context_menu_excludes_copy_and_cut() {
     let selection = Rc::new(RefCell::new(TextSelectionSlot {
