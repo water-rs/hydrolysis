@@ -226,6 +226,42 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
     );
 }
 
+/// The reported minimum must be a box the content can actually occupy: text
+/// re-wraps at the minimum width, so the minimum height is the wrapped height,
+/// not the single-line height a per-axis probe reports.
+#[test]
+fn window_minimum_is_the_coupled_box_not_independent_axes() {
+    use waterui::prelude::text;
+
+    let env = crate::renderer::tests::test_environment();
+    let minimum_of = |content: &'static str| {
+        let window = Window::new("", binding(WindowState::Normal), move || text(content));
+        let mut runtime = runtime_window_for(window);
+        let _ = super::pump_window_semantics(&mut runtime, &env);
+        runtime
+            .platform
+            .applied_size_limits()
+            .expect("runner must apply size limits on the pump")
+            .0
+            .expect("content-derived minimum must exist")
+    };
+
+    // Five words collapse to one word per line at the minimum width, so the
+    // window's minimum height must be five text lines — the per-axis probes
+    // used to report one line here, a box the content could never fit in.
+    let wrapped = minimum_of("AAAA AAAA AAAA AAAA AAAA");
+    let single_line = minimum_of("AAAA");
+    assert!(
+        wrapped.height >= single_line.height * 4.0,
+        "minimum {wrapped:?} must be the height the text needs at its minimum \
+         width, not the single-line height {single_line:?}"
+    );
+    assert!(
+        wrapped.width <= single_line.width * 2.0,
+        "minimum width {wrapped:?} should be word-granular, not the full line"
+    );
+}
+
 #[test]
 fn rapid_resize_events_keep_the_retained_tree_at_the_latest_size() {
     use std::{cell::Cell, rc::Rc};
