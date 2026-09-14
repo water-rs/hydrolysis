@@ -15,6 +15,7 @@ mod perf_scroll;
 mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
+mod shadow;
 mod tree;
 use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii, Vec2};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
