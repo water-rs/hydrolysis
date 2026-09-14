@@ -119,9 +119,7 @@ mod real {
 
         // Exactly what the renderer gets: a genuine WKWebView behind the
         // shared handle contract.
-        let handle = MacSystemWebViewController.open(WebViewConfig {
-            asset_server: None,
-        });
+        let handle = MacSystemWebViewController.open(WebViewConfig { asset_server: None });
 
         let events = Rc::new(RefCell::new(Vec::new()));
         let guard = handle.watch({
