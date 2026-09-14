@@ -256,10 +256,10 @@ impl HydrolysisRenderer {
         true
     }
 
-    /// Measures the window content's per-axis minimum and maximum sizes, or
-    /// `None` before the tree is built.
+    /// Measures the window content's minimum and maximum sizes, or `None`
+    /// before the tree is built.
     ///
-    /// This is four whole-tree measure passes at proposals the frame's own
+    /// These are whole-tree measure passes at proposals the frame's own
     /// layout never uses, so it is demand-driven rather than run on every
     /// refresh: only the runner calls it, and only once it knows the answer will
     /// reach a window that acts on it (see `apply_window_size_limits`).
@@ -273,58 +273,36 @@ impl HydrolysisRenderer {
         Some(limits)
     }
 
-    /// Each axis is negotiated independently: a zero proposal asks for the hard
-    /// minimum and an infinite proposal asks for the hard maximum. The other axis
-    /// stays unspecified so cross-axis layout does not turn one dimension's
-    /// constraint into the other dimension's result.
+    /// Both axes are probed together, not independently: what a view answers on
+    /// one axis depends on what the other was offered — text re-wraps at the
+    /// minimum width and then needs more height than its single-line ideal —
+    /// so a per-axis probe with the cross axis unspecified returns a box the
+    /// content can never actually occupy. `ProposalSize::ZERO` asks for the
+    /// smallest self-consistent box the content can occupy; `INFINITY` asks for
+    /// the largest it ever wants.
     fn content_size_limits_of(
         &mut self,
         tree: &RenderNode,
         env: &Environment,
     ) -> ContentSizeLimits {
-        let min_width = tree
-            .measure(&mut self.state, env, ProposalSize::new(Some(0.0), None))
-            .size
-            .width;
-        let min_height = tree
-            .measure(&mut self.state, env, ProposalSize::new(None, Some(0.0)))
-            .size
-            .height;
-        let max_width = tree
-            .measure(
-                &mut self.state,
-                env,
-                ProposalSize::new(Some(f32::INFINITY), None),
-            )
-            .size
-            .width;
-        let max_height = tree
-            .measure(
-                &mut self.state,
-                env,
-                ProposalSize::new(None, Some(f32::INFINITY)),
-            )
-            .size
-            .height;
-
+        let min_box = tree.measure(&mut self.state, env, ProposalSize::ZERO).size;
         let minimum = Size::new(
-            validated_minimum_axis(min_width, "width"),
-            validated_minimum_axis(min_height, "height"),
+            validated_minimum_axis(min_box.width, "width"),
+            validated_minimum_axis(min_box.height, "height"),
         );
-        let maximum = content_maximum_size(max_width, max_height);
-        if let Some(maximum) = maximum
-            && !(maximum.width >= minimum.width && maximum.height >= minimum.height)
-        {
-            // The root's two numbers say the tree contradicted itself, but not
-            // which view did. Walk it and let the offending nodes name themselves,
-            // otherwise this is only reproducible by guesswork.
-            let culprits = probe_contract_violations(tree, &mut self.state, env);
-            panic!(
-                "hydrolysis window layout reported maximum {maximum:?} below minimum \
-                 {minimum:?}.\nA view answered a larger proposal with a smaller size. \
-                 Offending nodes (deepest first):\n{culprits}"
-            );
-        }
+        let max_box = tree
+            .measure(&mut self.state, env, ProposalSize::INFINITY)
+            .size;
+        let maximum = content_maximum_size(max_box.width, max_box.height).map(|size| {
+            // A finite maximum may legitimately fall below the coupled minimum:
+            // the box at unbounded width is shorter than the box the same
+            // wrapping content needs at its narrowest. Floor each axis at the
+            // minimum so the allowed box is never empty.
+            Size::new(
+                size.width.max(minimum.width),
+                size.height.max(minimum.height),
+            )
+        });
         ContentSizeLimits { minimum, maximum }
     }
 }
@@ -355,69 +333,4 @@ fn content_maximum_size(width: f32, height: f32) -> Option<Size> {
         width.unwrap_or(f32::MAX),
         height.unwrap_or(f32::MAX),
     ))
-}
-
-/// Reports every node whose own probe answers contradict each other, deepest
-/// first, so the innermost cause is read before the containers that inherited it.
-///
-/// Only runs when the window's own check has already failed, so the cost of
-/// re-measuring the tree four times per node does not matter.
-fn probe_contract_violations(
-    tree: &RenderNode,
-    state: &mut HydroState,
-    env: &Environment,
-) -> String {
-    let mut report = String::new();
-    walk_probe_contract(tree, state, env, 0, &mut report);
-    if report.is_empty() {
-        report.push_str(
-            "  (no single node contradicts itself; the disagreement is produced by a              container combining its children)\n",
-        );
-    }
-    report
-}
-
-fn walk_probe_contract(
-    node: &RenderNode,
-    state: &mut HydroState,
-    env: &Environment,
-    depth: usize,
-    report: &mut String,
-) {
-    for child in node.child_nodes() {
-        walk_probe_contract(child, state, env, depth + 1, report);
-    }
-
-    let min_width = node
-        .measure(state, env, ProposalSize::new(Some(0.0), None))
-        .size
-        .width;
-    let max_width = node
-        .measure(state, env, ProposalSize::new(Some(f32::INFINITY), None))
-        .size
-        .width;
-    let min_height = node
-        .measure(state, env, ProposalSize::new(None, Some(0.0)))
-        .size
-        .height;
-    let max_height = node
-        .measure(state, env, ProposalSize::new(None, Some(f32::INFINITY)))
-        .size
-        .height;
-
-    for (axis, min, max) in [
-        ("width", min_width, max_width),
-        ("height", min_height, max_height),
-    ] {
-        if min > max {
-            use core::fmt::Write as _;
-            let _ = writeln!(
-                report,
-                "  {:indent$}{} {axis}: minimum {min} exceeds maximum {max}",
-                "",
-                node.kind(),
-                indent = depth * 2
-            );
-        }
-    }
 }

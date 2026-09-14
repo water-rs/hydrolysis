@@ -29,53 +29,6 @@ impl RenderNode {
         }
     }
 
-    /// The variant's name, for diagnostics that have to point at a node.
-    pub(super) fn kind(&self) -> &'static str {
-        match self {
-            RenderNode::Color(_) => "Color",
-            RenderNode::Text(_) => "Text",
-            RenderNode::Container(_) => "Container",
-            RenderNode::Opacity(_) => "Opacity",
-            RenderNode::Scale(_) => "Scale",
-            RenderNode::Rotation(_) => "Rotation",
-            RenderNode::Offset(_) => "Offset",
-            RenderNode::Retain(_) => "Retain",
-            RenderNode::Env(_) => "Env",
-            RenderNode::Dynamic(_) => "Dynamic",
-            RenderNode::SceneView(_) => "SceneView",
-            RenderNode::GpuSurface(_) => "GpuSurface",
-            RenderNode::ViewEffect(_) => "ViewEffect",
-            RenderNode::AppliedFilter(_) => "AppliedFilter",
-            RenderNode::Scroll(_) => "Scroll",
-            RenderNode::LazyStack(_) => "LazyStack",
-            RenderNode::Collection(_) => "Collection",
-            RenderNode::Wrapper(_) => "Wrapper",
-            RenderNode::Widget(_) => "Widget",
-        }
-    }
-
-    /// The child nodes this one owns, for diagnostics that walk the tree.
-    ///
-    /// Deliberately a diagnostic-only accessor: layout and flush each need more
-    /// than the children (frames, environments, retained caches), so they keep
-    /// their own matches rather than routing through this.
-    pub(super) fn child_nodes(&self) -> Vec<&RenderNode> {
-        match self {
-            RenderNode::Container(node) => node.children.iter().collect(),
-            RenderNode::Opacity(node) => vec![&node.child],
-            RenderNode::Scale(node) => vec![&node.child],
-            RenderNode::Rotation(node) => vec![&node.child],
-            RenderNode::Offset(node) => vec![&node.child],
-            RenderNode::Retain(node) => vec![&node.child],
-            RenderNode::Env(node) => vec![&node.child],
-            RenderNode::Dynamic(node) => vec![&node.child],
-            RenderNode::AppliedFilter(node) => vec![&node.child],
-            RenderNode::Wrapper(node) => vec![&node.child],
-            RenderNode::Scroll(node) => vec![&node.child],
-            _ => Vec::new(),
-        }
-    }
-
     pub(super) fn stretch(&self) -> StretchAxis {
         match self {
             RenderNode::Color(_) => StretchAxis::Both,
