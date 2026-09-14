@@ -30,7 +30,7 @@ pub(crate) enum TextInputModel {
 #[derive(Default)]
 pub(crate) struct TextEditingState {
     pub(crate) text_input_targets: Vec<TextInputTarget>,
-    pub(crate) active_text_selection_drag: Option<InteractionKey>,
+    pub(crate) active_text_selection_drag: Option<ActiveTextSelectionDrag>,
     pub(crate) last_text_selection_click: Option<TextSelectionClickState>,
     pub(crate) active_text_context_menu: Option<ActiveTextContextMenu>,
     focused_text_input: RefCell<Option<InteractionKey>>,
@@ -89,7 +89,7 @@ impl TextEditingState {
 
     /// This frame's position of the drag-selected input, if it is still emitted.
     pub(crate) fn selection_drag_index(&self) -> Option<usize> {
-        self.index_of(self.active_text_selection_drag.as_ref()?)
+        self.index_of(&self.active_text_selection_drag.as_ref()?.target)
     }
 }
 
@@ -106,6 +106,22 @@ pub(crate) struct TextSelectionClickState {
     pub(crate) point: vello::kurbo::Point,
     pub(crate) at: Instant,
     pub(crate) count: u8,
+}
+
+/// An in-flight text-selection drag: which field it belongs to, the click
+/// streak granularity that armed it, and the plain-text range that gesture
+/// selected at pointer-down. The range is the drag's anchor side — for a
+/// multi-click drag it is the word/line the gesture snapped to — so later
+/// moves extend by whole units instead of collapsing the gesture back to a
+/// caret.
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveTextSelectionDrag {
+    pub(crate) target: InteractionKey,
+    /// The click streak that armed this drag: 1 = caret, 2 = word, 3+ = line.
+    pub(crate) click_count: u8,
+    /// The selection (plain-text byte indices) the arming gesture applied.
+    pub(crate) anchor: usize,
+    pub(crate) focus: usize,
 }
 
 #[derive(Clone)]
@@ -1169,18 +1185,79 @@ impl HydrolysisRenderer {
         count
     }
 
+    /// Apply the selection for a click of `click_count` at `point`. Returns the
+    /// applied (anchor, focus) range plus whether the slot changed, so the
+    /// caller can arm [`ActiveTextSelectionDrag`] with the same range as its
+    /// anchor side.
     pub(crate) fn apply_text_selection_click_gesture(
         &mut self,
         index: usize,
         point: vello::kurbo::Point,
         click_count: u8,
+    ) -> Option<(usize, usize, bool)> {
+        let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
+            self.text_editing.active_text_selection_drag = None;
+            return None;
+        };
+        let (anchor, focus) =
+            Self::text_selection_range_from_point_with_click_count(target, point, click_count);
+        let mut slot = target.selection.borrow_mut();
+        let changed = slot.anchor != anchor || slot.focus != focus || !slot.initialized;
+        slot.anchor = anchor;
+        slot.focus = focus;
+        slot.initialized = true;
+        Some((anchor, focus, changed))
+    }
+
+    /// Extend an in-flight selection drag to `point`. The drag remembers the
+    /// click streak that armed it: single clicks extend at caret granularity,
+    /// while a double/triple-click drag keeps the word/line it snapped to as
+    /// the anchor and extends by whole units — so the pointer release (or a
+    /// sub-pixel jiggle inside the same word) cannot collapse the gesture's
+    /// selection back to a caret. Mirrors parley's `Selection::extend_to_point`
+    /// in plain-index space.
+    pub(crate) fn update_text_selection_drag(
+        &mut self,
+        index: usize,
+        point: vello::kurbo::Point,
     ) -> bool {
+        let Some(drag) = self.text_editing.active_text_selection_drag.clone() else {
+            return false;
+        };
         let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
             self.text_editing.active_text_selection_drag = None;
             return false;
         };
-        let (anchor, focus) =
-            Self::text_selection_range_from_point_with_click_count(target, point, click_count);
+        let (anchor, focus) = if drag.click_count <= 1 {
+            (
+                drag.anchor,
+                Self::text_selection_index_from_point(target, point),
+            )
+        } else {
+            let (target_anchor, target_focus) =
+                Self::text_selection_range_from_point_with_click_count(
+                    target,
+                    point,
+                    drag.click_count,
+                );
+            // Same merge parley's `extend_selection` performs: union of the
+            // hovered unit and the armed anchor range, with the anchor kept on
+            // the side opposite the drag direction.
+            let extending_right = target_anchor >= drag.anchor;
+            let min = drag
+                .anchor
+                .min(drag.focus)
+                .min(target_anchor.min(target_focus));
+            let max = drag
+                .anchor
+                .max(drag.focus)
+                .max(target_anchor.max(target_focus));
+            if extending_right {
+                (min, max)
+            } else {
+                (max, min)
+            }
+        };
         let mut slot = target.selection.borrow_mut();
         let changed = slot.anchor != anchor || slot.focus != focus || !slot.initialized;
         slot.anchor = anchor;
