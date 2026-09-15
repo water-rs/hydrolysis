@@ -507,3 +507,32 @@ impl SurfaceProvider for RecoveringSurface {
         self.inner.resize(width, height);
     }
 }
+
+
+
+#[test]
+fn scratch_measure_realistic_content_limits() {
+    use waterui::prelude::*;
+    let env = crate::renderer::tests::test_environment();
+
+    let window = Window::new("", binding(WindowState::Normal), || {
+        vstack((text("Title"), text("Some longer line of text")))
+    });
+    let mut runtime = runtime_window_for(window);
+    let _ = super::pump_window_semantics(&mut runtime, &env);
+    eprintln!("vstack(text): {:?}", runtime.platform.applied_size_limits());
+
+    let window = Window::new("", binding(WindowState::Normal), || {
+        vstack((text("Title"), text("Some longer line of text"))).padding()
+    });
+    let mut runtime = runtime_window_for(window);
+    let _ = super::pump_window_semantics(&mut runtime, &env);
+    eprintln!("vstack+padding: {:?}", runtime.platform.applied_size_limits());
+
+    let window = Window::new("", binding(WindowState::Normal), || {
+        scroll(vstack((text("Title"), text("Some longer line of text"))))
+    });
+    let mut runtime = runtime_window_for(window);
+    let _ = super::pump_window_semantics(&mut runtime, &env);
+    eprintln!("scroll(vstack): {:?}", runtime.platform.applied_size_limits());
+}
