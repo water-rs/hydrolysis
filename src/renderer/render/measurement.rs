@@ -1188,7 +1188,8 @@ pub(crate) fn measure_picker_intrinsic(
             for item in &items {
                 let styled = resolved_text_styled(&item.content, env);
                 let size = HydrolysisRenderer::measure_text_intrinsic_size(state, styled, env);
-                total_width += f64::from(size.width) + metrics.horizontal_inset * 2.0;
+                total_width += (f64::from(size.width) + metrics.horizontal_inset * 2.0)
+                    .max(metrics.segment_min_width);
                 max_item_height = max_item_height.max(f64::from(size.height));
             }
             let width = total_width.max(metrics.min_width);
