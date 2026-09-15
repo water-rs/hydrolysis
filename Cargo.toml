@@ -247,7 +247,7 @@ hydrolysis = { path = "." }
 # the waterui branch below removes; the companion branch migrated to the
 # fixed-radius shapes this backend resolves. Drop this entry once a release
 # carries the migration.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "749cd3fc61f4b16a9f0f6e1db305154771e64ce9" }
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "c4cd817b4b5345dd8600aa4d7ab0b0ca33ed4238" }
 
 # `AccessibilityRole::Dialog` (water-rs/waterui#627) and
 # `DrawContext::draw_shadow` (water-rs/waterui#628) are merged on the contract

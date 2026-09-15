@@ -1930,6 +1930,7 @@ impl WidgetTheme for MinimalTestTheme {
             popup_top_spacing: 4.0,
             popup_row_height: 48.0,
             popup_corner_radius: 6.0,
+            segment_min_width: 58.0,
         }
     }
 
