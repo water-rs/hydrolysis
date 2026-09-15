@@ -2447,7 +2447,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.20",
- "windows 0.62.2",
+ "windows 0.59.0",
 ]
 
 [[package]]
@@ -2715,7 +2715,7 @@ dependencies = [
 [[package]]
 name = "hydrolysis-m3"
 version = "0.2.1"
-source = "git+https://github.com/water-rs/hydrolysis-m3?rev=749cd3fc61f4b16a9f0f6e1db305154771e64ce9#749cd3fc61f4b16a9f0f6e1db305154771e64ce9"
+source = "git+https://github.com/water-rs/hydrolysis-m3?rev=c4cd817b4b5345dd8600aa4d7ab0b0ca33ed4238#c4cd817b4b5345dd8600aa4d7ab0b0ca33ed4238"
 dependencies = [
  "material-color-utils",
  "num-traits",
@@ -2782,7 +2782,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.59.0",
 ]
 
 [[package]]
