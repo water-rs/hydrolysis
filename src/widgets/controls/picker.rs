@@ -574,6 +574,8 @@ pub(crate) fn render_segmented_picker(
                 &mut draw,
                 segment_rect,
                 is_selected,
+                index == 0,
+                index + 1 == item_count,
                 interaction,
             );
         }
