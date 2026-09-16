@@ -289,16 +289,19 @@ pub(crate) fn measure_layout_dimensions<'a>(
     }
     let refs: Vec<&dyn SubView> = subviews.iter().map(|view| view as &dyn SubView).collect();
     let size = layout.size_that_fits(proposal, &refs);
-    if can_skip_layout_alignment_measurement(layout, &subviews) {
+    if size.width.is_infinite()
+        || size.height.is_infinite()
+        || can_skip_layout_alignment_measurement(layout, &subviews)
+    {
         return ViewDimensions::new(size);
     }
 
     let bounds = LayoutRect::from_size(size);
-    let child_rects = layout.place(bounds, &refs);
+    let placements = layout.place(bounds, proposal, &refs);
     let placed_subviews: Vec<PlacedSubview<'_>> = subviews
         .iter()
-        .zip(child_rects.iter().copied())
-        .map(|(view, frame)| PlacedSubview::new(view as &dyn SubView, frame))
+        .zip(placements)
+        .map(|(view, placement)| PlacedSubview::new(view as &dyn SubView, placement))
         .collect();
 
     let mut dimensions = ViewDimensions::new(size);

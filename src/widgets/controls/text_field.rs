@@ -783,7 +783,7 @@ fn flush_material_label(
     // the floating label sub-view flushes visual-only.
     ctx.renderer_mut()
         .with_suppressed_accessibility(|renderer| {
-            label_view.flush_in_ctx(renderer, child, env, size);
+            label_view.flush_in_ctx(renderer, child, env, ProposalSize::UNSPECIFIED, size);
         });
 }
 

@@ -160,6 +160,7 @@ impl HydrolysisRenderer {
         hit_transform: vello::kurbo::Affine,
     ) {
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
         // The viewport is recorded here rather than by each caller: every host
         // that builds a window tree — the runner, and a `HydrolysisGpuView`
         // embedding one in someone else's surface — has to agree on where the
@@ -174,7 +175,7 @@ impl HydrolysisRenderer {
         // frame, so scene/layer flushing is handled by the caller.
         if let Some(mut tree) = self.render_tree.take() {
             tree.patch(self);
-            tree.layout(self, env, size);
+            tree.layout(self, env, proposal, size);
             tree.flush(self, ctx, env);
             self.flush_subtree_captures(0);
             self.render_tree = Some(tree);
@@ -182,7 +183,7 @@ impl HydrolysisRenderer {
         }
         self.render_depth = 0;
         let mut node = RenderNode::build(content, env, self);
-        node.layout(self, env, size);
+        node.layout(self, env, proposal, size);
         node.flush(self, ctx, env);
         self.flush_subtree_captures(0);
         self.render_tree = Some(node);
@@ -225,7 +226,8 @@ impl HydrolysisRenderer {
         // Layout runs every frame: geometry can never go stale against the
         // scene encoded right after it.
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
-        tree.layout(self, env, size);
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        tree.layout(self, env, proposal, size);
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         tree.flush(self, ctx, env);
         // Every filtered subtree captured during the flush is rendered and

@@ -190,7 +190,7 @@ fn window_size_limits_reach_the_platform_window() {
 
 #[test]
 fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
-    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView};
+    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView, SubviewPlacement};
     use waterui_layout::container::FixedContainer;
 
     #[derive(Debug)]
@@ -204,7 +204,12 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
             )
         }
 
-        fn place(&self, _bounds: Rect, _children: &[&dyn SubView]) -> Vec<Rect> {
+        fn place(
+            &self,
+            _bounds: Rect,
+            _proposal: ProposalSize,
+            _children: &[&dyn SubView],
+        ) -> Vec<SubviewPlacement> {
             Vec::new()
         }
     }

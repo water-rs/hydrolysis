@@ -876,6 +876,7 @@ impl RenderNode {
             item_cache: RefCell::new(VisibleSubviewCache::new()),
             visible_range: RefCell::new(0..0),
             estimate: Cell::new(0.0),
+            estimate_sample: Cell::new(None),
             dirty,
             _dirty_key: dirty_key,
             _guard: guard,
@@ -933,7 +934,6 @@ impl RenderNode {
         RenderNode::ViewEffect(Box::new(ViewEffectNode {
             runtime,
             child: RefCell::new(child),
-            laid_out: Cell::new(Size::zero()),
             env: env.clone(),
         }))
     }

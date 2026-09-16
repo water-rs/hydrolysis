@@ -22,8 +22,8 @@ pub(crate) use compositor::{
 pub(crate) use measurement::*;
 pub(crate) use measurement_cache::MeasurementCaches;
 pub use render_context::RenderContext;
-pub(crate) use render_context::WidgetRenderContext;
 pub(crate) use render_context::{HydrolysisTextContextMenuMode, HydrolysisWindowOrigin};
+pub(crate) use render_context::{WidgetRenderContext, bounded_proposal};
 pub use state::HydroState;
 pub(crate) use subtree_capture::SubtreeCaptures;
 pub(crate) use subview::HydroSubview;

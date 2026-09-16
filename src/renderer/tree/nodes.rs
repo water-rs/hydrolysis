@@ -17,6 +17,8 @@ pub(crate) struct RetainedSubview {
     node: Option<RenderNode>,
     /// The size the node was last laid out at, so layout re-runs only on a change.
     laid_out: Size,
+    /// The selected offer, independent of the cached frame size.
+    laid_out_proposal: Option<ProposalSize>,
     /// A structural patch replaced content inside the retained node, so the new
     /// subtree must be laid out even when its outer rect did not change.
     needs_layout: bool,
@@ -32,6 +34,7 @@ impl RetainedSubview {
             source: Some(source),
             node: None,
             laid_out: Size::zero(),
+            laid_out_proposal: None,
             needs_layout: true,
             default_a11y_label: None,
         }
@@ -182,6 +185,7 @@ impl RetainedSubview {
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
         env: &Environment,
+        proposal: ProposalSize,
         rect: vello::kurbo::Rect,
     ) {
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -195,9 +199,10 @@ impl RetainedSubview {
         #[allow(clippy::cast_possible_truncation)]
         let size = Size::new(rect.width() as f32, rect.height() as f32);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         let child_ctx = ctx.child(
@@ -218,6 +223,7 @@ impl RetainedSubview {
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
         env: &Environment,
+        proposal: ProposalSize,
         size: Size,
     ) {
         if size.width <= 0.0 || size.height <= 0.0 {
@@ -229,9 +235,10 @@ impl RetainedSubview {
         };
         let structural = Self::patch_built(node, renderer);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         node.flush(renderer, ctx, env);
@@ -258,7 +265,8 @@ impl RetainedSubview {
         let structural = Self::patch_built(node, renderer);
         self.needs_layout |= structural;
         if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+            let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
             self.needs_layout = false;
         }
@@ -375,6 +383,11 @@ pub(crate) struct WrapperNode {
 
 /// The type-erased behavior of one retained native widget state allocation.
 pub(crate) trait WidgetBehavior {
+    /// The default layout priority of this native leaf.
+    fn priority(&self) -> i32 {
+        0
+    }
+
     /// Re-renders the leaf from its retained state.
     fn render(
         self: Rc<Self>,
@@ -593,8 +606,6 @@ pub(crate) struct ViewEffectNode {
     /// The effect's content, built once as a persistent node (recursed into, not
     /// baked), re-rendered into the input texture each flush.
     pub(super) child: RefCell<RenderNode>,
-    /// The size `child` was last laid out at, so layout re-runs only on a change.
-    pub(super) laid_out: Cell<Size>,
     pub(super) env: Environment,
 }
 

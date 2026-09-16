@@ -3,6 +3,7 @@ use crate::engine::Brush;
 use crate::renderer::AccessibilityActionTarget;
 #[cfg(feature = "accessibility")]
 use crate::renderer::accessibility_activation_point;
+use crate::renderer::bounded_proposal;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
     WidgetRenderContext, measure_navigation_view_intrinsic,
@@ -548,7 +549,13 @@ pub(crate) fn render_navigation_view_parts(
             if search_rect.width() > 0.0 && search_rect.height() > 0.0 {
                 let render_ctx = ctx.render_context();
                 if let Some(field) = state.borrow_mut().search_field.as_mut() {
-                    field.flush_in_rect(ctx.renderer_mut(), render_ctx, env, search_rect);
+                    field.flush_in_rect(
+                        ctx.renderer_mut(),
+                        render_ctx,
+                        env,
+                        ProposalSize::UNSPECIFIED,
+                        search_rect,
+                    );
                 }
             }
         }
@@ -562,10 +569,13 @@ pub(crate) fn render_navigation_view_parts(
     );
     if content_rect.width() > 0.0 && content_rect.height() > 0.0 {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .content
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, content_rect);
+        state.borrow_mut().content.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(content_rect),
+            content_rect,
+        );
     }
 
     if bottom_bar_height > 0.0 {
@@ -647,7 +657,13 @@ fn flush_toolbar_group(
         let rect = vello::kurbo::Rect::new(x, y, x + width, y + height);
         if rect.width() > 0.0 && rect.height() > 0.0 {
             let render_ctx = ctx.render_context();
-            item.flush_in_rect(ctx.renderer_mut(), render_ctx, env, rect);
+            item.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                ProposalSize::UNSPECIFIED,
+                rect,
+            );
         }
         x += width + metrics.item_spacing;
     }
@@ -672,9 +688,13 @@ fn flush_title_and_subtitle(
     let title_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
     if title_rect.height() > 0.0 {
         let render_ctx = ctx.render_context();
-        state
-            .title
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, title_rect);
+        state.title.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            title_rect,
+        );
     }
     y += title_height;
     if state.subtitle_present {
@@ -682,9 +702,13 @@ fn flush_title_and_subtitle(
         let subtitle_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
         if subtitle_rect.height() > 0.0 {
             let render_ctx = ctx.render_context();
-            state
-                .subtitle
-                .flush_in_rect(ctx.renderer_mut(), render_ctx, env, subtitle_rect);
+            state.subtitle.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                ProposalSize::UNSPECIFIED,
+                subtitle_rect,
+            );
         }
     }
 }
@@ -968,10 +992,13 @@ pub(crate) fn render_navigation_split_parts(
 
     if let Some(primary_rect) = primary_rect {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .primary
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, primary_rect);
+        state.borrow_mut().primary.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(primary_rect),
+            primary_rect,
+        );
     }
     if let Some(content_rect) = content_rect {
         render_split_content(ctx, state, env, primary, false, content_rect);
@@ -1018,20 +1045,26 @@ fn render_compact_split(
             back_selection = Some(selection.primary_binding);
         } else {
             let render_ctx = ctx.render_context();
-            state
-                .borrow_mut()
-                .primary
-                .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            state.borrow_mut().primary.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
         }
     } else if selection.primary.is_some() {
         render_split_detail(ctx, state, &compact_env, selection.primary, true, bounds);
         back_selection = Some(selection.primary_binding);
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .primary
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().primary.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 
     if let Some(selection) = back_selection {
@@ -1069,13 +1102,22 @@ fn render_split_content(
             .as_mut()
             .expect("selected split content must be retained")
             .2
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            .flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .placeholder
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().placeholder.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 }
 
@@ -1096,13 +1138,22 @@ fn render_split_detail(
             .as_mut()
             .expect("selected split detail must be retained")
             .2
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            .flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .placeholder
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().placeholder.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 }
 
