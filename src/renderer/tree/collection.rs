@@ -210,6 +210,8 @@ pub(crate) struct LazyStackNode {
     /// Estimated extent for not-yet-measured items, seeded from the first measure;
     /// used to size the scroll content without measuring the whole collection.
     pub(super) estimate: Cell<f64>,
+    /// First-item dimensions and the cross-axis query that produced them.
+    pub(super) estimate_sample: Cell<Option<(Option<f32>, Size)>>,
     /// Membership changes reset index-based measurements, including moves that
     /// preserve the collection length.
     pub(super) dirty: Rc<Cell<bool>>,
@@ -584,7 +586,11 @@ impl LazyStackNode {
     /// Applies structural updates owned by the currently visible retained items
     /// before the parent scroll view measures this stack.
     pub(super) fn patch_visible(&self, renderer: &mut HydrolysisRenderer) -> bool {
-        self.item_cache.borrow_mut().patch_for_parent(renderer)
+        let changed = self.item_cache.borrow_mut().patch_for_parent(renderer);
+        if changed {
+            self.estimate_sample.set(None);
+        }
+        changed
     }
 
     fn spacing(&self) -> f64 {
@@ -594,11 +600,10 @@ impl LazyStackNode {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn item_proposal(&self, cross: f64) -> ProposalSize {
+    fn item_proposal(&self, cross: Option<f32>) -> ProposalSize {
         match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(Some(cross as f32), None),
-            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(None, Some(cross as f32)),
+            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(cross, None),
+            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(None, cross),
         }
     }
 
@@ -608,7 +613,7 @@ impl LazyStackNode {
         &self,
         state: &mut HydroState,
         index: usize,
-        cross: f64,
+        cross: Option<f32>,
     ) -> (Size, StretchAxis) {
         let id = self
             .views
@@ -627,9 +632,14 @@ impl LazyStackNode {
             .get_view(index)
             .unwrap_or_else(|| panic!("hydrolysis LazyStack failed to materialize item {index}"));
         let view = normalize_layout_view(view, &self.env);
-        let bound = RefCell::new(&mut *state);
-        let subview = HydroSubview::from_view(&view, &bound, &self.env);
-        (subview.measure(proposal).size, subview.stretch_axis())
+        state.measurement.begin_transient_measurement();
+        let result = {
+            let bound = RefCell::new(&mut *state);
+            let subview = HydroSubview::from_view(&view, &bound, &self.env);
+            (subview.measure(proposal).size, subview.stretch_axis())
+        };
+        state.measurement.end_transient_measurement();
+        result
     }
 
     fn main_extent(&self, size: Size) -> f64 {
@@ -639,16 +649,22 @@ impl LazyStackNode {
         }
     }
 
-    /// Seeds the estimated item extent from item 0 if not yet known.
-    fn ensure_estimate(&self, state: &mut HydroState, cross: f64) {
-        if self.estimate.get() > 0.0 {
-            return;
+    /// Keeps estimates scoped to the cross-axis query and collection lifetime.
+    fn ensure_estimate(&self, state: &mut HydroState, cross: Option<f32>) -> Size {
+        if let Some((previous, size)) = self.estimate_sample.get()
+            && previous == cross
+            && !self.dirty.get()
+        {
+            return size;
         }
         let (size, _) = self.measure_item(state, 0, cross);
         let extent = self.main_extent(size);
         self.estimate.set(extent.max(1.0));
+        self.estimate_sample.set(Some((cross, size)));
+        self.dirty.set(true);
         self.prepare_extent_index(self.views.len().get());
         self.extent_index.borrow_mut().set_measured(0, extent);
+        size
     }
 
     fn prepare_extent_index(&self, count: usize) {
@@ -668,7 +684,7 @@ impl LazyStackNode {
     /// Re-measures the last visible window after its retained children were
     /// patched. This makes a reactive row-height change part of the same parent
     /// layout pass instead of discovering it later during flush.
-    fn refresh_visible_extents(&self, state: &mut HydroState, count: usize, cross: f64) {
+    fn refresh_visible_extents(&self, state: &mut HydroState, count: usize, cross: Option<f32>) {
         let visible = self.visible_range.borrow().clone();
         let cache = self.item_cache.borrow();
         for index in visible.start.min(count)..visible.end.min(count) {
@@ -693,16 +709,16 @@ impl LazyStackNode {
             return ViewDimensions::new(Size::zero());
         }
         let cross = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => proposal.width.unwrap_or(0.0),
-            LazyStackAxisConfig::Horizontal { .. } => proposal.height.unwrap_or(0.0),
+            LazyStackAxisConfig::Vertical { .. } => proposal.width,
+            LazyStackAxisConfig::Horizontal { .. } => proposal.height,
         };
-        self.ensure_estimate(state, f64::from(cross));
+        let sample = self.ensure_estimate(state, cross);
         self.prepare_extent_index(count);
-        self.refresh_visible_extents(state, count, f64::from(cross));
+        self.refresh_visible_extents(state, count, cross);
         let main = self.extent_index.borrow().total_extent() as f32;
         let size = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => Size::new(cross, main),
-            LazyStackAxisConfig::Horizontal { .. } => Size::new(main, cross),
+            LazyStackAxisConfig::Vertical { .. } => Size::new(sample.width, main),
+            LazyStackAxisConfig::Horizontal { .. } => Size::new(main, sample.height),
         };
         ViewDimensions::new(size)
     }
@@ -730,8 +746,8 @@ impl LazyStackNode {
             scope
         });
         let cross = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => ctx.bounds.width(),
-            LazyStackAxisConfig::Horizontal { .. } => ctx.bounds.height(),
+            LazyStackAxisConfig::Vertical { .. } => Some(ctx.bounds.width() as f32),
+            LazyStackAxisConfig::Horizontal { .. } => Some(ctx.bounds.height() as f32),
         };
         self.ensure_estimate(&mut renderer.state, cross);
         self.prepare_extent_index(count);
