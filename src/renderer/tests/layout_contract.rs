@@ -334,3 +334,26 @@ fn view_effect_relayouts_equal_bounds_with_a_new_proposal() {
         );
     }
 }
+
+#[test]
+fn nested_collections_preserve_intrinsic_cross_axes() {
+    use waterui_core::id::SelfId;
+    use waterui_layout::stack::{HStack, VStack};
+
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let grid = VStack::for_each((0..16).map(SelfId::new).collect::<Vec<_>>(), |_| {
+        HStack::for_each((0..10).map(SelfId::new).collect::<Vec<_>>(), |_| {
+            Color::srgb_hex("#2563EB").size(28.0, 18.0)
+        })
+        .spacing(4.0)
+    })
+    .spacing(4.0);
+    let node = RenderNode::build(AnyView::new(grid), &env, &mut renderer);
+    for width in [None, Some(0.0), Some(400.0), None] {
+        let size = node
+            .measure(&mut renderer.state, &env, ProposalSize::new(width, None))
+            .size;
+        assert_eq!(size, Size::new(316.0, 348.0));
+    }
+}
