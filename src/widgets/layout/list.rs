@@ -749,14 +749,18 @@ pub(crate) fn list_accessibility(
     }
 }
 
-/// Measures a list leaf from its config (intrinsic-sized; proposal-independent).
+/// Measures the scrollable viewport, using content size only for ideal queries.
 pub(crate) fn measure_list_node(
     list: &ListConfig,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
 ) -> ViewDimensions {
-    ViewDimensions::new(measure_list_intrinsic(list, state, env))
+    let intrinsic = measure_list_intrinsic(list, state, env);
+    ViewDimensions::new(LayoutSize::new(
+        proposal.width.unwrap_or(intrinsic.width),
+        proposal.height.unwrap_or(intrinsic.height),
+    ))
 }
 
 /// Renders a retained list leaf every flush.
