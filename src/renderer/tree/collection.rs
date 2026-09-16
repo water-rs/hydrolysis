@@ -768,7 +768,10 @@ impl LazyStackNode {
             LazyStackAxisConfig::Horizontal { .. }
                 if self.axis.direction().get().is_right_to_left() =>
             {
-                (ctx.bounds.x1 - visible.x1, ctx.bounds.x1 - visible.x0)
+                (
+                    ctx.bounds.x0 + ctx.bounds.x1 - visible.x1,
+                    ctx.bounds.x0 + ctx.bounds.x1 - visible.x0,
+                )
             }
             LazyStackAxisConfig::Horizontal { .. } => {
                 (visible.x0 - ctx.bounds.x0, visible.x1 - ctx.bounds.x0)

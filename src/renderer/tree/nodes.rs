@@ -264,10 +264,11 @@ impl RetainedSubview {
         };
         let structural = Self::patch_built(node, renderer);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
             node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         let local_ctx = RenderContext::with_transforms(
@@ -276,9 +277,14 @@ impl RetainedSubview {
             vello::kurbo::Affine::IDENTITY,
         );
         renderer.begin_navigation_scene_capture();
+        renderer.push_lazy_viewport(LazyViewport {
+            bounds: local_ctx.bounds,
+            transform: local_ctx.transform,
+        });
         core::mem::swap(renderer.scene_mut(), &mut scene);
         node.flush(renderer, local_ctx, env);
         core::mem::swap(renderer.scene_mut(), &mut scene);
+        renderer.pop_lazy_viewport("retained scene capture");
         renderer.finish_navigation_scene_capture(scene)
     }
 
