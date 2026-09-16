@@ -190,6 +190,41 @@ fn equal_bounds_keep_the_selected_proposal_after_other_probes() {
 }
 
 #[test]
+fn retained_scene_capture_preserves_proposal_and_viewport_boundaries() {
+    use crate::renderer::{LazyViewport, RenderContext, tree::RetainedSubview};
+    use vello::kurbo::{Affine, Rect as SceneRect};
+
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let trace = Rc::new(RefCell::new(Vec::new()));
+    let mut retained = RetainedSubview::new(AnyView::new(ProbeContent {
+        vertical: false,
+        trace: trace.clone(),
+        builds: Rc::new(Cell::new(0)),
+    }));
+    let size = Size::new(160.0, 20.0);
+    let rect = SceneRect::new(0.0, 0.0, 160.0, 20.0);
+    let ctx = RenderContext::with_transforms(rect, Affine::IDENTITY, Affine::IDENTITY);
+    let ideal = ProposalSize::new(None, Some(20.0));
+    retained.flush_in_rect(&mut renderer, ctx, &env, ideal, rect);
+    let outer = LazyViewport {
+        bounds: SceneRect::new(0.0, 800.0, 160.0, 820.0),
+        transform: Affine::translate((0.0, -800.0)),
+    };
+    renderer.push_lazy_viewport(outer);
+    let _ = retained.render_built_scene(&mut renderer, &env, size);
+    assert_eq!(renderer.lazy.lazy_viewport_stack.len(), 1);
+    assert_eq!(renderer.lazy.lazy_viewport_stack[0].bounds, outer.bounds);
+    trace.borrow_mut().clear();
+    retained.flush_in_rect(&mut renderer, ctx, &env, ideal, rect);
+    assert_eq!(
+        trace.borrow().last().expect("offer changed").proposal,
+        ideal
+    );
+    renderer.pop_lazy_viewport("test outer viewport");
+}
+
+#[test]
 fn scroll_preserves_its_unconstrained_content_axis() {
     let env = test_environment();
     let mut renderer = test_renderer();
