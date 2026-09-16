@@ -757,19 +757,22 @@ impl LazyStackNode {
             .lazy
             .lazy_viewport_stack
             .last()
-            .copied()
+            .map(|viewport| {
+                (ctx.transform.inverse() * viewport.transform).transform_rect_bbox(viewport.bounds)
+            })
             .unwrap_or(ctx.bounds);
         let (visible_start, visible_end) = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => (visible.y0, visible.y1),
+            LazyStackAxisConfig::Vertical { .. } => {
+                (visible.y0 - ctx.bounds.y0, visible.y1 - ctx.bounds.y0)
+            }
             LazyStackAxisConfig::Horizontal { .. }
                 if self.axis.direction().get().is_right_to_left() =>
             {
-                (
-                    ctx.bounds.x0 + ctx.bounds.x1 - visible.x1,
-                    ctx.bounds.x0 + ctx.bounds.x1 - visible.x0,
-                )
+                (ctx.bounds.x1 - visible.x1, ctx.bounds.x1 - visible.x0)
             }
-            LazyStackAxisConfig::Horizontal { .. } => (visible.x0, visible.x1),
+            LazyStackAxisConfig::Horizontal { .. } => {
+                (visible.x0 - ctx.bounds.x0, visible.x1 - ctx.bounds.x0)
+            }
         };
         let spacing = self.spacing();
         let window = self
@@ -813,7 +816,7 @@ impl LazyStackNode {
                     });
                     normalize_layout_view(view, env)
                 });
-                subview.flush_in_rect(renderer, ctx, env, child_rect);
+                subview.flush_in_rect(renderer, ctx, env, proposal, child_rect);
             }
             cursor += extent;
             if index + 1 < count {

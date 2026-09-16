@@ -1,3 +1,4 @@
+use crate::renderer::bounded_proposal;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -1197,7 +1198,13 @@ pub(crate) fn render_list_parts(
                 let state_ref = state.borrow();
                 let mut cache = state_ref.item_cache.borrow_mut();
                 let subview = cache.entry(id, move || content);
-                subview.flush_in_rect(ctx.renderer_mut(), render_ctx, &row_env, content_rect);
+                subview.flush_in_rect(
+                    ctx.renderer_mut(),
+                    render_ctx,
+                    &row_env,
+                    bounded_proposal(content_rect),
+                    content_rect,
+                );
             }
             #[cfg(feature = "accessibility")]
             ctx.renderer_mut().pop_accessibility_suppression();
