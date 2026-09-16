@@ -209,7 +209,13 @@ pub(crate) fn render_color_picker_parts(
         let label_view = &mut state.label_view;
         ctx.renderer_mut()
             .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(renderer, render_ctx, env, label_bounds);
+                label_view.flush_in_rect(
+                    renderer,
+                    render_ctx,
+                    env,
+                    ProposalSize::UNSPECIFIED,
+                    label_bounds,
+                );
             });
     }
 

@@ -110,9 +110,13 @@ pub(crate) fn render_badge_parts(
     {
         let render_ctx = ctx.render_context();
         let mut state = state.borrow_mut();
-        state
-            .content
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.content.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            bounds,
+        );
     }
 
     let theme = widget_theme(env);

@@ -10,6 +10,7 @@ use executor_core::async_task::{self, AsyncTask, Runnable};
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
+mod layout_contract;
 mod perf_full_rebuild;
 mod perf_scroll;
 mod retained_scene;
