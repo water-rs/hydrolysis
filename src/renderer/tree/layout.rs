@@ -25,6 +25,7 @@ impl RenderNode {
             RenderNode::Env(node) => node.child.priority(),
             RenderNode::Dynamic(node) => node.child.priority(),
             RenderNode::AppliedFilter(node) => node.child.priority(),
+            RenderNode::Widget(node) => node.behavior.priority(),
             _ => 0,
         }
     }
@@ -77,7 +78,7 @@ impl RenderNode {
 
     /// Measure this node under a proposal (recursive). Text shaping runs through
     /// the renderer's [`HydroState`] on the main thread.
-    pub(super) fn measure(
+    pub(in crate::renderer) fn measure(
         &self,
         state: &mut HydroState,
         env: &Environment,
@@ -153,14 +154,14 @@ impl RenderNode {
         &mut self,
         renderer: &mut HydrolysisRenderer,
         env: &Environment,
+        proposal: ProposalSize,
         size: Size,
     ) {
-        // No proposal parameter: at layout time a node is always placed at a concrete
-        // `size`, so a layout-transparent wrapper lays its child out at exactly that
-        // size (`ProposalSize::new(Some(size.w), Some(size.h))`).
+        // The selected proposal and resolved size are distinct layout inputs.
+        // Transparent wrappers preserve both without reconstructing an offer.
         match self {
             RenderNode::Container(container) => {
-                let rects = {
+                let placements = {
                     let cell = RefCell::new(&mut renderer.state);
                     let subs: Vec<NodeSubView> = container
                         .children
@@ -169,31 +170,36 @@ impl RenderNode {
                         .collect();
                     let refs: Vec<&dyn SubView> =
                         subs.iter().map(|sub| sub as &dyn SubView).collect();
-                    container.layout.place(Rect::from_size(size), &refs)
+                    container
+                        .layout
+                        .place(Rect::from_size(size), proposal, &refs)
                 };
-                for (child, rect) in container.children.iter_mut().zip(rects.iter()) {
-                    child.layout(renderer, env, *rect.size());
+                for (child, placement) in container.children.iter_mut().zip(&placements) {
+                    child.layout(renderer, env, placement.proposal, *placement.frame.size());
                 }
-                container.placed = rects;
+                container.placed = placements
+                    .into_iter()
+                    .map(|placement| placement.frame)
+                    .collect();
             }
             // Transform/opacity wrappers are layout-transparent: the child lays out
             // at the same concrete size as the wrapper.
-            RenderNode::Opacity(node) => node.child.layout(renderer, env, size),
-            RenderNode::Scale(node) => node.child.layout(renderer, env, size),
-            RenderNode::Rotation(node) => node.child.layout(renderer, env, size),
-            RenderNode::Offset(node) => node.child.layout(renderer, env, size),
-            RenderNode::Retain(node) => node.child.layout(renderer, env, size),
+            RenderNode::Opacity(node) => node.child.layout(renderer, env, proposal, size),
+            RenderNode::Scale(node) => node.child.layout(renderer, env, proposal, size),
+            RenderNode::Rotation(node) => node.child.layout(renderer, env, proposal, size),
+            RenderNode::Offset(node) => node.child.layout(renderer, env, proposal, size),
+            RenderNode::Retain(node) => node.child.layout(renderer, env, proposal, size),
             RenderNode::Env(node) => {
                 let node_env = node.env.clone();
-                node.child.layout(renderer, &node_env, size);
+                node.child.layout(renderer, &node_env, proposal, size);
             }
             // Layout-transparent: the child lays out at the same concrete size,
             // under the wrapper's scoped environment.
             RenderNode::Wrapper(node) => {
                 let node_env = node.env.clone();
-                node.child.layout(renderer, &node_env, size);
+                node.child.layout(renderer, &node_env, proposal, size);
             }
-            RenderNode::Dynamic(node) => node.child.layout(renderer, env, size),
+            RenderNode::Dynamic(node) => node.child.layout(renderer, env, proposal, size),
             RenderNode::Scroll(node) => {
                 let child_proposal = match node.axis {
                     ScrollAxis::Horizontal => ProposalSize::new(None, Some(size.height)),
@@ -218,7 +224,8 @@ impl RenderNode {
                     ),
                     _ => panic!("hydrolysis render tree: unsupported scroll axis"),
                 };
-                node.child.layout(renderer, env, content_size);
+                node.child
+                    .layout(renderer, env, child_proposal, content_size);
                 let handle = if let Some(handle) = node.handle.as_mut() {
                     handle.rebind(
                         node.axis,
@@ -248,21 +255,17 @@ impl RenderNode {
                 node.content_size = content_size;
                 node.viewport = size;
             }
-            RenderNode::Collection(node) => node.layout(renderer, size),
-            // A ViewEffect captures its child into a texture sized to the child's
-            // bounds, so the child lays out at the concrete size (re-laid-out only
-            // on a change). An AppliedFilter is layout-transparent: its child lays
-            // out at the same concrete size under the node's scoped environment.
+            RenderNode::Collection(node) => node.layout(renderer, proposal, size),
+            // Effects preserve the selected proposal even when their bounds stay equal.
             RenderNode::ViewEffect(node) => {
-                if size != node.laid_out.get() {
-                    let node_env = node.env.clone();
-                    node.child.borrow_mut().layout(renderer, &node_env, size);
-                    node.laid_out.set(size);
-                }
+                let node_env = node.env.clone();
+                node.child
+                    .borrow_mut()
+                    .layout(renderer, &node_env, proposal, size);
             }
             RenderNode::AppliedFilter(node) => {
                 let node_env = node.env.clone();
-                node.child.layout(renderer, &node_env, size);
+                node.child.layout(renderer, &node_env, proposal, size);
             }
             // A lazy stack places its items lazily at flush (offset-dependent); a
             // widget leaf or GpuSurface renders itself at flush from `ctx.bounds`.

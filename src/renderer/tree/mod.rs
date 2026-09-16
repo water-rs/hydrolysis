@@ -23,8 +23,10 @@
 //! re-dispatching the same screen from the `View` tree costs ~15ms.
 
 macro_rules! impl_widget_behavior {
-    ($state:ty, $render:path, $measure:expr) => {
+    ($state:ty, $render:path, $measure:expr $(, $priority:expr)?) => {
         impl WidgetBehavior for RefCell<$state> {
+            $(fn priority(&self) -> i32 { $priority })?
+
             fn render(
                 self: Rc<Self>,
                 renderer: &mut HydrolysisRenderer,

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use vello::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
 use waterui_controls::button::button;
-use waterui_core::layout::{HorizontalAlignment, Size};
+use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size};
 use waterui_core::{AnyView, SignalExt as _};
 use waterui_testing::TestArtifacts;
 
@@ -59,7 +59,12 @@ fn render_node_container_lays_out_and_flushes_text() {
 
     renderer.reset_scene();
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
 
     match &node {
         RenderNode::Container(container) => {
@@ -111,7 +116,12 @@ fn geometry_static_flush_reuses_cached_placement() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let placed_after_layout = match &node {
         RenderNode::Container(container) => container.placed.clone(),
         _ => panic!("expected a container node"),
@@ -155,7 +165,12 @@ fn opacity_wrapper_builds_and_flushes_via_dsl() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 80.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let ctx = RenderContext::with_transforms(bounds, Affine::IDENTITY, Affine::IDENTITY);
     node.flush(&mut renderer, ctx, &env);
     assert!(

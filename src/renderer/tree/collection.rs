@@ -301,9 +301,14 @@ impl CollectionNode {
         }
     }
 
-    pub(super) fn layout(&mut self, renderer: &mut HydrolysisRenderer, size: Size) {
+    pub(super) fn layout(
+        &mut self,
+        renderer: &mut HydrolysisRenderer,
+        proposal: ProposalSize,
+        size: Size,
+    ) {
         let env = self.env.clone();
-        let mut rects = {
+        let mut placements = {
             let cell = RefCell::new(&mut renderer.state);
             let subs: Vec<NodeSubView> = self
                 .entries
@@ -311,7 +316,7 @@ impl CollectionNode {
                 .map(|entry| NodeSubView::new(&entry.node, &cell, &env))
                 .collect();
             let refs: Vec<&dyn SubView> = subs.iter().map(|sub| sub as &dyn SubView).collect();
-            self.layout.place(Rect::from_size(size), &refs)
+            self.layout.place(Rect::from_size(size), proposal, &refs)
         };
         if self.has_active_transition()
             && let Some(runtime) = &self.transition
@@ -325,7 +330,8 @@ impl CollectionNode {
             // it enters or exits.
             let mut cursor = 0.0_f32;
             let mut first_visible = true;
-            for (entry, rect) in self.entries.iter().zip(rects.iter_mut()) {
+            for (entry, placement) in self.entries.iter().zip(&mut placements) {
+                let rect = &mut placement.frame;
                 let factor = entry.factor;
                 if factor <= f32::EPSILON {
                     // Fully absent this frame: park it at the cursor with its
@@ -347,10 +353,15 @@ impl CollectionNode {
                 cursor += extent * factor;
             }
         }
-        for (entry, rect) in self.entries.iter_mut().zip(rects.iter()) {
-            entry.node.layout(renderer, &env, *rect.size());
+        for (entry, placement) in self.entries.iter_mut().zip(&placements) {
+            entry
+                .node
+                .layout(renderer, &env, placement.proposal, *placement.frame.size());
         }
-        self.placed = rects;
+        self.placed = placements
+            .into_iter()
+            .map(|placement| placement.frame)
+            .collect();
     }
 
     pub(super) fn flush(&self, renderer: &mut HydrolysisRenderer, ctx: RenderContext) {

@@ -933,7 +933,6 @@ impl RenderNode {
         RenderNode::ViewEffect(Box::new(ViewEffectNode {
             runtime,
             child: RefCell::new(child),
-            laid_out: Cell::new(Size::zero()),
             env: env.clone(),
         }))
     }

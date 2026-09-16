@@ -420,15 +420,15 @@ impl ProtoNode {
         {
             let subs: Vec<MeasuredSub> = children.iter().map(|c| c.measured(proposal)).collect();
             let refs: Vec<&dyn SubView> = subs.iter().map(|s| s as &dyn SubView).collect();
-            let rects = layout.place(LayoutRect::from_size(size), &refs);
+            let placements = layout.place(LayoutRect::from_size(size), proposal, &refs);
             drop(refs);
-            for (child, rect) in children.iter_mut().zip(rects.iter()) {
-                child.layout(
-                    ProposalSize::new(Some(rect.width()), Some(rect.height())),
-                    *rect.size(),
-                );
+            for (child, placement) in children.iter_mut().zip(&placements) {
+                child.layout(placement.proposal, *placement.frame.size());
             }
-            *placed = rects;
+            *placed = placements
+                .into_iter()
+                .map(|placement| placement.frame)
+                .collect();
         }
     }
 
