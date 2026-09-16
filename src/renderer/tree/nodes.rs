@@ -196,7 +196,8 @@ impl RetainedSubview {
         let size = Size::new(rect.width() as f32, rect.height() as f32);
         self.needs_layout |= structural;
         if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+            let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
             self.needs_layout = false;
         }
@@ -230,7 +231,8 @@ impl RetainedSubview {
         let structural = Self::patch_built(node, renderer);
         self.needs_layout |= structural;
         if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+            let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
             self.needs_layout = false;
         }
@@ -258,7 +260,8 @@ impl RetainedSubview {
         let structural = Self::patch_built(node, renderer);
         self.needs_layout |= structural;
         if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+            let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
             self.needs_layout = false;
         }
@@ -375,6 +378,11 @@ pub(crate) struct WrapperNode {
 
 /// The type-erased behavior of one retained native widget state allocation.
 pub(crate) trait WidgetBehavior {
+    /// The default layout priority of this native leaf.
+    fn priority(&self) -> i32 {
+        0
+    }
+
     /// Re-renders the leaf from its retained state.
     fn render(
         self: Rc<Self>,
@@ -593,8 +601,6 @@ pub(crate) struct ViewEffectNode {
     /// The effect's content, built once as a persistent node (recursed into, not
     /// baked), re-rendered into the input texture each flush.
     pub(super) child: RefCell<RenderNode>,
-    /// The size `child` was last laid out at, so layout re-runs only on a change.
-    pub(super) laid_out: Cell<Size>,
     pub(super) env: Environment,
 }
 
