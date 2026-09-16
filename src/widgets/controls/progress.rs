@@ -204,7 +204,13 @@ pub(crate) fn render_progress_parts(
                 let label = &mut progress.label;
                 ctx.renderer_mut()
                     .with_suppressed_accessibility(|renderer| {
-                        label.flush_in_rect(renderer, render_ctx, env, label_rect);
+                        label.flush_in_rect(
+                            renderer,
+                            render_ctx,
+                            env,
+                            ProposalSize::UNSPECIFIED,
+                            label_rect,
+                        );
                     });
             }
 
@@ -270,7 +276,13 @@ pub(crate) fn render_progress_parts(
                     let value_label = &mut progress.value_label;
                     ctx.renderer_mut()
                         .with_suppressed_accessibility(|renderer| {
-                            value_label.flush_in_rect(renderer, render_ctx, env, value_label_rect);
+                            value_label.flush_in_rect(
+                                renderer,
+                                render_ctx,
+                                env,
+                                ProposalSize::UNSPECIFIED,
+                                value_label_rect,
+                            );
                         });
                 }
             }

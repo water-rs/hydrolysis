@@ -28,7 +28,7 @@ use waterui_layout::stack::{VStack, vstack, zstack};
 use nami::collection::List;
 use waterui::graphics::Color;
 use waterui_core::dynamic::watch;
-use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView};
+use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView, SubviewPlacement};
 use waterui_core::views::ForEach;
 use waterui_graphics::color::signal_color;
 use waterui_layout::AbsoluteLayout;
@@ -116,14 +116,19 @@ impl Layout for CountingLayout {
         self.inner.size_that_fits(proposal, children)
     }
 
-    fn place(&self, bounds: Rect, children: &[&dyn SubView]) -> Vec<Rect> {
+    fn place(
+        &self,
+        bounds: Rect,
+        proposal: ProposalSize,
+        children: &[&dyn SubView],
+    ) -> Vec<SubviewPlacement> {
         self.place_calls.set(
             self.place_calls
                 .get()
                 .checked_add(1)
                 .expect("counting layout place-call counter overflow"),
         );
-        self.inner.place(bounds, children)
+        self.inner.place(bounds, proposal, children)
     }
 }
 

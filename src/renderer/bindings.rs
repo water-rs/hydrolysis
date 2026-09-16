@@ -52,7 +52,7 @@ impl HydrolysisRenderer {
         self.set_focused_text_input(Some(focused))
     }
 
-    pub(crate) fn push_lazy_viewport(&mut self, viewport: vello::kurbo::Rect) {
+    pub(crate) fn push_lazy_viewport(&mut self, viewport: LazyViewport) {
         self.lazy.lazy_viewport_stack.push(viewport);
     }
 

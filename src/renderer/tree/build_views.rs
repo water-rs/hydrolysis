@@ -61,7 +61,8 @@ impl_widget_behavior!(
 impl_widget_behavior!(
     Spacer,
     crate::widgets::layout::spacer::render_spacer_node,
-    crate::widgets::layout::spacer::measure_spacer_node
+    crate::widgets::layout::spacer::measure_spacer_node,
+    Spacer::DEFAULT_LAYOUT_PRIORITY
 );
 impl_widget_behavior!(
     (),

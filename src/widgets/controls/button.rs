@@ -424,7 +424,13 @@ pub(crate) fn render_button_parts(
             let render_ctx = ctx.render_context();
             ctx.renderer_mut()
                 .with_suppressed_accessibility(|renderer| {
-                    subview.flush_in_rect(renderer, render_ctx, env, label_target);
+                    subview.flush_in_rect(
+                        renderer,
+                        render_ctx,
+                        env,
+                        ProposalSize::UNSPECIFIED,
+                        label_target,
+                    );
                 });
         } else if label_target.width() > 0.0 && label_target.height() > 0.0 {
             // Title label: centered styled text rendered fresh each frame,
@@ -540,7 +546,13 @@ pub(crate) fn render_menu_parts(
                 let render_ctx = ctx.render_context();
                 ctx.renderer_mut()
                     .with_suppressed_accessibility(|renderer| {
-                        subview.flush_in_rect(renderer, render_ctx, env, label_bounds);
+                        subview.flush_in_rect(
+                            renderer,
+                            render_ctx,
+                            env,
+                            ProposalSize::UNSPECIFIED,
+                            label_bounds,
+                        );
                     });
             }
         }

@@ -281,3 +281,43 @@ fn momentum_tail_presents_every_consumed_delta() {
         );
     }
 }
+
+#[test]
+fn inset_lazy_stack_materializes_the_visible_rows_after_pan() {
+    let builder = AnyViewBuilder::<AnyView>::new(|| {
+        let data = (0..100).map(SelfId::new).collect::<Vec<_>>();
+        AnyView::new(scroll(
+            vstack((
+                text("Header").height(300.0),
+                VStack::for_each(data, |row| {
+                    text(format!("Inset row {}", row.into_inner())).height(44.0)
+                })
+                .spacing(0.0),
+            ))
+            .spacing(0.0),
+        ))
+    });
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(test_environment(), builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: 200.0,
+        y: 320.0,
+        dx: 0.0,
+        dy: -700.0,
+        phase: TouchPhase::Moved,
+    });
+    let frame = runtime.pump_at(false, start + Duration::from_millis(16));
+    let update = frame
+        .tree_update
+        .as_ref()
+        .expect("pan publishes visible rows");
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Inset row 10")),
+        "a row below the header and inside the viewport must be materialized"
+    );
+}

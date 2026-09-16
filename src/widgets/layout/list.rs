@@ -1,3 +1,4 @@
+use crate::renderer::bounded_proposal;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -749,14 +750,18 @@ pub(crate) fn list_accessibility(
     }
 }
 
-/// Measures a list leaf from its config (intrinsic-sized; proposal-independent).
+/// Measures the scrollable viewport, using content size only for ideal queries.
 pub(crate) fn measure_list_node(
     list: &ListConfig,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
 ) -> ViewDimensions {
-    ViewDimensions::new(measure_list_intrinsic(list, state, env))
+    let intrinsic = measure_list_intrinsic(list, state, env);
+    ViewDimensions::new(LayoutSize::new(
+        proposal.width.unwrap_or(intrinsic.width),
+        proposal.height.unwrap_or(intrinsic.height),
+    ))
 }
 
 /// Renders a retained list leaf every flush.
@@ -1193,7 +1198,13 @@ pub(crate) fn render_list_parts(
                 let state_ref = state.borrow();
                 let mut cache = state_ref.item_cache.borrow_mut();
                 let subview = cache.entry(id, move || content);
-                subview.flush_in_rect(ctx.renderer_mut(), render_ctx, &row_env, content_rect);
+                subview.flush_in_rect(
+                    ctx.renderer_mut(),
+                    render_ctx,
+                    &row_env,
+                    bounded_proposal(content_rect),
+                    content_rect,
+                );
             }
             #[cfg(feature = "accessibility")]
             ctx.renderer_mut().pop_accessibility_suppression();

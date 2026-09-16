@@ -1,3 +1,4 @@
+use crate::renderer::bounded_proposal;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -334,6 +335,7 @@ pub(crate) fn render_tabs_parts(
                 ctx.renderer_mut(),
                 render_ctx,
                 env,
+                ProposalSize::UNSPECIFIED,
                 label_rect,
             );
             ctx.pop_layer();
@@ -349,6 +351,7 @@ pub(crate) fn render_tabs_parts(
             ctx.renderer_mut(),
             render_ctx,
             env,
+            bounded_proposal(content_rect),
             content_rect,
         );
     }

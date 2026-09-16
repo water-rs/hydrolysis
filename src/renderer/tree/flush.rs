@@ -364,7 +364,10 @@ impl RenderNode {
                     }
                     scroll_accessibility_node
                 };
-                renderer.push_lazy_viewport(lazy_viewport);
+                renderer.push_lazy_viewport(crate::renderer::lifecycle::LazyViewport {
+                    bounds: lazy_viewport,
+                    transform: content_ctx.transform,
+                });
                 node.child.flush(renderer, content_ctx, env);
                 renderer.pop_lazy_viewport("hydrolysis render tree ScrollNode");
                 #[cfg(feature = "accessibility")]

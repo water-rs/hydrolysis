@@ -3,7 +3,14 @@ use waterui_layout::stack::LazyStackAxis;
 
 #[derive(Default)]
 pub(crate) struct LazyState {
-    pub(crate) lazy_viewport_stack: Vec<vello::kurbo::Rect>,
+    pub(crate) lazy_viewport_stack: Vec<LazyViewport>,
+}
+
+/// Viewport geometry with the coordinate transform of its scroll content.
+#[derive(Clone, Copy)]
+pub(crate) struct LazyViewport {
+    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) transform: vello::kurbo::Affine,
 }
 
 impl LazyState {
