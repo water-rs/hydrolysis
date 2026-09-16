@@ -207,9 +207,13 @@ pub(crate) fn render_date_picker_parts(
             (ctx.bounds.y0 + label_height).min(ctx.bounds.y1),
         );
         let render_ctx = ctx.render_context();
-        state
-            .label_view
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, label_bounds);
+        state.label_view.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            label_bounds,
+        );
     }
 
     let field_bounds = vello::kurbo::Rect::new(

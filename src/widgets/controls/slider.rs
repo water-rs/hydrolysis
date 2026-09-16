@@ -245,7 +245,13 @@ pub(crate) fn render_slider_parts(
         let label_view = &mut state.label_view;
         ctx.renderer_mut()
             .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(renderer, render_ctx, env, label_rect);
+                label_view.flush_in_rect(
+                    renderer,
+                    render_ctx,
+                    env,
+                    ProposalSize::UNSPECIFIED,
+                    label_rect,
+                );
             });
         if disabled {
             ctx.pop_layer();
@@ -275,9 +281,13 @@ pub(crate) fn render_slider_parts(
             ctx.push_layer_rect(theme.disabled_content_alpha(), min_label_rect);
         }
         let render_ctx = ctx.render_context();
-        state
-            .min_value_label
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, min_label_rect);
+        state.min_value_label.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            min_label_rect,
+        );
         if disabled {
             ctx.pop_layer();
         }
@@ -289,9 +299,13 @@ pub(crate) fn render_slider_parts(
             ctx.push_layer_rect(theme.disabled_content_alpha(), max_label_rect);
         }
         let render_ctx = ctx.render_context();
-        state
-            .max_value_label
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, max_label_rect);
+        state.max_value_label.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            max_label_rect,
+        );
         if disabled {
             ctx.pop_layer();
         }

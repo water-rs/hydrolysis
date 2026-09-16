@@ -37,6 +37,15 @@ pub(crate) struct WidgetRenderContext<'a> {
     pub bounds: vello::kurbo::Rect,
 }
 
+/// An explicit offer from a native widget-owned content region.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn bounded_proposal(bounds: vello::kurbo::Rect) -> waterui_core::layout::ProposalSize {
+    waterui_core::layout::ProposalSize::new(
+        Some(bounds.width() as f32),
+        Some(bounds.height() as f32),
+    )
+}
+
 impl RenderContext {
     pub(crate) fn with_transforms(
         bounds: vello::kurbo::Rect,

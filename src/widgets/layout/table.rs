@@ -1,3 +1,4 @@
+use crate::renderer::bounded_proposal;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -558,7 +559,13 @@ fn flush_cell_subview(
         let state_ref = state.borrow();
         let mut cache = state_ref.item_cache.borrow_mut();
         let subview = cache.entry(key, move || view);
-        subview.flush_in_rect(ctx.renderer_mut(), render_ctx, env, rect);
+        subview.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(rect),
+            rect,
+        );
     }
     #[cfg(feature = "accessibility")]
     ctx.renderer_mut().pop_accessibility_suppression();
