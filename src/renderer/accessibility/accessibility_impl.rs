@@ -411,9 +411,13 @@ impl AccessibilityBuilder {
     /// `accessibilityLabel` overrides the element rather than wrapping it — so
     /// a padding or frame between the metadata and a lone text must not turn
     /// the override into a `Group("name")` around a `Label(content)`. The child
-    /// keeps its identity and actions; it takes the scope's label, the scope's
-    /// automation id, the scope's explicit role, and the container's outer
-    /// bounds. With zero or several
+    /// keeps its identity, its actions, and its own bounds — the naming
+    /// container's outer bounds are the frame the parent assigned to the
+    /// labelled view, which under the placement contract routinely exceeds the
+    /// element (a window's overlay places its base over the whole bounds, so a
+    /// root `view.size(8, 8)` is laid out in the window while the element sits
+    /// in the resolved 8x8 box). The child takes the scope's label, the scope's
+    /// automation id, and the scope's explicit role. With zero or several
     /// children the container stands: it is then the only node that can say
     /// the parts belong together.
     fn collapse_single_child_container(&mut self, container_id: AccessibilityNodeId) {
@@ -429,7 +433,6 @@ impl AccessibilityBuilder {
         let label = container.label().map(str::to_owned);
         let author_id = container.author_id().map(str::to_owned);
         let role = container.role();
-        let bounds = container.bounds();
         let child = self
             .nodes
             .iter_mut()
@@ -448,9 +451,6 @@ impl AccessibilityBuilder {
         }
         if role != AccessibilityNodeRole::Group {
             child.set_role(role);
-        }
-        if let Some(bounds) = bounds {
-            child.set_bounds(bounds);
         }
         // The child takes the container's place under its parent.
         if let Some(slot) = self

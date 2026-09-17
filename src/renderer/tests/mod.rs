@@ -971,6 +971,48 @@ fn container_label_without_role_names_the_container_only() {
     assert_eq!(container.children().len(), 2);
 }
 
+/// A naming scope collapses onto the single element it names, and the element
+/// keeps the bounds it was actually placed in — not the labelled view's
+/// assigned frame. Under the negotiated-placement contract a parent may stretch
+/// a container past its own answer: a window's overlay places its base over the
+/// whole bounds, so a root `view.size(8, 8)` is assigned the window while its
+/// content lands in the resolved 8x8 box. Reporting the container's outer
+/// bounds would announce a window-sized element around an 8x8 drawing.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_naming_scope_keeps_the_elements_own_bounds_when_the_parent_stretched_it() {
+    let env = test_environment().extending(waterui_graphics::SceneViewMergeToParent);
+    let mut renderer = test_renderer();
+    let recording = waterui_graphics::Picture::record(|_scene| {});
+    let picture = waterui_graphics::Picture::new(
+        waterui_core::layout::Size::new(24.0, 24.0),
+        nami::constant(recording),
+    );
+    let view = waterui_layout::frame::Frame::new(picture)
+        .width(8.0)
+        .height(8.0)
+        .a11y_role(AccessibilityRole::Image)
+        .a11y_label("Sized");
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled root frame must publish an accessibility tree");
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Sized"))
+        .expect("the labelled element must exist");
+    let bounds = node.bounds().expect("the element must carry bounds");
+    assert!(
+        (bounds.width() - 8.0).abs() < 0.5 && (bounds.height() - 8.0).abs() < 0.5,
+        "the element must report the 8x8 box it was placed in, got {}x{}",
+        bounds.width(),
+        bounds.height(),
+    );
+}
+
 /// A view hook wraps whatever it returns in a snapshot of the environment it was
 /// called with, and layout normalization resolves that body before the naming
 /// scope exists — so the snapshot carries no label, and flattening it replaces
