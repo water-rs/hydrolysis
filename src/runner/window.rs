@@ -433,9 +433,12 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let (width, height) = surface.size();
     let bounds = create_bounds(width, height, scale_factor);
     let root_transform = vello::kurbo::Affine::scale(scale_factor);
-    runtime
-        .renderer
-        .set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    runtime.renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
 
     let pump_started_at = Instant::now();
     let mut phases = FramePhases::default();
@@ -603,6 +606,7 @@ fn render_to_surface(
             adapter: surface.adapter(),
             device: surface.device(),
             queue: surface.queue(),
+            device_loss: surface.device_loss().clone(),
             texture: Some(frame.texture()),
             view: frame.view(),
             format,
@@ -973,7 +977,7 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
 
     runtime.request_refresh();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height, adapter, device, queue) = {
+    let (width, height, adapter, device, queue, device_loss) = {
         let surface = runtime.platform.surface();
         let (width, height) = surface.size();
         (
@@ -982,11 +986,12 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
             surface.adapter().clone(),
             surface.device().clone(),
             surface.queue().clone(),
+            surface.device_loss().clone(),
         )
     };
     runtime
         .renderer
-        .set_frame_resources(&adapter, &device, &queue);
+        .set_frame_resources(&adapter, &device, &queue, &device_loss);
     let bounds = create_bounds(width, height, scale_factor);
     let transform = vello::kurbo::Affine::scale(scale_factor);
     assert!(

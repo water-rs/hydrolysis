@@ -29,6 +29,8 @@ pub struct BrowserSurface {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Reports this device lost; taken when the device was opened.
+    device_loss: waterui_graphics::DeviceLoss,
     config: wgpu::SurfaceConfiguration,
 }
 
@@ -64,6 +66,7 @@ impl BrowserSurface {
             })
             .await
             .expect("hydrolysis web surface: failed to request WebGPU device");
+        let device_loss = waterui_graphics::DeviceLoss::observe(&device);
 
         let caps = surface.get_capabilities(&adapter);
         let config = wgpu::SurfaceConfiguration {
@@ -84,6 +87,7 @@ impl BrowserSurface {
             adapter,
             device,
             queue,
+            device_loss,
             config,
         }
     }
@@ -100,6 +104,10 @@ impl SurfaceProvider for BrowserSurface {
 
     fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+        &self.device_loss
     }
 
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {

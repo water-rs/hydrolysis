@@ -402,10 +402,12 @@ impl HydrolysisRenderer {
             ),
             vello::kurbo::Affine::IDENTITY,
         );
+        let device_loss = self.state().frame_device_loss().clone();
         self.render_scene_to_texture(HydrolysisRenderTarget {
             adapter,
             device,
             queue,
+            device_loss,
             texture: Some(&texture.texture),
             view: &texture.view,
             format: wgpu::TextureFormat::Rgba8Unorm,

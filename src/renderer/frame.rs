@@ -247,8 +247,10 @@ impl HydrolysisRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        device_loss: &waterui_graphics::DeviceLoss,
     ) {
-        self.state.set_frame_resources(adapter, device, queue);
+        self.state
+            .set_frame_resources(adapter, device, queue, device_loss);
     }
 
     pub fn clear_frame_resources(&mut self) {
