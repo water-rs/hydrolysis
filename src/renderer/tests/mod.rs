@@ -56,7 +56,12 @@ fn test_renderer() -> HydrolysisRenderer {
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
     let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device());
-    renderer.set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
     renderer
 }
 
@@ -800,7 +805,12 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
     let env = test_environment();
     let bounds = vello::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
     let surface = platform.surface();
-    renderer.set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
     capture_root_window(&mut renderer, view, &env, bounds);
 
     let point = vello::kurbo::Point::new(60.0, 60.0);

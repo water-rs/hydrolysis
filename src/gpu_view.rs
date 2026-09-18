@@ -1,7 +1,9 @@
 use waterui::View;
 use waterui_core::layout::StretchAxis;
 use waterui_core::{AnyView, Environment};
-use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView, SceneViewMergeToParent};
+use waterui_graphics::{
+    DeviceLoss, GpuContext, GpuFrame, GpuSurface, GpuView, SceneViewMergeToParent,
+};
 
 use crate::renderer::HydrolysisRenderer;
 use crate::time::Instant;
@@ -14,6 +16,8 @@ where
 {
     view: V,
     adapter: Option<wgpu::Adapter>,
+    /// Reports this device lost; taken when the device was opened.
+    device_loss: Option<DeviceLoss>,
     renderer: Option<HydrolysisRenderer>,
     env: Option<Environment>,
     needs_rebuild: bool,
@@ -34,6 +38,7 @@ where
         Self {
             view,
             adapter: None,
+            device_loss: None,
             renderer: None,
             env: None,
             needs_rebuild: true,
@@ -55,6 +60,7 @@ where
         renderer.setup_embedded_effects(ctx).await;
 
         self.adapter = Some(ctx.adapter.clone());
+        self.device_loss = Some(ctx.device_loss.clone());
         self.renderer = Some(renderer);
         self.env = Some(scoped_env);
     }
@@ -65,6 +71,10 @@ where
             .adapter
             .as_ref()
             .expect("HydrolysisGpuView adapter missing");
+        let device_loss = self
+            .device_loss
+            .as_ref()
+            .expect("HydrolysisGpuView device_loss missing");
         let renderer = self
             .renderer
             .as_mut()
@@ -74,7 +84,7 @@ where
             .as_ref()
             .expect("HydrolysisGpuView environment missing");
 
-        renderer.set_frame_resources(adapter, frame.device, frame.queue);
+        renderer.set_frame_resources(adapter, frame.device, frame.queue, device_loss);
         renderer.poll_gpu_surface_redraw_handles();
 
         // Advance the embedded frame clock from the host's animation clock.
@@ -112,6 +122,7 @@ where
             adapter,
             device: frame.device,
             queue: frame.queue,
+            device_loss: device_loss.clone(),
             texture: Some(frame.texture),
             view: &frame.view,
             format: frame.format,
