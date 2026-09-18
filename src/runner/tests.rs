@@ -524,6 +524,10 @@ impl SurfaceProvider for RecoveringSurface {
         self.inner.queue()
     }
 
+    fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+        self.inner.device_loss()
+    }
+
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {
         self.acquire_count += 1;
         self.first_error
