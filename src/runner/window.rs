@@ -73,6 +73,7 @@ impl FrameMode {
 
     /// Whether the scheduled frame exists to apply an unapplied semantic
     /// change. `Animate` is scheduled continuation work, not staleness.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) const fn is_unapplied_change(self) -> bool {
         matches!(self, FrameMode::Refresh)
     }
