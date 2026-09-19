@@ -265,7 +265,7 @@ fn gpu_runtime() -> GpuRuntime {
 #[test]
 fn hydrolysis_ext_renders_offscreen() {
     let mut env = Environment::new();
-    let view = CloneableRect.hydrolysis();
+    let view = CloneableRect.hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -293,7 +293,7 @@ fn hydrolysis_ext_renders_offscreen() {
 #[test]
 fn hydrolysis_ext_renders_gpu_surface_inside_opacity_layer() {
     let mut env = Environment::new();
-    let view = GpuSurfaceOpacityView.hydrolysis();
+    let view = GpuSurfaceOpacityView.hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -317,7 +317,8 @@ fn hydrolysis_ext_renders_gpu_surface_inside_opacity_layer() {
 #[test]
 fn hydrolysis_ext_preserves_gpu_surface_under_vello_overlay() {
     let mut env = Environment::new();
-    let view = GpuSurfaceUnderVelloOverlayView.hydrolysis();
+    let view = GpuSurfaceUnderVelloOverlayView
+        .hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -343,7 +344,7 @@ fn hydrolysis_ext_skips_transparent_gpu_surface_inside_opacity_layer() {
     let view = TransparentGpuSurfaceOpacityView {
         calls: Rc::clone(&calls),
     }
-    .hydrolysis();
+    .hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -369,7 +370,7 @@ fn hydrolysis_ext_skips_transparent_gpu_surface_inside_opacity_layer() {
 #[test]
 fn hydrolysis_ext_renders_gpu_surface_inside_clip_shape() {
     let mut env = Environment::new();
-    let view = GpuSurfaceClipView.hydrolysis();
+    let view = GpuSurfaceClipView.hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -399,7 +400,8 @@ fn hydrolysis_ext_renders_gpu_surface_inside_clip_shape() {
 #[test]
 fn hydrolysis_ext_captures_gpu_surface_inside_view_effect() {
     let mut env = Environment::new();
-    let view = GpuSurfaceViewEffectView.hydrolysis();
+    let view =
+        GpuSurfaceViewEffectView.hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(
@@ -422,7 +424,8 @@ fn hydrolysis_ext_captures_gpu_surface_inside_view_effect() {
 #[test]
 fn hydrolysis_ext_captures_gpu_surface_inside_applied_filter() {
     let mut env = Environment::new();
-    let view = GpuSurfaceAppliedFilterView.hydrolysis();
+    let view =
+        GpuSurfaceAppliedFilterView.hydrolysis(Rc::new(hydrolysis_m3::MaterialTheme::default()));
 
     let runtime = gpu_runtime();
     let output = pollster::block_on(view.render_offscreen(

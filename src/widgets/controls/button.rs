@@ -926,6 +926,30 @@ fn styled_button_label(
     }
 }
 
+/// Emits a retained button's accessibility node for the semantic walk — the
+/// same node `button_accessibility` registers, with no bounds. The label
+/// sub-view flushes visual-only (its semantics are merged into the button's
+/// node), so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_button_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ButtonRenderState>>,
+    env: &Environment,
+) {
+    button_accessibility(renderer, None, state, env);
+}
+
+/// Emits a retained menu trigger's accessibility node for the semantic walk —
+/// the same node `menu_accessibility` registers, with no bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_menu_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<MenuRenderState>>,
+    env: &Environment,
+) {
+    menu_accessibility(renderer, None, None, state, env);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MENU_TRIGGER_STYLE, button_chrome_size};
@@ -952,28 +976,4 @@ mod tests {
             Size::new(31.0, 29.0)
         );
     }
-}
-
-/// Emits a retained button's accessibility node for the semantic walk — the
-/// same node `button_accessibility` registers, with no bounds. The label
-/// sub-view flushes visual-only (its semantics are merged into the button's
-/// node), so there is nothing else to emit.
-#[cfg(feature = "accessibility")]
-pub(crate) fn emit_button_accessibility(
-    renderer: &mut crate::renderer::SemanticCore,
-    state: &Rc<RefCell<ButtonRenderState>>,
-    env: &Environment,
-) {
-    button_accessibility(renderer, None, state, env);
-}
-
-/// Emits a retained menu trigger's accessibility node for the semantic walk —
-/// the same node `menu_accessibility` registers, with no bounds.
-#[cfg(feature = "accessibility")]
-pub(crate) fn emit_menu_accessibility(
-    renderer: &mut crate::renderer::SemanticCore,
-    state: &Rc<RefCell<MenuRenderState>>,
-    env: &Environment,
-) {
-    menu_accessibility(renderer, None, None, state, env);
 }

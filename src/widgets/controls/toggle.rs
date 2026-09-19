@@ -366,6 +366,24 @@ fn toggle_control_and_label_bounds(
     }
 }
 
+/// Emits a retained toggle's accessibility node for the semantic walk — the
+/// same node `toggle_accessibility` registers, with no bounds. The label
+/// sub-view flushes visual-only, so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_toggle_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ToggleRenderState>>,
+    env: &Environment,
+) {
+    toggle_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[crate::renderer::InteractionKey::for_rc(state, 0)],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::toggle_control_and_label_bounds;
@@ -401,22 +419,4 @@ mod tests {
         assert_eq!(control, Rect::new(268.0, 24.0, 320.0, 56.0));
         assert_eq!(label, Rect::new(16.0, 20.0, 260.0, 60.0));
     }
-}
-
-/// Emits a retained toggle's accessibility node for the semantic walk — the
-/// same node `toggle_accessibility` registers, with no bounds. The label
-/// sub-view flushes visual-only, so there is nothing else to emit.
-#[cfg(feature = "accessibility")]
-pub(crate) fn emit_toggle_accessibility(
-    renderer: &mut crate::renderer::SemanticCore,
-    state: &Rc<RefCell<ToggleRenderState>>,
-    env: &Environment,
-) {
-    toggle_accessibility(
-        renderer,
-        None,
-        &state.borrow().config,
-        env,
-        &[crate::renderer::InteractionKey::for_rc(state, 0)],
-    );
 }

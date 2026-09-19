@@ -244,7 +244,13 @@ fn dynamic_size_change_reflows_without_rebuild() {
         AnyViewBuilder::<AnyView>::new(move || dynamic_changing_size_visible(&value))
     };
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -549,7 +555,13 @@ fn dynamic_growth_from_empty_renders_content_without_rebuild() {
         AnyView::new(zstack((().size(360.0, 600.0), overlay_content())))
     });
     let static_env = test_environment();
-    let mut static_runtime = HeadlessRuntime::new_for_tests(static_env, static_builder, 400, 640);
+    let mut static_runtime = HeadlessRuntime::new_for_tests(
+        static_env,
+        static_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = static_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -625,7 +637,13 @@ fn reused_collection_item_reactive_background_tracks_on_selection() {
         AnyViewBuilder::<AnyView>::new(move || reactive_bg_collection(&selected))
     };
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -689,7 +707,13 @@ fn collection_membership_exit_animates_then_settles() {
     let truth_list: List<SelfId<u64>> = List::from(vec![SelfId::new(0), SelfId::new(2)]);
     let truth_builder = AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&truth_list));
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -749,7 +773,13 @@ fn collection_membership_enter_animates_then_settles() {
         List::from(vec![SelfId::new(0), SelfId::new(1), SelfId::new(2)]);
     let truth_builder = AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&truth_list));
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -860,7 +890,8 @@ fn sibling_applied_filters_share_one_atlas_page() {
 
     let env = pumped_test_environment();
     let builder = AnyViewBuilder::<AnyView>::new(filtered_boxes);
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 96, 48);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 96, 48, MinimalTestTheme::default());
     let snapshot = pump_until_filters_render(&mut runtime, 2);
     assert_eq!(
         runtime.renderer().applied_filter_capture_pages(),
@@ -890,7 +921,8 @@ fn nested_applied_filters_capture_inner_before_outer() {
 
     let env = pumped_test_environment();
     let builder = AnyViewBuilder::<AnyView>::new(nested_boxes);
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 96, 96);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 96, 96, MinimalTestTheme::default());
     let snapshot = pump_until_filters_render(&mut runtime, 2);
     assert_eq!(
         runtime.renderer().applied_filter_capture_pages(),

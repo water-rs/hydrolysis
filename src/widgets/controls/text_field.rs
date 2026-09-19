@@ -867,99 +867,6 @@ fn material_input_cursor_rect(
     vello::kurbo::Rect::new(x0, y0, x1, y1.min(text_rect.y1))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        CONTENT_ENTER_DELAY_PORTION, CONTENT_VISIBLE_PORTION, material_input_content_alpha,
-        material_input_cursor_rect, material_input_text_clip_rect,
-    };
-
-    #[test]
-    fn material_input_content_enter_matches_material_web_delay() {
-        assert_eq!(material_input_content_alpha(true, 0.0), 0.0);
-        assert_eq!(
-            material_input_content_alpha(true, CONTENT_ENTER_DELAY_PORTION),
-            0.0
-        );
-        assert_eq!(material_input_content_alpha(true, 1.0), 1.0);
-    }
-
-    #[test]
-    fn material_input_content_exit_matches_material_web_visible_window() {
-        assert_eq!(material_input_content_alpha(true, 1.0), 1.0);
-        assert_eq!(
-            material_input_content_alpha(
-                true,
-                CONTENT_ENTER_DELAY_PORTION + (CONTENT_VISIBLE_PORTION * 0.5),
-            ),
-            0.5
-        );
-        assert_eq!(
-            material_input_content_alpha(true, CONTENT_ENTER_DELAY_PORTION),
-            0.0
-        );
-        assert_eq!(material_input_content_alpha(true, 0.0), 0.0);
-    }
-
-    #[test]
-    fn material_input_without_label_keeps_content_visible() {
-        assert_eq!(material_input_content_alpha(false, 0.0), 1.0);
-    }
-
-    #[test]
-    fn material_input_text_clip_expands_for_tall_fallback_glyphs() {
-        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
-        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 48.0);
-
-        let clip = material_input_text_clip_rect(field, text, 30.0);
-
-        assert_eq!(clip.x0, text.x0);
-        assert_eq!(clip.x1, text.x1);
-        assert!(clip.height() >= 30.0);
-        assert!(clip.y0 >= field.y0);
-        assert!(clip.y1 <= field.y1);
-    }
-
-    #[test]
-    fn material_input_text_clip_expands_for_placeholder_layout() {
-        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
-        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 48.0);
-
-        let clip = material_input_text_clip_rect(field, text, 34.0);
-
-        assert_eq!(clip.x0, text.x0);
-        assert_eq!(clip.x1, text.x1);
-        assert!(clip.height() >= 34.0);
-        assert!(clip.y1 > text.y1);
-    }
-
-    #[test]
-    fn material_input_cursor_uses_fallback_height_for_empty_layout_geometry() {
-        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
-        let empty_geometry = vello::kurbo::Rect::new(0.0, 0.0, 0.0, 1.0);
-
-        let cursor = material_input_cursor_rect(text, empty_geometry, 22.0);
-
-        assert_eq!(cursor.x0, text.x0);
-        assert_eq!(cursor.x1, text.x0 + 1.0);
-        assert_eq!(cursor.y0, text.y0);
-        assert_eq!(cursor.y1, text.y0 + 22.0);
-    }
-
-    #[test]
-    fn material_input_cursor_preserves_non_empty_layout_geometry() {
-        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
-        let geometry = vello::kurbo::Rect::new(42.0, 3.0, 43.0, 25.0);
-
-        let cursor = material_input_cursor_rect(text, geometry, 34.0);
-
-        assert_eq!(cursor.x0, text.x0 + 42.0);
-        assert_eq!(cursor.x1, text.x0 + 43.0);
-        assert_eq!(cursor.y0, text.y0 + 3.0);
-        assert_eq!(cursor.y1, text.y0 + 25.0);
-    }
-}
-
 /// Emits a retained text field's accessibility node and text-input target for
 /// the semantic walk — the same node `render_text_field_parts` registers, with
 /// no bounds. The input target gets a real text layout (shaped from the
@@ -1154,4 +1061,97 @@ pub(crate) fn emit_secure_field_accessibility(
         }
     }
     state.label_view.emit_accessibility(renderer, env);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CONTENT_ENTER_DELAY_PORTION, CONTENT_VISIBLE_PORTION, material_input_content_alpha,
+        material_input_cursor_rect, material_input_text_clip_rect,
+    };
+
+    #[test]
+    fn material_input_content_enter_matches_material_web_delay() {
+        assert_eq!(material_input_content_alpha(true, 0.0), 0.0);
+        assert_eq!(
+            material_input_content_alpha(true, CONTENT_ENTER_DELAY_PORTION),
+            0.0
+        );
+        assert_eq!(material_input_content_alpha(true, 1.0), 1.0);
+    }
+
+    #[test]
+    fn material_input_content_exit_matches_material_web_visible_window() {
+        assert_eq!(material_input_content_alpha(true, 1.0), 1.0);
+        assert_eq!(
+            material_input_content_alpha(
+                true,
+                CONTENT_ENTER_DELAY_PORTION + (CONTENT_VISIBLE_PORTION * 0.5),
+            ),
+            0.5
+        );
+        assert_eq!(
+            material_input_content_alpha(true, CONTENT_ENTER_DELAY_PORTION),
+            0.0
+        );
+        assert_eq!(material_input_content_alpha(true, 0.0), 0.0);
+    }
+
+    #[test]
+    fn material_input_without_label_keeps_content_visible() {
+        assert_eq!(material_input_content_alpha(false, 0.0), 1.0);
+    }
+
+    #[test]
+    fn material_input_text_clip_expands_for_tall_fallback_glyphs() {
+        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
+        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 48.0);
+
+        let clip = material_input_text_clip_rect(field, text, 30.0);
+
+        assert_eq!(clip.x0, text.x0);
+        assert_eq!(clip.x1, text.x1);
+        assert!(clip.height() >= 30.0);
+        assert!(clip.y0 >= field.y0);
+        assert!(clip.y1 <= field.y1);
+    }
+
+    #[test]
+    fn material_input_text_clip_expands_for_placeholder_layout() {
+        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
+        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 48.0);
+
+        let clip = material_input_text_clip_rect(field, text, 34.0);
+
+        assert_eq!(clip.x0, text.x0);
+        assert_eq!(clip.x1, text.x1);
+        assert!(clip.height() >= 34.0);
+        assert!(clip.y1 > text.y1);
+    }
+
+    #[test]
+    fn material_input_cursor_uses_fallback_height_for_empty_layout_geometry() {
+        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
+        let empty_geometry = vello::kurbo::Rect::new(0.0, 0.0, 0.0, 1.0);
+
+        let cursor = material_input_cursor_rect(text, empty_geometry, 22.0);
+
+        assert_eq!(cursor.x0, text.x0);
+        assert_eq!(cursor.x1, text.x0 + 1.0);
+        assert_eq!(cursor.y0, text.y0);
+        assert_eq!(cursor.y1, text.y0 + 22.0);
+    }
+
+    #[test]
+    fn material_input_cursor_preserves_non_empty_layout_geometry() {
+        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
+        let geometry = vello::kurbo::Rect::new(42.0, 3.0, 43.0, 25.0);
+
+        let cursor = material_input_cursor_rect(text, geometry, 34.0);
+
+        assert_eq!(cursor.x0, text.x0 + 42.0);
+        assert_eq!(cursor.x1, text.x0 + 43.0);
+        assert_eq!(cursor.y0, text.y0 + 3.0);
+        assert_eq!(cursor.y1, text.y0 + 25.0);
+    }
 }
