@@ -1,0 +1,890 @@
+//! Comprehensive [`SemanticRuntime`] coverage: every widget family mounts on a
+//! bare [`Environment`] — no style package, no GPU — and the emitted AccessKit
+//! tree is asserted for roles, labels, values, supported actions and
+//! parent–child structure, while `perform_accessibility_action` is asserted to
+//! mutate the bound state each action targets.
+//!
+//! These cannot run until `waterui-testing` (a dev-dependency every test
+//! target links) carries the `waterui#1130` driver side; they are written
+//! against the pinned waterui API so they compile and run unchanged after the
+//! repin.
+
+use accesskit::{
+    Action, ActionData, ActionRequest, Node, NodeId, Role, Toggled, TreeId, TreeUpdate,
+};
+use nami::Binding;
+use nami::Signal as _;
+use waterui::ViewExt as _;
+use waterui::component::list::{List, ListItem};
+use waterui::component::progress::progress;
+use waterui::component::table::{col, table};
+use waterui_controls::button::button;
+use waterui_controls::menu::{CommandExt as _, Menu};
+use waterui_controls::slider::slider;
+use waterui_controls::stepper::stepper;
+use waterui_controls::text_field::field;
+use waterui_controls::toggle::toggle;
+use waterui_core::handler::AnyViewBuilder;
+use waterui_core::{AnyView, Environment, Str};
+use waterui_form::picker::color::ColorPicker;
+use waterui_form::picker::date::DatePicker;
+use waterui_form::picker::{PickerStyle, picker};
+use waterui_form::secure::secure;
+use waterui_graphics::Color;
+use waterui_layout::stack::vstack;
+use waterui_layout::{Divider, scroll};
+use waterui_navigation::NavigationView;
+use waterui_navigation::tab::{Tab, Tabs};
+use waterui_text::text;
+
+use crate::runner::SemanticRuntime;
+
+/// Mounts `content` as the single window of a semantic runtime over a bare
+/// environment — `Environment::new()`, nothing installed. The runtime itself
+/// seeds the framework tokens, fonts, native hooks and window managers a
+/// semantic tree needs; a style is never involved.
+fn mount(builder: AnyViewBuilder<AnyView>) -> SemanticRuntime {
+    SemanticRuntime::new_for_tests(Environment::new(), builder, 800, 600)
+}
+
+/// Pumps until the runtime settles and returns the last tree update it
+/// emitted — `None` when nothing changed since the previous emit (a settled
+/// pump produces no update).
+fn pump_until_settled(runtime: &mut SemanticRuntime) -> Option<TreeUpdate> {
+    let mut last = None;
+    for _ in 0..64 {
+        let result = runtime.pump();
+        if let Some(update) = result.tree_update {
+            last = Some(update);
+        }
+        if runtime.is_settled() {
+            break;
+        }
+    }
+    assert!(
+        !runtime.has_pending_semantic_update(),
+        "semantic runtime never settled"
+    );
+    last
+}
+
+fn pumped(runtime: &mut SemanticRuntime) -> TreeUpdate {
+    pump_until_settled(runtime).expect("the pump emitted no tree update")
+}
+
+/// The node labelled `label` with `role`, if present.
+fn find_by_label<'a>(
+    update: &'a TreeUpdate,
+    role: Role,
+    label: &str,
+) -> Option<(NodeId, &'a Node)> {
+    update.nodes.iter().find_map(|(id, node)| {
+        (node.role() == role && node.label() == Some(label)).then_some((*id, node))
+    })
+}
+
+/// The single node with `role`, if exactly one exists.
+fn find_only<'a>(update: &'a TreeUpdate, role: Role) -> Option<(NodeId, &'a Node)> {
+    let mut matches = update.nodes.iter().filter(|(_, node)| node.role() == role);
+    let only = matches.next().map(|(id, node)| (*id, node));
+    assert!(
+        matches.next().is_none(),
+        "more than one {role:?} node in the semantic tree"
+    );
+    only
+}
+
+fn lookup<'a>(update: &'a TreeUpdate, id: NodeId) -> &'a Node {
+    update
+        .nodes
+        .iter()
+        .find_map(|(node_id, node)| (*node_id == id).then_some(node))
+        .unwrap_or_else(|| panic!("node {id:?} is not in the semantic tree"))
+}
+
+fn act(runtime: &mut SemanticRuntime, action: Action, target: NodeId) -> bool {
+    runtime.perform_accessibility_action(ActionRequest {
+        action,
+        target_node: target,
+        target_tree: TreeId::ROOT,
+        data: None,
+    })
+}
+
+fn act_with_data(
+    runtime: &mut SemanticRuntime,
+    action: Action,
+    target: NodeId,
+    data: ActionData,
+) -> bool {
+    runtime.perform_accessibility_action(ActionRequest {
+        action,
+        target_node: target,
+        target_tree: TreeId::ROOT,
+        data: Some(data),
+    })
+}
+
+/// Asserts the update carries a real tree: a root node whose children hold
+/// every other node.
+fn assert_rooted(update: &TreeUpdate) {
+    let tree = update
+        .tree
+        .as_ref()
+        .expect("the semantic update must carry its tree");
+    let root = lookup(update, tree.root);
+    assert_eq!(root.role(), Role::Window);
+    let mut reachable: Vec<NodeId> = root.children().to_vec();
+    for (id, node) in &update.nodes {
+        if *id != tree.root {
+            reachable.extend_from_slice(node.children());
+        }
+    }
+    for (id, _) in &update.nodes {
+        assert!(
+            *id == tree.root || reachable.contains(id),
+            "node {id:?} is not reachable from the tree root"
+        );
+    }
+}
+
+#[test]
+fn text_and_button_emit_and_click_fires() {
+    let fired = Binding::container(false);
+    let fired_for_button = fired.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let fired = fired_for_button.clone();
+        AnyView::new(vstack((
+            text("hello semantic"),
+            button("Tap").action(move || fired.set(true)),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (_, text_node) =
+        find_only(&update, Role::Label).expect("the text view must emit a Label node");
+    assert_eq!(text_node.label(), Some("hello semantic"));
+    let (tap, tap_node) =
+        find_by_label(&update, Role::Button, "Tap").expect("the Tap button is missing");
+    assert!(tap_node.supports_action(Action::Focus));
+    assert!(tap_node.supports_action(Action::Click));
+
+    assert!(
+        act(&mut runtime, Action::Click, tap),
+        "Click changed nothing"
+    );
+    assert!(fired.get(), "the button action did not fire");
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+}
+
+#[test]
+fn toggle_emits_and_click_flips() {
+    let on = Binding::container(false);
+    let on_for_view = on.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((toggle("Airplane mode", &on_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (switch, switch_node) =
+        find_by_label(&update, Role::Switch, "Airplane mode").expect("the toggle is missing");
+    assert_eq!(switch_node.toggled(), Some(Toggled::False));
+    assert!(switch_node.supports_action(Action::Click));
+    assert!(switch_node.supports_action(Action::Focus));
+
+    assert!(
+        act(&mut runtime, Action::Click, switch),
+        "Click changed nothing"
+    );
+    assert!(on.get(), "the toggle binding did not flip");
+
+    let update = pumped(&mut runtime);
+    let (_, switch_node) = find_by_label(&update, Role::Switch, "Airplane mode")
+        .expect("the toggle vanished after its state changed");
+    assert_eq!(switch_node.toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn slider_emits_and_value_actions_step() {
+    let value = Binding::container(0.5f64);
+    let value_for_view = value.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((slider("Volume", &value_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (slider_id, slider_node) =
+        find_by_label(&update, Role::Slider, "Volume").expect("the slider is missing");
+    assert_eq!(slider_node.numeric_value(), Some(0.5));
+    assert_eq!(slider_node.min_numeric_value(), Some(0.0));
+    assert_eq!(slider_node.max_numeric_value(), Some(1.0));
+    for action in [
+        Action::Focus,
+        Action::Increment,
+        Action::Decrement,
+        Action::SetValue,
+    ] {
+        assert!(
+            slider_node.supports_action(action),
+            "the slider must advertise {action:?}"
+        );
+    }
+
+    assert!(
+        act(&mut runtime, Action::Increment, slider_id),
+        "Increment changed nothing"
+    );
+    assert_eq!(value.get(), 0.51, "Increment did not step the binding");
+    assert!(
+        act(&mut runtime, Action::Decrement, slider_id),
+        "Decrement changed nothing"
+    );
+    assert_eq!(value.get(), 0.5, "Decrement did not step the binding");
+    assert!(
+        act_with_data(
+            &mut runtime,
+            Action::SetValue,
+            slider_id,
+            ActionData::NumericValue(0.25),
+        ),
+        "SetValue changed nothing"
+    );
+    assert_eq!(value.get(), 0.25, "SetValue did not write the binding");
+
+    let update = pumped(&mut runtime);
+    let (_, slider_node) = find_by_label(&update, Role::Slider, "Volume")
+        .expect("the slider vanished after its value changed");
+    assert_eq!(slider_node.numeric_value(), Some(0.25));
+}
+
+#[test]
+fn stepper_emits_and_value_actions_step() {
+    let value = Binding::container(3i32);
+    let value_for_view = value.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((stepper("Quantity", &value_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (stepper_id, stepper_node) =
+        find_by_label(&update, Role::SpinButton, "Quantity").expect("the stepper is missing");
+    assert_eq!(stepper_node.numeric_value(), Some(3.0));
+    assert_eq!(stepper_node.numeric_value_step(), Some(1.0));
+    for action in [
+        Action::Focus,
+        Action::Increment,
+        Action::Decrement,
+        Action::SetValue,
+    ] {
+        assert!(
+            stepper_node.supports_action(action),
+            "the stepper must advertise {action:?}"
+        );
+    }
+
+    assert!(
+        act(&mut runtime, Action::Increment, stepper_id),
+        "Increment changed nothing"
+    );
+    assert_eq!(value.get(), 4, "Increment did not step the binding");
+    assert!(
+        act(&mut runtime, Action::Decrement, stepper_id),
+        "Decrement changed nothing"
+    );
+    assert_eq!(value.get(), 3, "Decrement did not step the binding");
+    assert!(
+        act_with_data(
+            &mut runtime,
+            Action::SetValue,
+            stepper_id,
+            ActionData::NumericValue(7.0),
+        ),
+        "SetValue changed nothing"
+    );
+    assert_eq!(value.get(), 7, "SetValue did not write the binding");
+}
+
+#[test]
+fn progress_emits_its_value() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((progress(0.4),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, progress_node) =
+        find_only(&update, Role::ProgressIndicator).expect("the progress view is missing");
+    assert_eq!(progress_node.min_numeric_value(), Some(0.0));
+    assert_eq!(progress_node.max_numeric_value(), Some(1.0));
+    assert_eq!(progress_node.numeric_value(), Some(0.4));
+}
+
+#[test]
+fn text_field_emits_and_set_value_edits() {
+    let value = Binding::container(Str::default());
+    let value_for_view = value.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((field("Name", &value_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (field_id, field_node) =
+        find_only(&update, Role::TextInput).expect("the text field is missing");
+    assert_eq!(field_node.label(), Some("Name"));
+    assert!(field_node.supports_action(Action::Focus));
+    assert!(field_node.supports_action(Action::SetValue));
+
+    assert!(
+        act(&mut runtime, Action::Focus, field_id),
+        "Focus changed nothing"
+    );
+    let _ = pumped(&mut runtime);
+    assert_eq!(
+        runtime.focused_ui_node(),
+        Some(field_id),
+        "the text field did not take UI focus"
+    );
+
+    assert!(
+        act_with_data(
+            &mut runtime,
+            Action::SetValue,
+            field_id,
+            ActionData::Value("Ada".into()),
+        ),
+        "SetValue changed nothing"
+    );
+    assert_eq!(
+        value.get().to_string().as_str(),
+        "Ada",
+        "SetValue did not write the binding"
+    );
+    let update = pumped(&mut runtime);
+    let (_, field_node) = find_only(&update, Role::TextInput).expect("the text field vanished");
+    assert_eq!(field_node.value(), Some("Ada"));
+}
+
+#[test]
+fn secure_field_emits_and_set_value_edits() {
+    let secret = Binding::container(waterui_form::secure::Secure::new(String::new()));
+    let secret_for_view = secret.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((secure("Password", &secret_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (field_id, field_node) =
+        find_only(&update, Role::PasswordInput).expect("the secure field is missing");
+    assert_eq!(field_node.label(), Some("Password"));
+    assert!(field_node.supports_action(Action::SetValue));
+
+    assert!(
+        act_with_data(
+            &mut runtime,
+            Action::SetValue,
+            field_id,
+            ActionData::Value("hunter2".into()),
+        ),
+        "SetValue changed nothing"
+    );
+    assert_eq!(
+        secret.get().expose(),
+        "hunter2",
+        "SetValue did not write the secure binding"
+    );
+}
+
+#[test]
+fn menu_picker_emits_options_and_selects() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Size",
+            vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Menu),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, combo_node) =
+        find_by_label(&update, Role::ComboBox, "Size").expect("the picker is missing");
+    assert_eq!(combo_node.value(), Some("Small"));
+    assert!(combo_node.supports_action(Action::Click));
+    let children = combo_node.children();
+    assert_eq!(
+        children.len(),
+        2,
+        "a menu picker's options are its semantic children"
+    );
+    let small = lookup(&update, children[0]);
+    let large = lookup(&update, children[1]);
+    assert_eq!(small.role(), Role::ListBoxOption);
+    assert_eq!(small.label(), Some("Small"));
+    assert_eq!(small.is_selected(), Some(true));
+    assert_eq!(large.role(), Role::ListBoxOption);
+    assert_eq!(large.label(), Some("Large"));
+    assert_eq!(large.is_selected(), Some(false));
+    assert!(large.supports_action(Action::Click));
+
+    assert!(
+        act(&mut runtime, Action::Click, children[1]),
+        "the option Click changed nothing"
+    );
+    assert_eq!(selection.get(), 1, "the option did not select");
+    let update = pumped(&mut runtime);
+    let (_, combo_node) =
+        find_by_label(&update, Role::ComboBox, "Size").expect("the picker vanished");
+    assert_eq!(combo_node.value(), Some("Large"));
+    let children = combo_node.children();
+    assert_eq!(lookup(&update, children[0]).is_selected(), Some(false));
+    assert_eq!(lookup(&update, children[1]).is_selected(), Some(true));
+}
+
+#[test]
+fn radio_picker_emits_group_and_selects() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Mode",
+            vec![text("Auto").tag(0i32), text("Manual").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Radio),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, group_node) =
+        find_by_label(&update, Role::Group, "Mode").expect("the radio group is missing");
+    let children = group_node.children();
+    assert_eq!(children.len(), 2, "the group must hold one node per option");
+    let auto = lookup(&update, children[0]);
+    let manual = lookup(&update, children[1]);
+    assert_eq!(auto.role(), Role::RadioButton);
+    assert_eq!(auto.label(), Some("Auto"));
+    assert_eq!(auto.is_selected(), Some(true));
+    assert_eq!(manual.role(), Role::RadioButton);
+    assert_eq!(manual.label(), Some("Manual"));
+    assert_eq!(manual.is_selected(), Some(false));
+
+    assert!(
+        act(&mut runtime, Action::Click, children[1]),
+        "the radio Click changed nothing"
+    );
+    assert_eq!(selection.get(), 1, "the radio option did not select");
+}
+
+#[test]
+fn date_picker_emits_and_set_value_edits() {
+    let day = Binding::container(jiff::civil::date(2025, 1, 15));
+    let day_for_view = day.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((DatePicker::new("When", &day_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (picker_id, picker_node) =
+        find_only(&update, Role::ComboBox).expect("the date picker is missing");
+    // The picker's node names itself with its formatted value; the field's own
+    // label is a sibling view's node.
+    assert_eq!(picker_node.label(), Some("2025-01-15"));
+    assert_eq!(picker_node.value(), Some("2025-01-15"));
+    assert!(picker_node.supports_action(Action::SetValue));
+
+    assert!(
+        act_with_data(
+            &mut runtime,
+            Action::SetValue,
+            picker_id,
+            ActionData::Value("2030-05-06".into()),
+        ),
+        "SetValue changed nothing"
+    );
+    assert_eq!(
+        day.get(),
+        jiff::civil::date(2030, 5, 6),
+        "SetValue did not write the date binding"
+    );
+}
+
+#[test]
+fn color_picker_emits_and_popup_swatches_select() {
+    let tint = Binding::container(Color::srgb(0, 0, 0));
+    let tint_for_view = tint.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((ColorPicker::new("Tint", &tint_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (trigger, _) =
+        find_by_label(&update, Role::Button, "Tint").expect("the color picker is missing");
+    let button_count = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::Button)
+        .count();
+    assert_eq!(
+        button_count, 1,
+        "swatches must not appear before the picker opens"
+    );
+
+    // Activation mounts the swatch panel as a semantic popup window whose
+    // nodes merge into the root tree. Swatch labels are localized, so the
+    // first non-trigger `Button` node is the first palette swatch — `Red`.
+    assert!(
+        act(&mut runtime, Action::Click, trigger),
+        "the picker Click changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let swatch = update
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            (node.role() == Role::Button && node.label() != Some("Tint")).then_some(*id)
+        })
+        .expect("no swatch appeared after the picker opened");
+    assert!(
+        act(&mut runtime, Action::Click, swatch),
+        "the swatch Click changed nothing"
+    );
+
+    // The swatch wrote the binding and its `close_all` dismissed the panel.
+    let env = Environment::new();
+    let picked = tint.get().resolve(&env).get();
+    let expected = Color::srgb(0xba, 0x1a, 0x1a).resolve(&env).get();
+    for (picked, expected, channel) in [
+        (picked.red, expected.red, "red"),
+        (picked.green, expected.green, "green"),
+        (picked.blue, expected.blue, "blue"),
+        (picked.opacity, expected.opacity, "opacity"),
+    ] {
+        assert_eq!(picked, expected, "the swatch wrote a different {channel}");
+    }
+    let update = pumped(&mut runtime);
+    assert!(
+        update
+            .nodes
+            .iter()
+            .all(|(_, node)| !(node.role() == Role::Button && node.label() != Some("Tint"))),
+        "a dismissed picker must leave the merged tree"
+    );
+}
+
+#[test]
+fn menu_opens_a_semantic_popup_window_and_commands_fire() {
+    let fired = Binding::container(false);
+    let fired_for_view = fired.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let fired = fired_for_view.clone();
+        AnyView::new(vstack((
+            text("host"),
+            Menu::new("File", "Export".action(move || fired.set(true))),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (file, file_node) =
+        find_by_label(&update, Role::Button, "File").expect("the menu trigger is missing");
+    assert!(file_node.supports_action(Action::Click));
+    assert!(
+        find_by_label(&update, Role::Button, "Export").is_none(),
+        "menu items must not emit before the menu opens"
+    );
+
+    // Activation mounts the item rows as a semantic popup window whose nodes
+    // merge into the root tree.
+    assert!(
+        act(&mut runtime, Action::Click, file),
+        "the menu Click changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (export, _) = find_by_label(&update, Role::Button, "Export")
+        .expect("no command emitted after the menu opened");
+
+    // The command's Click fires its action and closes the popup group, so the
+    // merged tree drops the popup window's nodes on the next emit.
+    assert!(
+        act(&mut runtime, Action::Click, export),
+        "the command Click changed nothing"
+    );
+    assert!(fired.get(), "the menu command did not fire");
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Button, "Export").is_none(),
+        "a closed popup must leave the merged tree"
+    );
+}
+
+#[test]
+fn list_emits_all_rows_and_scrolls() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(List::content((
+            || ListItem::new(text("Row 1")),
+            || ListItem::new(text("Row 2")),
+            || ListItem::new(text("Row 3")),
+            || ListItem::new(text("Row 4")),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (list_id, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    assert_eq!(list_node.scroll_y(), Some(0.0));
+    assert!(list_node.supports_action(Action::ScrollDown));
+    assert!(list_node.supports_action(Action::ScrollUp));
+    let children = list_node.children();
+    assert_eq!(
+        children.len(),
+        4,
+        "the semantic tree emits every row — there is no viewport to virtualize"
+    );
+    for (index, child) in children.iter().enumerate() {
+        let row = lookup(&update, *child);
+        assert_eq!(row.role(), Role::ListItem);
+        let expected = format!("Row {}", index + 1);
+        assert_eq!(row.label(), Some(expected.as_str()));
+        assert!(row.supports_action(Action::Focus));
+    }
+
+    // The semantic scroll domain is measured in rows; ScrollDown moves the
+    // bound offset directly.
+    assert!(
+        act(&mut runtime, Action::ScrollDown, list_id),
+        "ScrollDown changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list vanished");
+    let offset = list_node
+        .scroll_y()
+        .expect("the list must keep reporting its scroll offset");
+    assert!(offset > 0.0, "ScrollDown did not move the scroll offset");
+    assert!(
+        act(&mut runtime, Action::ScrollUp, list_id),
+        "ScrollUp changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list vanished");
+    assert_eq!(
+        list_node.scroll_y(),
+        Some(0.0),
+        "ScrollUp did not return the offset to the top"
+    );
+}
+
+#[test]
+fn table_emits_headers_cells_and_scrolls() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(table([
+            col("Name", vec![text("Ada"), text("Grace")]),
+            col("Lang", vec![text("Rust"), text("COBOL")]),
+        ]))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (table_id, table_node) = find_only(&update, Role::Table).expect("the table is missing");
+    assert!(table_node.supports_action(Action::ScrollDown));
+    assert!(table_node.supports_action(Action::ScrollUp));
+    let children = table_node.children();
+    assert_eq!(
+        children.len(),
+        6,
+        "two column headers plus four cells must be the table's semantic children"
+    );
+    let headers: Vec<&Node> = children
+        .iter()
+        .map(|id| lookup(&update, *id))
+        .filter(|node| node.role() == Role::ColumnHeader)
+        .collect();
+    assert_eq!(headers.len(), 2);
+    assert_eq!(headers[0].label(), Some("Name"));
+    assert_eq!(headers[1].label(), Some("Lang"));
+    let cells: Vec<&Node> = children
+        .iter()
+        .map(|id| lookup(&update, *id))
+        .filter(|node| node.role() == Role::Cell)
+        .collect();
+    assert_eq!(
+        cells.len(),
+        4,
+        "every cell exists in the semantic tree — there is no viewport to virtualize"
+    );
+    let labels: Vec<Option<&str>> = cells.iter().map(|cell| cell.label()).collect();
+    for expected in ["Ada", "Grace", "Rust", "COBOL"] {
+        assert!(
+            labels.contains(&Some(expected)),
+            "cell {expected:?} is missing from the semantic tree"
+        );
+    }
+
+    assert!(
+        act(&mut runtime, Action::ScrollDown, table_id),
+        "ScrollDown changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, table_node) = find_only(&update, Role::Table).expect("the table vanished");
+    assert!(
+        table_node
+            .scroll_y()
+            .expect("the table must keep reporting its scroll offset")
+            > 0.0,
+        "ScrollDown did not move the scroll offset"
+    );
+}
+
+#[test]
+fn tabs_emit_tab_list_and_click_selects() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(Tabs::new(
+            &selection_for_view,
+            vec![
+                Tab::new(0, "First", || NavigationView::new("One", text("one"))),
+                Tab::new(1, "Second", || NavigationView::new("Two", text("two"))),
+            ],
+        ))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, tab_list) = find_only(&update, Role::TabList).expect("the tab list is missing");
+    let children = tab_list.children();
+    assert_eq!(children.len(), 2, "the tab list must hold one node per tab");
+    let first = lookup(&update, children[0]);
+    let second = lookup(&update, children[1]);
+    assert_eq!(first.role(), Role::Tab);
+    assert_eq!(first.label(), Some("First"));
+    assert_eq!(first.is_selected(), Some(true));
+    assert_eq!(second.role(), Role::Tab);
+    assert_eq!(second.label(), Some("Second"));
+    assert_eq!(second.is_selected(), Some(false));
+    assert!(second.supports_action(Action::Click));
+    assert!(
+        find_by_label(&update, Role::Label, "one").is_some(),
+        "the selected tab's content must emit"
+    );
+
+    assert!(
+        act(&mut runtime, Action::Click, children[1]),
+        "the tab Click changed nothing"
+    );
+    assert_eq!(selection.get(), 1, "the tab did not select");
+    let update = pumped(&mut runtime);
+    let (_, tab_list) = find_only(&update, Role::TabList).expect("the tab list vanished");
+    let children = tab_list.children();
+    assert_eq!(lookup(&update, children[0]).is_selected(), Some(false));
+    assert_eq!(lookup(&update, children[1]).is_selected(), Some(true));
+    assert!(
+        find_by_label(&update, Role::Label, "two").is_some(),
+        "the newly selected tab's content must emit"
+    );
+}
+
+#[test]
+fn navigation_view_emits_container_title_and_content() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(NavigationView::new("Settings", text("body content")))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, nav_node) =
+        find_only(&update, Role::Navigation).expect("the navigation container is missing");
+    assert!(
+        !nav_node.children().is_empty(),
+        "the navigation container must hold its chrome and content"
+    );
+    assert!(
+        find_by_label(&update, Role::Header, "Settings").is_some(),
+        "the navigation title must emit as a Header"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "body content").is_some(),
+        "the navigation content must emit"
+    );
+}
+
+#[test]
+fn scroll_view_emits_and_scroll_actions_move_offset() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(scroll(vstack((text("scrolled content"),))))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (scroller, scroll_node) =
+        find_only(&update, Role::ScrollView).expect("the scroll view is missing");
+    assert_eq!(scroll_node.scroll_y(), Some(0.0));
+    assert_eq!(
+        scroll_node.scroll_y_max(),
+        Some(f64::INFINITY),
+        "the semantic scroll domain is unbounded — no layout measures it"
+    );
+    for action in [Action::ScrollDown, Action::ScrollUp] {
+        assert!(
+            scroll_node.supports_action(action),
+            "the scroll view must advertise {action:?}"
+        );
+    }
+    assert!(
+        scroll_node.children().iter().any(|id| {
+            let node = lookup(&update, *id);
+            node.role() == Role::Label && node.label() == Some("scrolled content")
+        }),
+        "the scroll view's content must emit inside it"
+    );
+
+    assert!(
+        act(&mut runtime, Action::ScrollDown, scroller),
+        "ScrollDown changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, scroll_node) = find_only(&update, Role::ScrollView).expect("the scroll view vanished");
+    assert!(
+        scroll_node.scroll_y().expect("scroll offset must be set") > 0.0,
+        "ScrollDown did not move the bound offset"
+    );
+    assert!(
+        act(&mut runtime, Action::ScrollUp, scroller),
+        "ScrollUp changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, scroll_node) = find_only(&update, Role::ScrollView).expect("the scroll view vanished");
+    assert_eq!(
+        scroll_node.scroll_y(),
+        Some(0.0),
+        "ScrollUp did not return the offset to the top"
+    );
+}
+
+#[test]
+fn badge_emits_count_beside_content() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(waterui::component::badge::Badge::new(3, text("Inbox")))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Label, "Inbox").is_some(),
+        "the badged content must emit"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "3").is_some(),
+        "the badge count must emit as a Label node"
+    );
+}
+
+#[test]
+fn layout_only_views_emit_nothing() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((Divider, text("only semantic content"))))
+    }));
+
+    let update = pumped(&mut runtime);
+    // A divider is presentation chrome: the tree holds the window root and the
+    // text — nothing else.
+    assert_eq!(update.nodes.len(), 2);
+    assert!(
+        find_by_label(&update, Role::Label, "only semantic content").is_some(),
+        "the text must still emit"
+    );
+}

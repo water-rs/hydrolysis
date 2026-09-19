@@ -647,10 +647,9 @@ mod tests {
         );
         assert!(
             update.nodes.iter().any(|(_, node)| {
-                node.role() == Role::StaticText
-                    && node.value().is_some_and(|v| v == "hello semantic")
+                node.role() == Role::Label && node.label().is_some_and(|v| v == "hello semantic")
             }),
-            "the text view must emit a StaticText node"
+            "the text view must emit a Label node"
         );
 
         assert!(click(&mut runtime, tap), "Tap click changed nothing");

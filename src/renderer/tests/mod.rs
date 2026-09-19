@@ -16,6 +16,8 @@ mod perf_scroll;
 mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod semantic_runtime;
 mod shadow;
 mod tree;
 use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii, Vec2};
