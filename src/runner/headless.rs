@@ -466,7 +466,8 @@ impl HeadlessRuntime {
     }
 
     /// Whether the runtime is quiescent: no queued input, no spawned work
-    /// awaiting a drain, no pending popup mounts, and no renderer-scheduled
+    /// awaiting a drain, no pending popup mounts, no window — the main window
+    /// or a popup — with a frame still pending, and no renderer-scheduled
     /// semantic work (patches, rebuilds, animations, gesture deadlines,
     /// gliding scrolls) in this window or any popup.
     ///
@@ -481,9 +482,11 @@ impl HeadlessRuntime {
         !self.runtime.platform.has_pending_events()
             && !self.local_executor.has_pending()
             && self.pending_window_queue.borrow().is_empty()
+            && !self.runtime.mode.is_pending()
             && !self.runtime.renderer.has_scheduled_semantic_work()
             && self.popup_windows.iter().all(|popup| {
-                !popup.platform.has_pending_events()
+                !popup.mode.is_pending()
+                    && !popup.platform.has_pending_events()
                     && !popup.renderer.has_scheduled_semantic_work()
             })
     }
@@ -499,11 +502,11 @@ impl HeadlessRuntime {
     /// up to date.
     #[must_use]
     pub fn has_pending_semantic_update(&self) -> bool {
-        self.runtime.renderer.has_pending_semantic_update()
-            || self
-                .popup_windows
-                .iter()
-                .any(|popup| popup.renderer.has_pending_semantic_update())
+        self.runtime.mode.is_pending()
+            || self.runtime.renderer.has_pending_semantic_update()
+            || self.popup_windows.iter().any(|popup| {
+                popup.mode.is_pending() || popup.renderer.has_pending_semantic_update()
+            })
     }
 
     pub fn pump(&mut self, capture_snapshot: bool) -> HeadlessPumpResult {

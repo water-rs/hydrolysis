@@ -143,6 +143,89 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
         "the popup's nodes must leave the merged tree once it closes"
     );
 }
+/// `is_settled` counts a window's pending frame — the main window's and each
+/// popup's alike — so a test host cannot read a tree that predates a frame the
+/// runtime already committed to. An accessibility action that changes its
+/// window marks that window's frame pending: nothing is queued and no renderer
+/// work is scheduled, yet the runtime is not settled until the pump that runs
+/// the frame.
+#[test]
+fn a_window_with_a_pending_frame_is_not_settled() {
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        AnyViewBuilder::<AnyView>::new(move || {
+            AnyView::new(
+                Frame::new(button("host").action(|| {}))
+                    .width(WINDOW_SIZE)
+                    .height(WINDOW_SIZE)
+                    .context_menu(vec!["Copy".action(|| {})]),
+            )
+        }),
+        WINDOW_SIZE as u32,
+        WINDOW_SIZE as u32,
+        MinimalTestTheme::default(),
+    );
+
+    let update = runtime
+        .pump_at(false, Instant::now())
+        .tree_update
+        .expect("the first frame must publish an accessibility tree");
+    assert!(
+        runtime.is_settled(),
+        "a runtime with no pending frame settles"
+    );
+
+    // The focus action lands on the main window's core: only the main window's
+    // frame mode can account for the runtime being unsettled.
+    let (host, _) =
+        find_by_label(&update, Role::Button, "host").expect("the host button is missing");
+    assert!(act(&mut runtime, Action::Focus, host));
+    assert!(
+        !runtime.is_settled(),
+        "a main window with a pending frame must not report settled"
+    );
+    assert!(
+        runtime.has_pending_semantic_update(),
+        "a pending frame is a state change requested but not yet flushed"
+    );
+    let update = runtime
+        .pump_at(false, Instant::now())
+        .tree_update
+        .expect("the pending frame must publish an accessibility tree");
+    assert!(runtime.is_settled(), "the main window's pending frame ran");
+
+    let (_, host) =
+        find_by_label(&update, Role::Button, "host").expect("the host button must still emit");
+    let bounds = host.bounds().expect("the host button has frame bounds");
+    let (x, y) = ((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+    for event in secondary_click(x as f32, y as f32) {
+        runtime.push_input_event(event);
+    }
+    let update = runtime
+        .pump_at(false, Instant::now())
+        .tree_update
+        .expect("the click frame must publish the merged tree");
+    let (copy, _) = find_by_label(&update, Role::Button, "Copy")
+        .expect("the context menu's items must merge into the returned tree");
+    // The mount pump ran the popup's first scene pump; the click on its item
+    // arms the popup's next frame — mounted, pending, not yet run — and only
+    // the popup's own frame mode can account for the runtime being unsettled.
+    assert!(act(&mut runtime, Action::Click, copy));
+    assert!(
+        !runtime.is_settled(),
+        "a popup with a pending frame must not report settled"
+    );
+    assert!(
+        runtime.has_pending_semantic_update(),
+        "a pending popup frame is a state change requested but not yet flushed"
+    );
+    let _ = runtime.pump_at(false, Instant::now());
+    assert!(
+        runtime.is_settled(),
+        "the popup's pending frame ran and the runtime settled"
+    );
+}
+
 /// A popup that changes while the main window is clean must still publish:
 /// the merged update describes every open window, not only the one that
 /// emitted. A `Focus` inside a colour picker's swatch panel re-emits the
