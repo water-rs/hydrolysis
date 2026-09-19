@@ -59,7 +59,7 @@ pub(super) fn publish_frame(
 const fn frame_kind(mode: FrameMode) -> FrameKind {
     match mode {
         FrameMode::Idle => FrameKind::Idle,
-        FrameMode::Refresh => FrameKind::Refresh,
+        FrameMode::Refresh | FrameMode::Animate => FrameKind::Refresh,
     }
 }
 
