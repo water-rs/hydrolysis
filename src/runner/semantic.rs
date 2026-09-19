@@ -47,6 +47,8 @@ impl SemanticWindow {
     fn new(window: Window, fonts: &FontCollection) -> Self {
         let mut core = SemanticCore::new(Instant::now());
         seed_core(&mut core, fonts);
+        #[cfg(feature = "accessibility")]
+        core.use_semantic_keyboard_activation();
         Self {
             window,
             core,

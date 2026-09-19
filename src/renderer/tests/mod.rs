@@ -1686,7 +1686,7 @@ fn touch_press_delays_ripple_and_move_cancels_click() {
 }
 
 #[test]
-fn keyboard_focus_activates_control() {
+fn keyboard_focus_activates_control_on_key_release() {
     let mut renderer = test_renderer();
     let env = test_environment();
     let owner = Rc::new(());
@@ -1696,17 +1696,19 @@ fn keyboard_focus_activates_control() {
     let action_activations = Rc::clone(&activations);
 
     renderer.begin_rebuild_frame();
-    let (_, press_slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &env);
+    let (_, press_slot, handles) = renderer.bind_interaction_target(key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, press_slot, move |_, _, _| {
         action_activations.set(action_activations.get() + 1);
         true
     });
     #[cfg(feature = "accessibility")]
+    let semantic_activations = Rc::new(Cell::new(0));
+    #[cfg(feature = "accessibility")]
     {
-        let semantic_activations = Rc::clone(&activations);
+        let counter = Rc::clone(&semantic_activations);
         let activation: AccessibilityActivation = Rc::new(RefCell::new(
             move |_: &mut SemanticCore, _: &Environment| {
-                semantic_activations.set(semantic_activations.get() + 1);
+                counter.set(counter.get() + 1);
                 true
             },
         ));
@@ -1723,20 +1725,19 @@ fn keyboard_focus_activates_control() {
         Modifiers::default(),
         &env,
     ));
+    // The rendered contract is the pointer contract: key-down presses and
+    // holds the affordance, and the control activates on key-up.
+    assert_eq!(activations.get(), 0, "key-down must not activate");
+    assert!(handles.pressing(), "key-down holds the pressed affordance");
     #[cfg(feature = "accessibility")]
-    {
-        // Keyboard activation dispatches `Click` through the semantic target
-        // on key-down; the release carries nothing.
-        assert_eq!(activations.get(), 1);
-        assert!(!renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
-        assert_eq!(activations.get(), 1);
-    }
-    #[cfg(not(feature = "accessibility"))]
-    {
-        assert_eq!(activations.get(), 0);
-        assert!(renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
-        assert_eq!(activations.get(), 1);
-    }
+    assert_eq!(
+        semantic_activations.get(),
+        0,
+        "a rendered runtime dispatches no Click"
+    );
+    assert!(renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
+    assert_eq!(activations.get(), 1);
+    assert!(!handles.pressing(), "key-up releases the affordance");
 }
 
 #[test]

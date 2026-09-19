@@ -163,6 +163,20 @@ pub(crate) type HoverMoveAction = Rc<RefCell<dyn FnMut(vello::kurbo::Point, &Env
 pub(crate) type ScrollAction = Rc<RefCell<dyn FnMut(f32, f32, bool) -> bool>>;
 pub(crate) type TrackpadPanAction = Rc<RefCell<dyn FnMut(f32, f32, TouchPhase) -> bool>>;
 
+/// How Enter/Space activates a keyboard-focused control — a per-runtime
+/// contract, not a feature one.
+#[cfg(feature = "accessibility")]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum KeyboardActivation {
+    /// Press on key-down and activate on key-up — the rendered contract, with
+    /// the pressed affordance held between the two.
+    #[default]
+    PressRelease,
+    /// Dispatch `Click` on key-down — the semantic runtime's contract: with no
+    /// presentation there is no pressed affordance to hold.
+    Semantic,
+}
+
 #[derive(Default)]
 pub(crate) struct HitTestState {
     /// Surfaces that own the input landing on them — embedded browsers and
@@ -184,6 +198,11 @@ pub(crate) struct HitTestState {
     pub(crate) keyboard_focus_binding: Option<Binding<bool>>,
     pub(crate) keyboard_focus_visible: bool,
     pub(crate) active_keyboard_target: Option<PointerTarget>,
+    /// Keyboard activation semantics for this runtime — see
+    /// [`KeyboardActivation`]. Only the semantic runtime switches it from the
+    /// rendered default.
+    #[cfg(feature = "accessibility")]
+    pub(crate) keyboard_activation: KeyboardActivation,
     pub(crate) modal_interaction: Option<ModalInteraction>,
     pub(crate) active_pointer_drag_target: Option<PointerAction>,
     pub(crate) active_pointer_drag_signature: Option<(usize, usize)>,
@@ -1165,6 +1184,14 @@ impl SemanticCore {
         (self.accessibility.focus != ACCESSIBILITY_ROOT_NODE_ID).then_some(self.accessibility.focus)
     }
 
+    /// Enter/Space on a focused control dispatches `Click` on key-down — the
+    /// semantic runtime's keyboard contract. Rendered runtimes keep the
+    /// [`KeyboardActivation::PressRelease`] default.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn use_semantic_keyboard_activation(&mut self) {
+        self.hit_test.keyboard_activation = KeyboardActivation::Semantic;
+    }
+
     pub(crate) fn set_keyboard_focus(
         &mut self,
         focus: Option<InteractionKey>,
@@ -1531,7 +1558,7 @@ impl SemanticCore {
             return false;
         }
         #[cfg(feature = "accessibility")]
-        {
+        if self.hit_test.keyboard_activation == KeyboardActivation::Semantic {
             let Some(node) = self.keyboard_focus_node() else {
                 return false;
             };
@@ -1553,55 +1580,51 @@ impl SemanticCore {
             // A focused node that does not advertise `Click` is not
             // activatable — the pointer-press fallback would fire an action
             // the semantics say does not exist.
-            false
+            return false;
         }
-        #[cfg(not(feature = "accessibility"))]
-        {
-            let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
-                return false;
-            };
-            let modal_active = self.hit_test.modal_interaction.is_some();
-            let Some(target) = self
-                .hit_test
-                .pointer_targets
-                .iter()
-                .rev()
-                .find(|target| {
-                    (!modal_active || target.modal)
-                        && target
-                            .press_slot
-                            .as_ref()
-                            .is_some_and(|slot| &slot.key == focused)
-                })
-                .cloned()
-            else {
-                return false;
-            };
-            if target.captures_drag {
-                return false;
-            }
-            if self.hit_test.active_keyboard_target.is_some() {
-                return true;
-            }
-            let origin = target.bounds.center();
-            if let Some(slot) = target.press_slot.as_ref() {
-                self.hit_test
-                    .interaction
-                    .begin_press(slot, origin, self.frame_instant());
-            }
-            if target
+        let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
+            return false;
+        };
+        let modal_active = self.hit_test.modal_interaction.is_some();
+        let Some(target) = self
+            .hit_test
+            .pointer_targets
+            .iter()
+            .rev()
+            .find(|target| {
+                (!modal_active || target.modal)
+                    && target
+                        .press_slot
+                        .as_ref()
+                        .is_some_and(|slot| &slot.key == focused)
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        if target.captures_drag {
+            return false;
+        }
+        if self.hit_test.active_keyboard_target.is_some() {
+            return true;
+        }
+        let origin = target.bounds.center();
+        if let Some(slot) = target.press_slot.as_ref() {
+            self.hit_test
                 .interaction
-                .as_ref()
-                .is_some_and(|handles| handles.chrome_state_dependent())
-            {
-                self.request_refresh();
-            } else {
-                self.request_redraw();
-            }
-            self.hit_test.active_keyboard_target = Some(target);
-            let _ = env;
-            true
+                .begin_press(slot, origin, self.frame_instant());
         }
+        if target
+            .interaction
+            .as_ref()
+            .is_some_and(|handles| handles.chrome_state_dependent())
+        {
+            self.request_refresh();
+        } else {
+            self.request_redraw();
+        }
+        self.hit_test.active_keyboard_target = Some(target);
+        true
     }
 
     pub(crate) fn handle_keyboard_key_up(&mut self, key: &KeyCode, env: &Environment) -> bool {
