@@ -25,7 +25,7 @@ use waterui_graphics::input::{
 use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView};
 use waterui_layout::stack::vstack;
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{
     InputEvent, KeyCode, KeyState, Modifiers, PointerButton, PointerKind, TouchPhase,
@@ -108,7 +108,13 @@ fn runtime_with(surface: GpuSurface) -> HeadlessRuntime {
             surface.size(SURFACE_WIDTH, SURFACE_HEIGHT),
         )))
     });
-    HeadlessRuntime::new_for_tests(test_environment(), builder, WINDOW_WIDTH, WINDOW_HEIGHT)
+    HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    )
 }
 
 /// Pumps until the surface has finished its async setup, so the events a test

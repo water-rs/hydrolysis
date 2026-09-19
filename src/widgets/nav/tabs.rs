@@ -5,8 +5,8 @@ use std::rc::Rc;
 #[cfg(feature = "accessibility")]
 use crate::renderer::{AccessibilityActionTarget, RenderContext};
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RetainedSubview, WidgetRenderContext,
-    measure_tabs_intrinsic, tabs_bar_and_content_rect, tabs_button_rect,
+    HydroNativeView, HydroState, RetainedSubview, WidgetRenderContext, measure_tabs_intrinsic,
+    tabs_bar_and_content_rect, tabs_button_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -20,7 +20,6 @@ use waterui_core::{AnyView, Environment, Native};
 
 #[cfg(feature = "accessibility")]
 use crate::widgets::util::widget_disabled;
-use crate::widgets::widget_theme;
 
 /// The retained render state of one tab. Its `label` is a move-only `AnyView`, so
 /// it is held as a [`RetainedSubview`] built once and re-flushed each frame; its
@@ -69,7 +68,11 @@ impl TabsRenderState {
 
     /// Eagerly build the tab-label sub-views (the measure path has no renderer to
     /// build on).
-    pub(crate) fn prebuild_labels(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild_labels(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         for tab in &mut self.tabs {
             tab.label.ensure_built(renderer, env);
             tab.content.ensure_built(renderer, env);
@@ -85,27 +88,37 @@ impl TabsRenderState {
 }
 
 impl HydroNativeView for Native<TabsLayout> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_tabs_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_tabs_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
-/// Emits a tab list's accessibility tree from per-tab `(tag, default_label,
-/// is_selected)` triples. Shared by the dispatch path and the retained `Widget`-node
-/// path (which extracts each default label from its tab's [`RetainedSubview`]).
+/// Emits a tab list's accessibility tree from per-tab `(tag, interaction_key,
+/// default_label, is_selected)` tuples. Shared by the dispatch path and the
+/// retained `Widget`-node path (which extracts each default label from its
+/// tab's [`RetainedSubview`]).
 #[cfg(feature = "accessibility")]
 pub(crate) fn tabs_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     selection: &Binding<Id>,
     style: NativeTabStyle,
-    labels: &[(Id, Option<String>, bool)],
+    labels: &[(Id, crate::renderer::InteractionKey, Option<String>, bool)],
     env: &Environment,
 ) {
     let disabled = renderer.read_signal(&widget_disabled(env));
-    let metrics = widget_theme(env).tabs_metrics();
-    let (bar_rect, _content_rect) =
-        tabs_bar_and_content_rect(ctx.bounds, style, metrics.bar_height);
+    // Bar/button rects exist only in the rendered frame; the semantic walk
+    // emits the same TabList/Tab structure with no bounds.
+    let bar_rect = ctx.zip(theme).map(|(ctx, theme)| {
+        let metrics = theme.tabs_metrics();
+        tabs_bar_and_content_rect(ctx.bounds, style, metrics.bar_height).0
+    });
     let mut tab_list = AccessibilityNode::new(
         renderer.resolve_accessibility_role(env, AccessibilityNodeRole::TabList),
     );
@@ -113,7 +126,7 @@ pub(crate) fn tabs_accessibility(
     if let Some(label) = tab_list_label {
         tab_list.set_label(label);
     }
-    for (index, (tag, default_label, is_selected)) in labels.iter().enumerate() {
+    for (index, (tag, interaction_key, default_label, is_selected)) in labels.iter().enumerate() {
         let mut tab_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Tab),
         );
@@ -128,29 +141,43 @@ pub(crate) fn tabs_accessibility(
         } else {
             tab_node.add_action(AccessibilityAction::Click);
         }
-        let tab_bounds = crate::renderer::transformed_rect(
-            ctx.hit_transform,
-            tabs_button_rect(bar_rect, labels.len(), index, style),
-        );
-        if let Some(tab_node_id) = renderer.register_accessibility_child_node_with_key(
-            i64::from(i32::from(*tag)),
-            tab_node,
-            tab_bounds,
-            env,
-            (!disabled).then(|| AccessibilityActionTarget::PickerSelect {
-                selection: selection.clone(),
-                target: *tag,
-            }),
-        ) {
+        let key = i64::from(i32::from(*tag));
+        let target = (!disabled).then(|| AccessibilityActionTarget::PickerSelect {
+            selection: selection.clone(),
+            target: *tag,
+        });
+        let tab_node_id = match ctx.zip(bar_rect) {
+            Some((ctx, bar_rect)) => renderer.register_accessibility_child_node_with_key(
+                key,
+                tab_node,
+                crate::renderer::transformed_rect(
+                    ctx.hit_transform,
+                    tabs_button_rect(bar_rect, labels.len(), index, style),
+                ),
+                env,
+                target,
+            ),
+            None => renderer
+                .register_accessibility_child_node_with_key_semantic(key, tab_node, env, target),
+        };
+        if let Some(tab_node_id) = tab_node_id {
             tab_list.push_child(tab_node_id);
+            renderer.register_accessibility_focus_link(interaction_key, tab_node_id);
         }
     }
-    let _ = renderer.register_accessibility_node(
-        tab_list,
-        crate::renderer::transformed_rect(ctx.hit_transform, bar_rect),
-        env,
-        None,
-    );
+    match ctx.zip(bar_rect) {
+        Some((ctx, bar_rect)) => {
+            let _ = renderer.register_accessibility_node(
+                tab_list,
+                crate::renderer::transformed_rect(ctx.hit_transform, bar_rect),
+                env,
+                None,
+            );
+        }
+        None => {
+            let _ = renderer.register_accessibility_node_semantic(tab_list, env, None);
+        }
+    }
 }
 
 /// Measures a retained tabs leaf from its [`TabsRenderState`] (intrinsic-sized,
@@ -160,17 +187,18 @@ pub(crate) fn measure_tabs_node(
     _proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let metrics = widget_theme(env).tabs_metrics();
+    let metrics = theme.tabs_metrics();
     let mut max_content_width: f64 = 0.0;
     let mut max_content_height: f64 = 0.0;
     let mut bar_width = 0.0;
     for tab in &state.tabs {
-        let label_size = tab.label.measure_built(hydro, env);
+        let label_size = tab.label.measure_built(hydro, env, theme);
         bar_width += (f64::from(label_size.width) + metrics.button_horizontal_inset * 2.0)
             .max(metrics.button_min_width);
 
-        let content_size = tab.content.measure_built(hydro, env);
+        let content_size = tab.content.measure_built(hydro, env, theme);
         max_content_width = max_content_width.max(f64::from(content_size.width));
         max_content_height = max_content_height.max(f64::from(content_size.height));
     }
@@ -204,13 +232,17 @@ pub(crate) fn render_tabs_node(
             let (selection, style, labels) = {
                 let st = state.borrow();
                 let selected_index = st.selected_index(selected_id);
-                let labels: Vec<(Id, Option<String>, bool)> = st
+                let labels: Vec<(Id, crate::renderer::InteractionKey, Option<String>, bool)> = st
                     .tabs
                     .iter()
                     .enumerate()
                     .map(|(index, tab)| {
                         (
                             tab.tag,
+                            crate::renderer::InteractionKey::for_rc(
+                                state,
+                                i32::from(tab.tag) as u32 as usize,
+                            ),
                             tab.label.default_a11y_label(),
                             index == selected_index,
                         )
@@ -219,9 +251,11 @@ pub(crate) fn render_tabs_node(
                 (st.selection.clone(), st.style, labels)
             };
             let render_ctx = ctx.render_context();
+            let theme = ctx.theme();
             tabs_accessibility(
                 ctx.renderer_mut(),
-                render_ctx,
+                Some(render_ctx),
+                Some(&theme),
                 &selection,
                 style,
                 &labels,
@@ -248,12 +282,12 @@ pub(crate) fn render_tabs_parts(
     let selected_id = ctx.renderer_mut().read_signal(&selection);
     let selected_index = state.borrow().selected_index(selected_id);
 
-    let theme_metrics = widget_theme(env).tabs_metrics();
+    let theme_metrics = ctx.theme().tabs_metrics();
     let (bar_rect, content_rect) =
         tabs_bar_and_content_rect(ctx.bounds, style, theme_metrics.bar_height);
 
     {
-        let theme = widget_theme(env);
+        let theme = ctx.theme();
         let mut draw = ctx.draw_context();
         theme.draw_tabs_bar(&mut draw, bar_rect, false);
     }
@@ -268,7 +302,10 @@ pub(crate) fn render_tabs_parts(
         // placement.
         let label_size = {
             let cell = state.borrow();
-            cell.tabs[index].label.measure_built(ctx.state_mut(), env)
+            let theme = ctx.theme();
+            cell.tabs[index]
+                .label
+                .measure_built(ctx.state_mut(), env, &theme)
         };
         {
             let hit_bounds = crate::renderer::transformed_rect(ctx.hit_transform, button_rect);
@@ -279,7 +316,7 @@ pub(crate) fn render_tabs_parts(
                 crate::renderer::local_interaction_state(interaction, ctx.hit_transform);
             let is_selected = index == selected_index;
             {
-                let theme = widget_theme(env);
+                let theme = ctx.theme();
                 let mut draw = ctx.draw_context();
                 if is_selected {
                     let highlight = tabs_active_indicator_rect(
@@ -399,4 +436,45 @@ fn tabs_active_indicator_rect(
             )
         }
     }
+}
+
+/// Emits a retained tabs layout's accessibility tree for the semantic walk:
+/// the tab bar and tab nodes `tabs_accessibility` registers (labels are
+/// suppressed in the sub-view flush, so they emit nothing themselves), then
+/// the selected tab's content subtree — it flushes unsuppressed in the
+/// rendered path, so it emits its own nodes here too.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_tabs_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<TabsRenderState>>,
+    env: &Environment,
+) {
+    let owner = state;
+    let mut state = state.borrow_mut();
+    let selected_id = renderer.read_signal(&state.selection);
+    let (selection, style, labels) = {
+        let selected_index = state.selected_index(selected_id);
+        let labels: Vec<(Id, crate::renderer::InteractionKey, Option<String>, bool)> = state
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                (
+                    tab.tag,
+                    crate::renderer::InteractionKey::for_rc(
+                        owner,
+                        i32::from(tab.tag) as u32 as usize,
+                    ),
+                    tab.label.default_a11y_label(),
+                    index == selected_index,
+                )
+            })
+            .collect();
+        (state.selection.clone(), state.style, labels)
+    };
+    tabs_accessibility(renderer, None, None, &selection, style, &labels, env);
+    let selected_index = state.selected_index(selected_id);
+    state.tabs[selected_index]
+        .content
+        .emit_accessibility(renderer, env);
 }

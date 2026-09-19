@@ -1,5 +1,5 @@
 #[cfg(feature = "accessibility")]
-use crate::renderer::{AccessibilityActionTarget, HydrolysisRenderer};
+use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
     HydroNativeView, HydroState, WidgetRenderContext, measure_view_intrinsic, transformed_rect,
 };
@@ -8,12 +8,11 @@ use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, NodeId as AccessibilityNodeId,
     Role as AccessibilityNodeRole,
 };
+use std::rc::Rc;
 use waterui_core::Environment;
 use waterui_core::Native;
 use waterui_core::layout::Size as LayoutSize;
 use waterui_layout::scroll::{Axis as ScrollAxis, ScrollView};
-
-use crate::widgets::widget_theme;
 
 /// Width of the grabbable scrollbar gutter along the viewport edge, in logical
 /// pixels. Wider than the drawn thumb so the bar is comfortable to pick up.
@@ -26,17 +25,22 @@ const SCROLL_INDICATOR_DRAG_THICKNESS: f64 = 6.5;
 const SCROLL_INDICATOR_EDGE_INSET: f64 = 1.5;
 
 impl HydroNativeView for Native<ScrollView> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         let (_axis, content, _controller) = view.as_inner().as_parts();
-        measure_view_intrinsic(content, state, env)
+        measure_view_intrinsic(content, state, env, theme)
     }
 }
 
 #[cfg(feature = "accessibility")]
 pub(crate) fn register_scroll_accessibility_node(
-    renderer: &mut HydrolysisRenderer,
+    renderer: &mut crate::renderer::SemanticCore,
     env: &Environment,
-    bounds: vello::kurbo::Rect,
+    bounds: Option<vello::kurbo::Rect>,
     handle: &crate::scroll::ScrollHandle,
     metrics: crate::scroll::ScrollMetrics,
     axis: ScrollAxis,
@@ -71,15 +75,25 @@ pub(crate) fn register_scroll_accessibility_node(
         }
         _ => panic!("scroll axis variant is not supported by hydrolysis"),
     }
-    renderer.register_accessibility_node(
-        node,
-        bounds,
-        env,
-        Some(AccessibilityActionTarget::Scroll {
-            handle: handle.clone(),
-            axis,
-        }),
-    )
+    match bounds {
+        Some(bounds) => renderer.register_accessibility_node(
+            node,
+            bounds,
+            env,
+            Some(AccessibilityActionTarget::Scroll {
+                handle: handle.clone(),
+                axis,
+            }),
+        ),
+        None => renderer.register_accessibility_node_semantic(
+            node,
+            env,
+            Some(AccessibilityActionTarget::Scroll {
+                handle: handle.clone(),
+                axis,
+            }),
+        ),
+    }
 }
 
 /// Geometry of one scroll indicator along its track: where the thumb starts,
@@ -118,7 +132,7 @@ fn indicator_geometry(
 /// while it owns a drag; a drag schedules re-encode frames only, never layout.
 pub(crate) fn draw_scroll_indicators(
     ctx: &mut WidgetRenderContext<'_>,
-    env: &Environment,
+    _env: &Environment,
     viewport: vello::kurbo::Rect,
     metrics: crate::scroll::ScrollMetrics,
     axis: ScrollAxis,
@@ -131,7 +145,7 @@ pub(crate) fn draw_scroll_indicators(
     } else {
         SCROLL_INDICATOR_THICKNESS
     };
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let vertical = matches!(axis, ScrollAxis::Vertical | ScrollAxis::All)
         .then(|| {
             indicator_geometry(

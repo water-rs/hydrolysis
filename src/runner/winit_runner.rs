@@ -193,7 +193,11 @@ impl LocalExecutor for WinitMainThreadExecutor {
     }
 }
 
-pub fn run(app: App, inspector: Option<waterui::inspector::InspectorRuntime>) {
+pub fn run(
+    app: App,
+    style: impl crate::Style,
+    inspector: Option<waterui::inspector::InspectorRuntime>,
+) {
     let mut event_loop_builder = EventLoop::<RunnerEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     event_loop_builder
@@ -254,8 +258,11 @@ pub fn run(app: App, inspector: Option<waterui::inspector::InspectorRuntime>) {
             let _ = event_proxy.send_event(RunnerEvent::MountPendingWindows);
         }
     }));
+    crate::theme::install_default_tokens(&mut env);
+    style.install_tokens(&mut env);
+    let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
     env.insert(waterui_core::ViewRenderer::new(
-        crate::view_renderer::HydrolysisViewRenderer::default(),
+        crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
     ));
     // The application's fonts, discovered once. Every window's renderer is
     // seeded from this collection, and a self-drawn component that typesets
@@ -266,6 +273,7 @@ pub fn run(app: App, inspector: Option<waterui::inspector::InspectorRuntime>) {
     let window_icon = load_staged_window_icon();
     let mut runner = WinitRunner {
         env,
+        theme,
         fonts,
         window_icon,
         pending_windows: windows
@@ -292,6 +300,9 @@ pub fn run(app: App, inspector: Option<waterui::inspector::InspectorRuntime>) {
 
 struct WinitRunner {
     env: Environment,
+    /// The style the runtime was launched with: every window's renderer
+    /// measures and encodes with this widget theme.
+    theme: Rc<dyn crate::engine::WidgetTheme>,
     /// The application's font collection, the same one the environment carries.
     /// Every window's renderer is seeded from it.
     fonts: FontCollection,
@@ -441,9 +452,9 @@ impl WinitRunner {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&self.theme))
         };
-        super::seed_renderer(&mut renderer, &self.fonts);
+        super::seed_core(&mut renderer, &self.fonts);
         let mut runtime =
             RuntimeWindow::new(window, platform, renderer, self.render_diagnostics_config);
         let _ = pump_window_semantics(&mut runtime, &self.env);

@@ -6,8 +6,8 @@ use crate::gesture::GestureTarget;
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, VisibleSubviewCache,
-    WidgetRenderContext, local_interaction_state, materialize_list_item, measure_list_intrinsic,
+    HydroNativeView, HydroState, RenderContext, VisibleSubviewCache, WidgetRenderContext,
+    local_interaction_state, materialize_list_item, measure_list_intrinsic,
     measure_list_item_row_height, measure_transient_view_intrinsic, transformed_rect,
 };
 use crate::scroll::ScrollHandle;
@@ -28,7 +28,7 @@ use waterui_text::Text;
 
 use crate::renderer::lazy::VirtualExtentIndex;
 use crate::renderer::resolved_color_to_peniko;
-use crate::widgets::{draw_scroll_indicators, widget_theme};
+use crate::widgets::draw_scroll_indicators;
 use nami::SignalExt as _;
 use nami::watcher::BoxWatcherGuard;
 use waterui::theme::color;
@@ -235,7 +235,10 @@ impl RowSectionChrome {
 }
 
 impl ListRenderState {
-    pub(crate) fn from_config(config: ListConfig, renderer: &HydrolysisRenderer) -> Self {
+    pub(crate) fn from_config(
+        config: ListConfig,
+        renderer: &crate::renderer::SemanticCore,
+    ) -> Self {
         let rows_dirty = Rc::new(Cell::new(true));
         let rows_dirty_for_watch = Rc::clone(&rows_dirty);
         let signals = renderer.frame_signals();
@@ -430,7 +433,7 @@ impl ListRenderState {
 
     fn apply_scroll_request(
         &self,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut crate::renderer::SemanticCore,
         handle: &ScrollHandle,
         row_count: usize,
     ) {
@@ -534,8 +537,13 @@ impl ListRenderState {
 }
 
 impl HydroNativeView for Native<ListConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_list_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_list_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -564,8 +572,8 @@ fn row_a11y_key_base(row_id: ListItemId) -> i64 {
 /// driven by a signal re-flushes the tree when it changes.
 #[cfg(feature = "accessibility")]
 fn register_section_chrome_node(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     semantic_key: i64,
     label: Text,
     is_header: bool,
@@ -580,37 +588,70 @@ fn register_section_chrome_node(
     let styled = renderer.read_resolved_text_styled(&label, env);
     let mut node = AccessibilityNode::new(renderer.resolve_accessibility_role(env, role));
     node.set_label(styled.to_string());
-    renderer.register_accessibility_child_node_with_key(
-        semantic_key,
-        node,
-        transformed_rect(ctx.hit_transform, bounds),
-        env,
-        None,
-    )
+    match ctx {
+        Some(ctx) => renderer.register_accessibility_child_node_with_key(
+            semantic_key,
+            node,
+            transformed_rect(ctx.hit_transform, bounds),
+            env,
+            None,
+        ),
+        None => renderer.register_accessibility_child_node_with_key_semantic(
+            semantic_key,
+            node,
+            env,
+            None,
+        ),
+    }
 }
 
 /// Emits a list's accessibility tree from its node-owned retained state.
+///
+/// The rendered flush passes its [`RenderContext`] and theme: row extents are
+/// real, and the emitted window is the scrolled viewport's. The semantic walk
+/// passes `None` for both and emits every row — the semantic tree has no
+/// viewport, and a row not emitted does not exist to assistive technology.
+/// Scroll offsets then read as row indices: the scroll domain is measured in
+/// rows, since the semantic path has no pixels to measure in.
 pub(crate) fn list_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     state: &Rc<RefCell<ListRenderState>>,
     env: &Environment,
 ) {
+    #[cfg(feature = "accessibility")]
+    let owner = state;
     let state = state.borrow();
     let list = &state.config;
     let row_count_signal = list.contents.len();
     let row_count = renderer.read_signal(&row_count_signal);
-    let list_metrics = crate::widgets::widget_theme(env).list_metrics();
-    state.prepare_rows(row_count, list_metrics.one_line_row_height);
-    // The chrome decides how tall each row's slot is, so it has to be resolved
-    // before extents are measured here — exactly as the draw pass does.
-    if state.resolve_sections(row_count, env) {
-        state
-            .extent_index
-            .borrow_mut()
-            .reset(row_count, list_metrics.one_line_row_height, 0.0);
+    let list_metrics = theme.map(|theme| theme.list_metrics());
+    if let Some(list_metrics) = list_metrics {
+        state.prepare_rows(row_count, list_metrics.one_line_row_height);
+        // The chrome decides how tall each row's slot is, so it has to be
+        // resolved before extents are measured here — exactly as the draw pass
+        // does.
+        if state.resolve_sections(row_count, env) {
+            state
+                .extent_index
+                .borrow_mut()
+                .reset(row_count, list_metrics.one_line_row_height, 0.0);
+        }
+    } else {
+        // The semantic path keeps section chrome current but measures rows in
+        // units — one row is one extent unit, so scroll offsets read as row
+        // indices.
+        let _ = state.resolve_sections(row_count, env);
+        let mut extent_index = state.extent_index.borrow_mut();
+        if !extent_index.matches(row_count, 1.0, 0.0) {
+            extent_index.reset(row_count, 1.0, 0.0);
+        }
     }
-    let viewport = ctx.bounds;
+    let _rendered = ctx.is_some();
+    let viewport = ctx.map_or(vello::kurbo::Rect::ZERO, |ctx| ctx.bounds);
+    // The rendered scroll domain is the measured extent; the semantic one is
+    // the row count — with a zero viewport every row is scrollable to.
     let content_height = state
         .extent_index
         .borrow()
@@ -622,10 +663,15 @@ pub(crate) fn list_accessibility(
     #[cfg(feature = "accessibility")]
     {
         let metrics = handle.metrics();
-        let window = state
-            .extent_index
-            .borrow()
-            .visible_window(metrics.offset_y, metrics.offset_y + viewport.height());
+        let (emit_range, leading_offset) = if _rendered {
+            let window = state
+                .extent_index
+                .borrow()
+                .visible_window(metrics.offset_y, metrics.offset_y + viewport.height());
+            (window.start..window.end, window.leading_offset)
+        } else {
+            (0..row_count, 0.0)
+        };
         let mut list_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::List),
         );
@@ -638,30 +684,40 @@ pub(crate) fn list_accessibility(
         list_node.set_scroll_y_max(metrics.max_y);
         list_node.add_action(AccessibilityAction::ScrollUp);
         list_node.add_action(AccessibilityAction::ScrollDown);
-        let mut y = viewport.y0 - metrics.offset_y + window.leading_offset;
-        for index in window.start..window.end {
+        let mut y = viewport.y0 - metrics.offset_y + leading_offset;
+        for index in emit_range {
             let row_env = env.clone();
             let item = materialize_list_item(&list.contents, index, &row_env);
             let chrome = state.section_chrome(index);
-            let slot_height = {
+            // Semantic rows have no layout extent — the slot is only measured
+            // when the rendered path needs it to place the row.
+            let slot_height = if _rendered {
                 let cached_extent = state.extent_index.borrow().measured(index);
                 if let Some(extent) = cached_extent {
                     extent
                 } else {
-                    let extent =
-                        measure_list_item_row_height(&item, renderer.state_mut(), &row_env)
-                            + chrome.total_height(&list_metrics);
+                    let extent = measure_list_item_row_height(
+                        &item,
+                        renderer.state_mut(),
+                        &row_env,
+                        theme.expect("hydrolysis rendered list measurement requires a theme"),
+                    ) + chrome.total_height(
+                        &list_metrics
+                            .expect("hydrolysis rendered list measurement requires list metrics"),
+                    );
                     state.extent_index.borrow_mut().set_measured(index, extent);
                     extent
                 }
+            } else {
+                0.0
             };
             let slot_rect = vello::kurbo::Rect::new(viewport.x0, y, viewport.x1, y + slot_height);
             y += slot_height;
-            if slot_rect.y1 <= viewport.y0 || slot_rect.y0 >= viewport.y1 {
+            if _rendered && (slot_rect.y1 <= viewport.y0 || slot_rect.y0 >= viewport.y1) {
                 continue;
             }
-            let header_height = chrome.header_height(&list_metrics);
-            let footer_height = chrome.footer_height(&list_metrics);
+            let header_height = list_metrics.map_or(0.0, |m| chrome.header_height(&m));
+            let footer_height = list_metrics.map_or(0.0, |m| chrome.footer_height(&m));
             // The chrome a row owns is not part of the row: a section title is
             // its own node, and the row's bounds are the band left between the
             // header and the footer — the same split the draw pass makes.
@@ -678,9 +734,9 @@ pub(crate) fn list_accessibility(
             let key_base = row_a11y_key_base(row_id);
             if let Some(header) = chrome.header.clone() {
                 let header_rect = vello::kurbo::Rect::new(
-                    slot_rect.x0 + list_metrics.horizontal_inset,
+                    slot_rect.x0 + list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y0,
-                    slot_rect.x1 - list_metrics.horizontal_inset,
+                    slot_rect.x1 - list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y0 + header_height,
                 );
                 if let Some(node_id) = register_section_chrome_node(
@@ -705,20 +761,36 @@ pub(crate) fn list_accessibility(
             }
             row_node.add_action(AccessibilityAction::Focus);
             row_node.set_selected(renderer.read_signal(&item.selected));
-            if let Some(row_node_id) = renderer.register_accessibility_child_node_with_key(
-                key_base + A11Y_KEY_ROW,
-                row_node,
-                transformed_rect(ctx.hit_transform, row_rect),
-                &row_env,
-                None,
-            ) {
+            let row_node_id = match ctx {
+                Some(ctx) => renderer.register_accessibility_child_node_with_key(
+                    key_base + A11Y_KEY_ROW,
+                    row_node,
+                    transformed_rect(ctx.hit_transform, row_rect),
+                    &row_env,
+                    None,
+                ),
+                None => renderer.register_accessibility_child_node_with_key_semantic(
+                    key_base + A11Y_KEY_ROW,
+                    row_node,
+                    &row_env,
+                    None,
+                ),
+            };
+            if let Some(row_node_id) = row_node_id {
                 list_node.push_child(row_node_id);
+                let row_interaction_base = (i32::from(*row_id) as u32 as usize)
+                    .checked_mul(3)
+                    .expect("hydrolysis List interaction identity overflow");
+                renderer.register_accessibility_focus_link(
+                    &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base),
+                    row_node_id,
+                );
             }
             if let Some(footer) = chrome.footer.clone() {
                 let footer_rect = vello::kurbo::Rect::new(
-                    slot_rect.x0 + list_metrics.horizontal_inset,
+                    slot_rect.x0 + list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y1 - footer_height,
-                    slot_rect.x1 - list_metrics.horizontal_inset,
+                    slot_rect.x1 - list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y1,
                 );
                 if let Some(node_id) = register_section_chrome_node(
@@ -734,9 +806,9 @@ pub(crate) fn list_accessibility(
                 }
             }
         }
-        let _ = renderer.register_accessibility_node(
+        let _ = renderer.register_accessibility_leaf(
+            ctx,
             list_node,
-            transformed_rect(ctx.hit_transform, viewport),
             env,
             Some(AccessibilityActionTarget::Scroll {
                 handle: handle.clone(),
@@ -756,8 +828,9 @@ pub(crate) fn measure_list_node(
     proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let intrinsic = measure_list_intrinsic(list, state, env);
+    let intrinsic = measure_list_intrinsic(list, state, env, theme);
     ViewDimensions::new(LayoutSize::new(
         proposal.width.unwrap_or(intrinsic.width),
         proposal.height.unwrap_or(intrinsic.height),
@@ -780,7 +853,14 @@ pub(crate) fn render_list_node(
     }
     {
         let render_ctx = ctx.render_context();
-        list_accessibility(ctx.renderer_mut(), render_ctx, state, env);
+        let theme = ctx.theme();
+        list_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            Some(&theme),
+            state,
+            env,
+        );
     }
     #[cfg(feature = "accessibility")]
     if hidden {
@@ -804,7 +884,7 @@ pub(crate) fn render_list_parts(
     };
     let editing = ctx.renderer_mut().read_signal(&editing);
     let row_count = ctx.renderer_mut().read_signal(&row_count_signal);
-    let list_metrics = widget_theme(env).list_metrics();
+    let list_metrics = ctx.theme().list_metrics();
     state
         .borrow()
         .prepare_rows(row_count, list_metrics.one_line_row_height);
@@ -886,7 +966,8 @@ pub(crate) fn render_list_parts(
             if let Some(extent) = cached_extent {
                 extent
             } else {
-                let extent = measure_list_item_row_height(&item, ctx.state_mut(), &row_env)
+                let theme = ctx.theme();
+                let extent = measure_list_item_row_height(&item, ctx.state_mut(), &row_env, &theme)
                     + chrome.total_height(&list_metrics);
                 state
                     .borrow()
@@ -939,7 +1020,7 @@ pub(crate) fn render_list_parts(
             slot_rect.y1 - footer_height,
         );
         {
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             if swipe_dx != 0.0 {
                 let threshold =
@@ -969,7 +1050,7 @@ pub(crate) fn render_list_parts(
             )
         });
         {
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_list_row_background(&mut draw, row_rect, index % 2 == 1);
             if let Some(fill) = selection_fill {
@@ -999,8 +1080,9 @@ pub(crate) fn render_list_parts(
         }
 
         let deletable = ctx.renderer_mut().read_signal(&item.deletable);
+        let theme = ctx.theme();
         let content_size =
-            measure_transient_view_intrinsic(&item.content, ctx.state_mut(), &row_env);
+            measure_transient_view_intrinsic(&item.content, ctx.state_mut(), &row_env, &theme);
         let mut content_rect = list_content_rect(row_rect, list_metrics, content_size);
         let mut trailing_x = row_rect.x1 - 8.0;
 
@@ -1090,7 +1172,7 @@ pub(crate) fn render_list_parts(
                 let down_state = down_interaction
                     .as_ref()
                     .map(|(_, state, _)| local_interaction_state(*state, ctx.hit_transform));
-                let theme = widget_theme(env);
+                let theme = ctx.theme();
                 let mut draw = ctx.draw_context();
                 theme.draw_list_move_control(&mut draw, control_rect);
                 if let Some(state) = up_state {
@@ -1155,7 +1237,7 @@ pub(crate) fn render_list_parts(
             {
                 let delete_interaction =
                     local_interaction_state(delete_interaction, ctx.hit_transform);
-                let theme = widget_theme(env);
+                let theme = ctx.theme();
                 let mut draw = ctx.draw_context();
                 theme.draw_list_delete_control(&mut draw, delete_rect);
                 theme.draw_list_delete_control_state_layer(
@@ -1217,7 +1299,7 @@ pub(crate) fn render_list_parts(
                 row_rect.x1 - list_metrics.divider_trailing_inset,
                 row_rect.y1,
             );
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_list_separator(&mut draw, separator);
         }
@@ -1582,4 +1664,15 @@ fn list_content_rect(
     let height = f64::from(content_size.height).min(available_height);
     let y0 = row_rect.y0 + (row_rect.height() - height) * 0.5;
     vello::kurbo::Rect::new(x0, y0, x1, y0 + height)
+}
+
+/// Emits a retained list's accessibility tree for the semantic walk — the same
+/// nodes `list_accessibility` registers, with no bounds and every row present.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_list_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ListRenderState>>,
+    env: &Environment,
+) {
+    list_accessibility(renderer, None, None, state, env);
 }

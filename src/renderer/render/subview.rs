@@ -1,5 +1,7 @@
 use super::*;
+use crate::engine::WidgetTheme;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use waterui_core::MainThreadBound;
 
@@ -14,6 +16,11 @@ pub(crate) struct HydroSubview<'a> {
     view: MainThreadBound<&'a AnyView>,
     state: MainThreadBound<&'a RefCell<&'a mut HydroState>>,
     env: MainThreadBound<Environment>,
+    /// The widget theme widget leaves measure against. Stored as an `Rc` so
+    /// the layout `SubView` contract — which carries no theme — still answers
+    /// the recursion path with the runtime's style. Main-thread only, like
+    /// `state` and `env`.
+    theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch_axis: StretchAxis,
     /// Per-proposal memo for this layout pass (containers probe children with
     /// repeated proposals). Only the recursion path caches here; the text path
@@ -38,6 +45,7 @@ impl<'a> HydroSubview<'a> {
         view: &'a AnyView,
         state: &'a RefCell<&'a mut HydroState>,
         env: &'a Environment,
+        theme: &'a Rc<dyn WidgetTheme>,
     ) -> Self {
         let resolved_text =
             try_resolve_text_leaf(view, env).map(|(input, max_lines)| ResolvedTextMeasure {
@@ -49,6 +57,7 @@ impl<'a> HydroSubview<'a> {
             view: MainThreadBound::new(view),
             state: MainThreadBound::new(state),
             env: MainThreadBound::new(env.clone()),
+            theme: MainThreadBound::new(Rc::clone(theme)),
             stretch_axis: effective_stretch_axis(view),
             measure_cache: MainThreadBound::new(RefCell::new(Vec::new())),
             resolved_text,
@@ -104,7 +113,13 @@ impl SubView for HydroSubview<'_> {
 
         let dimensions = {
             let mut state = self.state.borrow_mut();
-            measure_view_dimensions_with_proposal(*self.view, proposal, &mut state, &self.env)
+            measure_view_dimensions_with_proposal(
+                *self.view,
+                proposal,
+                &mut state,
+                &self.env,
+                &self.theme,
+            )
         };
         let dimensions = self.apply_stretch(dimensions, proposal);
 

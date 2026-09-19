@@ -157,6 +157,7 @@ fn axis_proposal(vertical: bool, main: Option<f32>, cross: Option<f32>) -> Propo
 fn equal_bounds_keep_the_selected_proposal_after_other_probes() {
     let env = test_environment();
     let mut renderer = test_renderer();
+    let theme = renderer.theme();
     for vertical in [false, true] {
         let mut fixture = Fixture::new(vertical, |content| content, &mut renderer, &env);
         for main in [None, Some(160.0), None] {
@@ -164,6 +165,7 @@ fn equal_bounds_keep_the_selected_proposal_after_other_probes() {
                 let dimensions = fixture.node.measure(
                     &mut renderer.state,
                     &env,
+                    &theme,
                     axis_proposal(vertical, probe, Some(20.0)),
                 );
                 assert_eq!(dimensions.size, axis_size(vertical, 160.0, 20.0));
@@ -385,9 +387,15 @@ fn nested_collections_preserve_intrinsic_cross_axes() {
     })
     .spacing(4.0);
     let node = RenderNode::build(AnyView::new(grid), &env, &mut renderer);
+    let theme = renderer.theme();
     for width in [None, Some(0.0), Some(400.0), None] {
         let size = node
-            .measure(&mut renderer.state, &env, ProposalSize::new(width, None))
+            .measure(
+                &mut renderer.state,
+                &env,
+                &theme,
+                ProposalSize::new(width, None),
+            )
             .size;
         assert_eq!(size, Size::new(316.0, 348.0));
     }

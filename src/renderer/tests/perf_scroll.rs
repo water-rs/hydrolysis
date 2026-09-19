@@ -28,7 +28,7 @@ use waterui::component::list::{List, ListItem};
 use waterui::component::text;
 use waterui::prelude::{FlowAnimationPreset, flow_markdown};
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::InputEvent;
 
@@ -51,7 +51,13 @@ fn lazy_list(rows: usize) -> AnyView {
 fn runtime_for(rows: usize) -> HeadlessRuntime {
     let builder = AnyViewBuilder::<AnyView>::new(move || lazy_list(rows));
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT)
+    HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    )
 }
 
 /// Frame-economy totals over an initial build plus a fixed scroll sequence.
@@ -130,7 +136,13 @@ fn coordinate_jump_over_lazy_stack_materializes_only_the_target_window() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
     let initial_materialized = materialized.load(Ordering::Relaxed);
@@ -178,7 +190,13 @@ fn indexed_list_jump_materializes_only_the_target_window() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
     let initial_materialized = materialized.load(Ordering::Relaxed);
@@ -246,7 +264,13 @@ fn visible_lazy_item_remeasures_connected_dynamic_through_retained_node() {
         )))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -291,7 +315,13 @@ fn flow_markdown_blocks_reconnect_after_lazy_eviction() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -343,7 +373,13 @@ fn flow_markdown_append_preserves_user_scroll_offset() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 

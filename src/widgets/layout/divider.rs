@@ -6,8 +6,6 @@ use waterui_core::Environment;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_layout::stack::Axis as StackAxis;
 
-use crate::widgets::util::widget_theme;
-
 /// Measures a retained divider leaf: a 1×1 minimum, matching the dispatch path's
 /// `measure_view_dimensions` for `Divider`. The divider stretches on its cross
 /// axis during placement; its intrinsic size is the line thickness floor.
@@ -16,6 +14,7 @@ pub(crate) fn measure_divider_node(
     _proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     ViewDimensions::new(LayoutSize::new(1.0, 1.0))
 }
@@ -35,7 +34,7 @@ pub(crate) fn render_divider_parts(
     _divider: &Rc<RefCell<Divider>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.divider_metrics();
     let vertical = matches!(env.get::<StackAxis>(), Some(StackAxis::Horizontal));
     let rect = if vertical {

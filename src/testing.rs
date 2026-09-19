@@ -1,35 +1,14 @@
 //! Deterministic environment setup for Hydrolysis-backed tests.
 
-use waterui::{
-    Environment, Plugin,
-    color::{ResolvedColor, Srgb},
-    theme::{ColorScheme, ColorSettings, FontSettings, Theme},
-};
+use waterui::Environment;
 
-fn color(rgb: u32) -> ResolvedColor {
-    ResolvedColor::from_srgb(Srgb::from_u32(rgb))
-}
-
-/// Installs every theme token required by Hydrolysis rendering.
+/// Installs the framework default colour and font tokens required by
+/// Hydrolysis rendering.
+///
+/// This is the same token set the runtimes install through
+/// [`crate::theme::install_default_tokens`]. It is deliberately *not* a
+/// [`crate::Style`]: it carries no widget theme, so tests that mount widgets
+/// on the rendered runtime must still supply a real style.
 pub fn install_theme(env: &mut Environment) {
-    Theme::new()
-        .color_scheme(ColorScheme::Light)
-        .colors(
-            ColorSettings::new()
-                .background(color(0xFF_FF_FF))
-                .surface(color(0xFF_FF_FF))
-                .surface_variant(color(0xF3_F4_F6))
-                .border(color(0xD1_D5_DB))
-                .foreground(color(0x11_18_27))
-                .muted_foreground(color(0x4B_55_63))
-                .accent(color(0x25_63_EB))
-                .accent_container(color(0xDB_EA_FE))
-                .accent_foreground(color(0xFF_FF_FF))
-                .tertiary(color(0x7C_3A_ED))
-                .tertiary_container(color(0xED_E9_FE))
-                .selection_container(color(0x25_63_EB))
-                .selection_foreground(color(0xFF_FF_FF)),
-        )
-        .fonts(FontSettings::default_scale())
-        .install(env);
+    crate::theme::install_default_tokens(env);
 }

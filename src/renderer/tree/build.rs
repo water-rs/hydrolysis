@@ -11,7 +11,7 @@ impl RenderNode {
     pub(crate) fn build(
         view: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let view = match view.downcast::<Native<Color>>() {
             Ok(color) => {
@@ -483,7 +483,7 @@ impl RenderNode {
                     child: RenderNode::build(content, env, renderer),
                     controller,
                     applied_scroll_generation: Cell::new(0),
-                    handle: None,
+                    handle: RefCell::new(None),
                     content_size: Size::zero(),
                     viewport: Size::zero(),
                     env: env.clone(),
@@ -533,12 +533,12 @@ impl RenderNode {
         // instead of freezing in a one-shot `Captured` bake.
         let view = match view.downcast::<Native<ButtonConfig>>() {
             Ok(button) => {
-                return RenderNode::build_button((*button).into_inner(), env, renderer);
+                return RenderNode::build_button((*button).into_inner(), env);
             }
             Err(view) => view,
         };
         let view = match view.downcast::<Native<ResolvedMenu>>() {
-            Ok(menu) => return RenderNode::build_menu((*menu).into_inner(), env, renderer),
+            Ok(menu) => return RenderNode::build_menu((*menu).into_inner(), env),
             Err(view) => view,
         };
         let view = match view.downcast::<Native<ToggleConfig>>() {
@@ -699,7 +699,7 @@ impl RenderNode {
         effect: WrapperEffect,
         content: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         RenderNode::Wrapper(Box::new(WrapperNode {
             #[cfg(feature = "accessibility")]
@@ -719,7 +719,7 @@ impl RenderNode {
         hook: LifeCycleHook,
         content: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let effect = match hook.lifecycle() {
             LifeCycle::Appear => LifeCycleEffect {
@@ -742,7 +742,7 @@ impl RenderNode {
     fn build_env_scoped<T: MetadataKey + Clone + 'static>(
         meta: IgnorableMetadata<T>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let IgnorableMetadata { content, value } = meta;
         let scoped = a11y_scoped_env(env, &value);
@@ -758,7 +758,7 @@ impl RenderNode {
     fn build_naming_scoped<T: MetadataKey + Clone + 'static>(
         meta: IgnorableMetadata<T>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let IgnorableMetadata { content, value } = meta;
         #[cfg(feature = "accessibility")]
@@ -776,7 +776,7 @@ impl RenderNode {
         layout: Box<dyn Layout>,
         views: AnyViews<AnyView>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let dirty = Rc::new(Cell::new(false));
         let dirty_key = Rc::new(());
@@ -841,7 +841,7 @@ impl RenderNode {
         axis: LazyStackAxisConfig,
         views: AnyViews<AnyView>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let dirty_key = Rc::new(());
         let dirty = Rc::new(Cell::new(true));
@@ -887,7 +887,7 @@ impl RenderNode {
     /// Build a self-drawn scene node owning its `SceneContent` (no effect slot).
     fn build_scene_view_node(
         scene_view: Native<SceneView>,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let mut content = scene_view.into_inner().into_content();
         let signals = renderer.signals.clone();
@@ -908,7 +908,7 @@ impl RenderNode {
     fn build_gpu_surface(
         surface: GpuSurface,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let runtime = Rc::new(RefCell::new(EmbeddedGpuSurfaceRuntime::new(surface, env)));
         renderer.register_node_gpu_surface(Rc::clone(&runtime));
@@ -925,7 +925,7 @@ impl RenderNode {
     fn build_view_effect(
         mut effect: ViewEffectErased,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let content = effect.take_content();
         let child = RenderNode::build(normalize_layout_view(content, env), env, renderer);
@@ -946,7 +946,7 @@ impl RenderNode {
         filter: AppliedFilter,
         content: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let runtime = Rc::new(RefCell::new(AppliedFilterRuntime::new(filter)));
         renderer.register_node_applied_filter(Rc::clone(&runtime));
@@ -963,7 +963,7 @@ impl RenderNode {
     fn build_dynamic_host(
         dynamic: waterui_core::dynamic::Dynamic,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let identity = dynamic.identity();
         let pending: Rc<RefCell<Option<AnyView>>> = Rc::new(RefCell::new(None));

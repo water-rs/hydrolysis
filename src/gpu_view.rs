@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use waterui::View;
 use waterui_core::layout::StretchAxis;
 use waterui_core::{AnyView, Environment};
@@ -5,16 +7,17 @@ use waterui_graphics::{
     DeviceLoss, GpuContext, GpuFrame, GpuSurface, GpuView, SceneViewMergeToParent,
 };
 
+use crate::engine::WidgetTheme;
 use crate::renderer::HydrolysisRenderer;
 use crate::time::Instant;
 
 /// A `GpuView` that renders any cloneable `View` through hydrolysis.
-#[derive(Debug)]
 pub struct HydrolysisGpuView<V>
 where
     V: View + Clone + 'static,
 {
     view: V,
+    theme: Rc<dyn WidgetTheme>,
     adapter: Option<wgpu::Adapter>,
     /// Reports this device lost; taken when the device was opened.
     device_loss: Option<DeviceLoss>,
@@ -29,14 +32,24 @@ where
     animation_epoch: Instant,
 }
 
+impl<V> core::fmt::Debug for HydrolysisGpuView<V>
+where
+    V: View + Clone + 'static,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HydrolysisGpuView").finish_non_exhaustive()
+    }
+}
+
 impl<V> HydrolysisGpuView<V>
 where
     V: View + Clone + 'static,
 {
     #[must_use]
-    pub fn new(view: V) -> Self {
+    pub fn new(view: V, theme: Rc<dyn WidgetTheme>) -> Self {
         Self {
             view,
+            theme,
             adapter: None,
             device_loss: None,
             renderer: None,
@@ -53,7 +66,7 @@ where
 {
     async fn setup(&mut self, ctx: &GpuContext<'_>, env: &mut Environment) {
         let scoped_env = env.extending(SceneViewMergeToParent);
-        let mut renderer = HydrolysisRenderer::new(ctx.adapter, ctx.device);
+        let mut renderer = HydrolysisRenderer::new(ctx.adapter, ctx.device, Rc::clone(&self.theme));
         renderer.set_host_redraw_handle(ctx.redraw_handle.clone());
         renderer.prepare_window_tree(AnyView::new(self.view.clone()), &scoped_env);
         renderer.setup_embedded_gpu_surfaces(ctx).await;
@@ -150,9 +163,11 @@ where
 
 /// Extension trait for rendering a view through hydrolysis into a `GpuSurface`.
 pub trait HydrolysisExt: View + Clone + Sized + 'static {
-    /// Wrap this view in a hydrolysis-powered `GpuSurface`.
-    fn hydrolysis(self) -> GpuSurface {
-        GpuSurface::new(HydrolysisGpuView::new(self))
+    /// Wrap this view in a hydrolysis-powered `GpuSurface`. The embedded
+    /// renderer is style-driven like the window runtime: `theme` is the same
+    /// `WidgetTheme` the `Style` the runtime was launched with supplies.
+    fn hydrolysis(self, theme: Rc<dyn WidgetTheme>) -> GpuSurface {
+        GpuSurface::new(HydrolysisGpuView::new(self, theme))
     }
 }
 
