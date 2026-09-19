@@ -216,3 +216,76 @@ fn a_popup_only_change_publishes_the_merged_tree() {
         "the merged focus must return to the main tree once the popup closes"
     );
 }
+
+/// Pumps until the runtime settles and returns the last tree update it
+/// emitted — `None` when nothing changed since the previous emit.
+fn pump_until_settled(runtime: &mut HeadlessRuntime) -> Option<TreeUpdate> {
+    let mut last = None;
+    for _ in 0..64 {
+        let result = runtime.pump_at(true, Instant::now());
+        if let Some(update) = result.tree_update {
+            last = Some(update);
+        }
+        if runtime.is_settled() {
+            break;
+        }
+    }
+    assert!(
+        !runtime.has_pending_semantic_update(),
+        "headless runtime never settled"
+    );
+    last
+}
+
+/// `tree_update` is the "the tree changed" signal: a pump where no window —
+/// main or popup — emitted must publish `None`, or a test host invalidates
+/// its snapshot on every pump.
+#[test]
+fn a_clean_pump_publishes_no_tree_update() {
+    let copied = Binding::container(false);
+    let copied_for_view = copied.clone();
+    let builder = AnyViewBuilder::<AnyView>::new(move || {
+        let copied = copied_for_view.clone();
+        AnyView::new(
+            Frame::new(button("host").action(|| {}))
+                .width(WINDOW_SIZE)
+                .height(WINDOW_SIZE)
+                .context_menu(vec!["Copy".action(move || copied.set(true))]),
+        )
+    });
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_SIZE as u32,
+        WINDOW_SIZE as u32,
+        MinimalTestTheme::default(),
+    );
+
+    let update = pump_until_settled(&mut runtime)
+        .expect("the first frame must publish an accessibility tree");
+    assert!(
+        runtime.pump_at(true, Instant::now()).tree_update.is_none(),
+        "a settled pump with no popup must publish nothing"
+    );
+
+    // With a popup open the same rule holds: the menu's window is mounted
+    // and merged, but once every core is clean the next pump publishes
+    // nothing.
+    let (_, host) =
+        find_by_label(&update, Role::Button, "host").expect("the host button is missing");
+    let bounds = host.bounds().expect("the host button has frame bounds");
+    let (x, y) = ((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+    for event in secondary_click(x as f32, y as f32) {
+        runtime.push_input_event(event);
+    }
+    let update =
+        pump_until_settled(&mut runtime).expect("the click frame must publish the merged tree");
+    assert!(
+        find_by_label(&update, Role::Button, "Copy").is_some(),
+        "the menu's window must be merged before the clean-pump check"
+    );
+    assert!(
+        runtime.pump_at(true, Instant::now()).tree_update.is_none(),
+        "a settled pump with an open popup must publish nothing"
+    );
+}

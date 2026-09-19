@@ -631,16 +631,20 @@ impl SemanticCore {
         (!self.accessibility.nodes.is_empty()).then(|| self.accessibility.assembled_tree_update())
     }
 
-    /// The accessibility tree of every open window, merged into one update.
+    /// The accessibility tree of every open window, merged into one update —
+    /// or `None` when no window emitted this frame.
     ///
-    /// The main window's core contributes its pending update, or — when the
-    /// frame left it clean — the same tree re-emitted from its live registry,
-    /// so a popup emitting alone still publishes. Each popup contributes its
-    /// own pending or current nodes with every id shifted into a per-window
-    /// range (node ids are unique per core), and each popup root attaches to
-    /// the main root's children so the merged tree stays one tree. Actions
-    /// addressed at a shifted id demultiplex back to the owning window's core
-    /// by the same stride — see the runtime's `perform_accessibility_action`.
+    /// Publishing is driven by pending updates: the merged update exists
+    /// exactly when at least one core — the main window or any popup — has
+    /// one. A core that emitted contributes its pending update; a clean core
+    /// re-emits its live registry so the merged tree still describes it — a
+    /// popup publishing alone would otherwise drop the main window from the
+    /// host's tree (the main root's children list is republished whole each
+    /// merge). Each popup's ids shift into a per-window range (node ids are
+    /// unique per core), and each popup root attaches to the main root's
+    /// children so the merged tree stays one tree. Actions addressed at a
+    /// shifted id demultiplex back to the owning window's core by the same
+    /// stride — see the runtime's `perform_accessibility_action`.
     ///
     /// A window contributes nothing only when it has never emitted: there is
     /// no published tree to describe.
@@ -658,11 +662,20 @@ impl SemanticCore {
         const WINDOW_ID_STRIDE: u64 = 1 << 32;
         const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
 
-        let mut merged = self
-            .take_accessibility_tree_update()
-            .or_else(|| self.current_accessibility_tree_update())?;
-        let mut popups = popups.into_iter().peekable();
-        if popups.peek().is_none() {
+        let main_pending = self.take_accessibility_tree_update();
+        let popups: Vec<(&mut SemanticCore, Option<AccessibilityTreeUpdate>)> = popups
+            .into_iter()
+            .map(|popup| {
+                let pending = popup.take_accessibility_tree_update();
+                (popup, pending)
+            })
+            .collect();
+        if main_pending.is_none() && popups.iter().all(|(_, pending)| pending.is_none()) {
+            return None;
+        }
+
+        let mut merged = main_pending.or_else(|| self.current_accessibility_tree_update())?;
+        if popups.is_empty() {
             return Some(merged);
         }
 
@@ -676,11 +689,8 @@ impl SemanticCore {
         // tree's focus — iterating in z-order, the last such popup wins.
         // Every other case leaves the merged focus on the main tree.
         let mut focused_popup = None;
-        for (index, popup) in popups.enumerate() {
-            let Some(update) = popup
-                .take_accessibility_tree_update()
-                .or_else(|| popup.current_accessibility_tree_update())
-            else {
+        for (index, (popup, pending)) in popups.into_iter().enumerate() {
+            let Some(update) = pending.or_else(|| popup.current_accessibility_tree_update()) else {
                 continue;
             };
             let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;

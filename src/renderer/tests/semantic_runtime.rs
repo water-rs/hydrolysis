@@ -621,6 +621,40 @@ fn menu_opens_a_semantic_popup_window_and_commands_fire() {
     );
 }
 
+/// `tree_update` is the "the tree changed" signal: a pump where no window —
+/// main or popup — emitted must publish `None`, or a test host invalidates
+/// its snapshot on every pump.
+#[test]
+fn a_clean_pump_publishes_no_tree_update() {
+    let tint = Binding::container(Color::srgb(0, 0, 0));
+    let tint_for_view = tint.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((ColorPicker::new("Tint", &tint_for_view),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert!(
+        runtime.pump().tree_update.is_none(),
+        "a settled pump with no popup must publish nothing"
+    );
+
+    // With a popup open the same rule holds: the swatch panel's window is
+    // mounted and merged, but once every core is clean the next pump
+    // publishes nothing.
+    let (trigger, _) =
+        find_by_label(&update, Role::Button, "Tint").expect("the color picker is missing");
+    assert!(act(&mut runtime, Action::Click, trigger));
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Button, "Red").is_some(),
+        "the swatch panel must be merged before the clean-pump check"
+    );
+    assert!(
+        runtime.pump().tree_update.is_none(),
+        "a settled pump with an open popup must publish nothing"
+    );
+}
+
 #[test]
 fn list_emits_all_rows_and_scrolls() {
     let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
