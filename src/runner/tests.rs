@@ -82,8 +82,9 @@ fn animation_ticks_schedule_full_frames() {
 
     assert!(runtime.mode.is_pending());
     assert!(
-        runtime.mode == FrameMode::Refresh,
-        "an animation tick schedules the same full frame as any content change"
+        runtime.mode == FrameMode::Animate,
+        "an animation tick schedules the same full frame as any content change, \
+         marked as continuation work rather than an unapplied update"
     );
 }
 

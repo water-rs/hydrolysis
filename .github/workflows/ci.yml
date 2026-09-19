@@ -40,7 +40,7 @@ jobs:
         # no such face installed fails them for want of a font.
         run: |
           sudo apt-get update -o Dir::Etc::SourceList=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::SourceParts=/dev/null
-          sudo apt-get install -y libfontconfig1-dev libva-dev libpipewire-0.3-dev libegl-dev libgbm-dev libwayland-dev libxkbcommon-dev libvulkan-dev fonts-noto-core fonts-noto-cjk
+          sudo apt-get install -y libfontconfig1-dev libva-dev libpipewire-0.3-dev libegl-dev libgbm-dev libwayland-dev libxkbcommon-dev libvulkan-dev libasound2-dev fonts-noto-core fonts-noto-cjk
       - name: Install DirectX Shader Compiler
         if: runner.os == 'Windows'
         uses: tracel-ai/github-actions/install-dxc@295f2fdbae5271f4f8ad56d634e4ff6a95daafc8

@@ -1,10 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-mod shared;
-
 use hydrolysis::run;
-use shared::M3Style;
 use waterui::Environment;
 use waterui::app::App;
 use waterui::prelude::*;
@@ -61,11 +58,10 @@ fn main() {
         std::process::exit(0);
     });
 
-    // Widgets read their fonts and colors out of the environment, and a bare
-    // `Environment` has neither, so every text view panics on the first frame.
-    // The generated projects install this too.
-    let mut env = Environment::new();
-    hydrolysis_m3::install_defaults(&mut env);
-    let style = M3Style::new(&env);
-    run(app(env), style);
+    // `run` installs the style's tokens (fonts, colors) over the framework
+    // defaults before the first frame; the app-level environment carries none.
+    run(
+        app(Environment::new()),
+        hydrolysis_m3::Material3::defaults(),
+    );
 }

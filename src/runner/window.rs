@@ -60,11 +60,22 @@ pub(super) enum FrameMode {
     /// Refresh the retained window tree on the next pump (building it first if this
     /// renderer has not built it yet).
     Refresh,
+    /// Re-sample animated scalars on the next pump: the same full refresh pass
+    /// as `Refresh`, but scheduled by the animation tick itself, so it marks
+    /// the app busy rather than stale — the tree last emitted is current.
+    Animate,
 }
 
 impl FrameMode {
     pub(super) const fn is_pending(self) -> bool {
         !matches!(self, FrameMode::Idle)
+    }
+
+    /// Whether the scheduled frame exists to apply an unapplied semantic
+    /// change. `Animate` is scheduled continuation work, not staleness.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn is_unapplied_change(self) -> bool {
+        matches!(self, FrameMode::Refresh)
     }
 }
 
@@ -156,8 +167,13 @@ pub(super) fn schedule_animation_update<P: PlatformWindow>(
         return;
     }
     // Every animated scalar is re-sampled in the render tree's node flush; the
-    // tick schedules a full frame like every other content change.
-    runtime.request_refresh();
+    // tick schedules a full frame like every other content change. It is
+    // scheduled as `Animate` rather than `Refresh`: the frame continues work
+    // already in flight, so it must not read as an unapplied semantic update.
+    // A `Refresh` already armed by a patch or rebuild is never downgraded.
+    if matches!(runtime.mode, FrameMode::Idle) {
+        runtime.mode = FrameMode::Animate;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,7 +469,7 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let mut flushed = false;
     match runtime.mode {
         FrameMode::Idle => {}
-        FrameMode::Refresh if !runtime.renderer.has_render_tree() => {
+        FrameMode::Refresh | FrameMode::Animate if !runtime.renderer.has_render_tree() => {
             build_window_scene(
                 runtime,
                 env,
@@ -486,7 +502,7 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
                 refresh_window_scene(runtime, env, &mut phases);
             }
         }
-        FrameMode::Refresh => {
+        FrameMode::Refresh | FrameMode::Animate => {
             refresh_window_scene(runtime, env, &mut phases);
             runtime.clear_frame_mode();
             flushed = true;

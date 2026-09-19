@@ -502,10 +502,10 @@ impl HeadlessRuntime {
     /// up to date.
     #[must_use]
     pub fn has_pending_semantic_update(&self) -> bool {
-        self.runtime.mode.is_pending()
+        self.runtime.mode.is_unapplied_change()
             || self.runtime.renderer.has_pending_semantic_update()
             || self.popup_windows.iter().any(|popup| {
-                popup.mode.is_pending() || popup.renderer.has_pending_semantic_update()
+                popup.mode.is_unapplied_change() || popup.renderer.has_pending_semantic_update()
             })
     }
 
