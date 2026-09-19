@@ -7,7 +7,7 @@ use waterui::navigation::{
 use waterui_backend_core::widget::NavigationMotion;
 use waterui_core::id::Id;
 
-const ROOT_NAVIGATION_IDENTITY: u64 = 0;
+pub(crate) const ROOT_NAVIGATION_IDENTITY: u64 = 0;
 
 #[derive(Clone)]
 pub(crate) struct NavigationMatchedElement {
@@ -564,6 +564,96 @@ impl SemanticCore {
         let allowed = state.attempt_pop(env);
         put_destination_state(slot, identity, state);
         allowed
+    }
+
+    /// Applies one batch of pending navigation events — the record a
+    /// push/pop/replace left behind when it mutated `entries` — folding the
+    /// removals into `pending_removed`, marking the transaction pending, and
+    /// firing `disappeared` on the destination that yielded the active
+    /// position.
+    ///
+    /// This is the lifecycle point both pipelines share: the state change
+    /// already happened on the retained tree, so the rendered walk and the
+    /// semantic emit each call it once. The rendered path then animates the
+    /// transition before [`Self::complete_navigation_transaction`] fires
+    /// `appeared`/`popped`; the semantic emit completes it in place — there
+    /// is no scene to animate.
+    ///
+    /// `active_identity` is the identity of the entry the mutated `entries`
+    /// stack now shows; the batch's final `current_identity` is asserted
+    /// against it. Returns the previous active identity and stack depth when
+    /// a batch was applied — the rendered walk uses them to animate from the
+    /// departed scene.
+    pub(crate) fn apply_navigation_events(
+        &mut self,
+        slot_key: &NavigationKey,
+        active_identity: u64,
+        env: &Environment,
+    ) -> Option<(u64, usize)> {
+        let events = {
+            let slot = self
+                .navigation
+                .slots
+                .get_mut(slot_key)
+                .expect("Hydrolysis navigation slot missing");
+            slot.events.borrow_mut().drain(..).collect::<Vec<_>>()
+        };
+        if events.is_empty() {
+            return None;
+        }
+        for pair in events.windows(2) {
+            assert_eq!(
+                pair[0].current_identity, pair[1].previous_identity,
+                "Hydrolysis navigation events must form one atomic transaction chain"
+            );
+        }
+        let final_identity = events
+            .last()
+            .expect("non-empty navigation event batch must have a last event")
+            .current_identity;
+        assert_eq!(
+            final_identity, active_identity,
+            "Hydrolysis navigation event result must match retained stack entries"
+        );
+        let final_transaction_id = events
+            .last()
+            .expect("non-empty navigation event batch must have a last event")
+            .transaction_id;
+        let (previous_identity, previous_depth) = {
+            let slot = self
+                .navigation
+                .slots
+                .get_mut(slot_key)
+                .expect("Hydrolysis navigation slot missing");
+            assert_eq!(
+                events
+                    .first()
+                    .expect("non-empty navigation event batch must have a first event")
+                    .previous_identity,
+                slot.active_identity,
+                "Hydrolysis navigation event must start from the rendered destination"
+            );
+            if let Some(previous_transaction_id) = slot.pending_transaction_id.take() {
+                let _ = slot
+                    .controller
+                    .transition_cancelled(previous_transaction_id);
+            }
+            let previous_identity = slot.active_identity;
+            let previous_depth = slot.last_depth;
+            for event in events {
+                slot.pending_removed.extend(event.removed);
+            }
+            slot.transition = None;
+            slot.interactive_pop = None;
+            slot.pending_transaction_id = Some(final_transaction_id);
+            slot.pending_appearance = previous_identity != final_identity;
+            slot.active_identity = final_identity;
+            (previous_identity, previous_depth)
+        };
+        if previous_identity != active_identity {
+            self.navigation_destination_disappeared(slot_key, previous_identity, env);
+        }
+        Some((previous_identity, previous_depth))
     }
 
     pub(crate) fn navigation_destination_disappeared(

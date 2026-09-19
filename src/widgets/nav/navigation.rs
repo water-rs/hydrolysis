@@ -1,6 +1,8 @@
 use crate::engine::Brush;
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
+#[cfg(feature = "accessibility")]
+use crate::renderer::ROOT_NAVIGATION_IDENTITY;
 use crate::renderer::bounded_proposal;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
@@ -1529,76 +1531,9 @@ pub(crate) fn render_navigation_stack_parts(
         &bounds,
     );
 
-    let events = {
-        let slot = ctx
-            .renderer_mut()
-            .navigation
-            .slots
-            .get_mut(&slot_key)
-            .expect("Hydrolysis navigation slot missing");
-        slot.events.borrow_mut().drain(..).collect::<Vec<_>>()
-    };
-    let mut navigation_change = None;
-    if !events.is_empty() {
-        for pair in events.windows(2) {
-            assert_eq!(
-                pair[0].current_identity, pair[1].previous_identity,
-                "Hydrolysis navigation events must form one atomic transaction chain"
-            );
-        }
-        let final_identity = events
-            .last()
-            .expect("non-empty navigation event batch must have a last event")
-            .current_identity;
-        assert_eq!(
-            final_identity, active_identity,
-            "Hydrolysis navigation event result must match retained stack entries"
-        );
-        let final_transaction_id = events
-            .last()
-            .expect("non-empty navigation event batch must have a last event")
-            .transaction_id;
-        let previous_identity = {
-            let slot = ctx
-                .renderer_mut()
-                .navigation
-                .slots
-                .get_mut(&slot_key)
-                .expect("Hydrolysis navigation slot missing");
-            assert_eq!(
-                events
-                    .first()
-                    .expect("non-empty navigation event batch must have a first event")
-                    .previous_identity,
-                slot.active_identity,
-                "Hydrolysis navigation event must start from the rendered destination"
-            );
-            if let Some(previous_transaction_id) = slot.pending_transaction_id.take() {
-                let _ = slot
-                    .controller
-                    .transition_cancelled(previous_transaction_id);
-            }
-            let previous_identity = slot.active_identity;
-            let previous_depth = slot.last_depth;
-            for event in events {
-                slot.pending_removed.extend(event.removed);
-            }
-            slot.transition = None;
-            slot.interactive_pop = None;
-            slot.pending_transaction_id = Some(final_transaction_id);
-            slot.pending_appearance = previous_identity != final_identity;
-            slot.active_identity = final_identity;
-            navigation_change = Some((previous_identity, previous_depth));
-            previous_identity
-        };
-        if previous_identity != active_identity {
-            ctx.renderer_mut().navigation_destination_disappeared(
-                &slot_key,
-                previous_identity,
-                &local_env,
-            );
-        }
-    }
+    let navigation_change =
+        ctx.renderer_mut()
+            .apply_navigation_events(&slot_key, active_identity, &local_env);
 
     ctx.renderer_mut()
         .activate_navigation_root_if_needed(&slot_key, &local_env);
@@ -1926,47 +1861,6 @@ pub(crate) fn render_navigation_stack_parts(
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::resolved_split_column_width;
-    use waterui::navigation::{ColumnWidth, NativeNavigationSplitStyle};
-
-    /// The sidebar's width is a policy of the split style, not of the column
-    /// constraints alone: a detail-first layout squeezes the sidebar to its
-    /// minimum so the detail column gets the remaining space, while the
-    /// balanced styles honour the author's ideal.
-    #[test]
-    fn prominent_detail_squeezes_the_sidebar_to_its_minimum() {
-        let width = ColumnWidth::new(180.0, 260.0, 400.0);
-
-        assert_eq!(
-            resolved_split_column_width(width, NativeNavigationSplitStyle::ProminentDetail),
-            180.0
-        );
-        for balanced in [
-            NativeNavigationSplitStyle::Automatic,
-            NativeNavigationSplitStyle::Balanced,
-        ] {
-            assert_eq!(resolved_split_column_width(width, balanced), 260.0);
-        }
-    }
-
-    /// Column constraints that leave no room to choose must resolve the same way
-    /// under every style, so a fixed-width sidebar cannot drift between them.
-    #[test]
-    fn a_fixed_width_sidebar_resolves_identically_under_every_style() {
-        let fixed = ColumnWidth::new(240.0, 240.0, 240.0);
-
-        for style in [
-            NativeNavigationSplitStyle::Automatic,
-            NativeNavigationSplitStyle::Balanced,
-            NativeNavigationSplitStyle::ProminentDetail,
-        ] {
-            assert_eq!(resolved_split_column_width(fixed, style), 240.0);
-        }
-    }
-}
-
 /// Emits a retained navigation view's accessibility nodes for the semantic
 /// walk: the bar and title nodes `navigation_view_accessibility` registers,
 /// then the sub-views that flush unsuppressed in the rendered path — toolbar
@@ -2095,6 +1989,17 @@ pub(crate) fn emit_navigation_stack_accessibility(
         renderer.install_navigation_root_state(&slot_key, root_state);
     }
     let depth = entries.borrow().len();
+    let active_identity = if depth == 0 {
+        ROOT_NAVIGATION_IDENTITY
+    } else {
+        navigation_entry_identity(&entries, depth - 1)
+    };
+    renderer.apply_navigation_events(&slot_key, active_identity, &local_env);
+    renderer.activate_navigation_root_if_needed(&slot_key, &local_env);
+    // A semantic emit completes the transaction in place — there is no
+    // scene transition to await, so `popped`/`appeared` and the controller
+    // acknowledgement fire with the emit that shows the result.
+    renderer.complete_navigation_transaction(&slot_key, &local_env);
     if depth == 0 {
         state
             .borrow_mut()
@@ -2102,7 +2007,6 @@ pub(crate) fn emit_navigation_stack_accessibility(
             .emit_accessibility(renderer, &local_env);
         return;
     }
-    let active_identity = navigation_entry_identity(&entries, depth - 1);
     let mut entries = entries.borrow_mut();
     let entry = entries
         .iter_mut()
@@ -2111,4 +2015,44 @@ pub(crate) fn emit_navigation_stack_accessibility(
             panic!("Hydrolysis navigation entry identity {active_identity} is not retained")
         });
     entry.content.emit_accessibility(renderer, &local_env);
+}
+#[cfg(test)]
+mod tests {
+    use super::resolved_split_column_width;
+    use waterui::navigation::{ColumnWidth, NativeNavigationSplitStyle};
+
+    /// The sidebar's width is a policy of the split style, not of the column
+    /// constraints alone: a detail-first layout squeezes the sidebar to its
+    /// minimum so the detail column gets the remaining space, while the
+    /// balanced styles honour the author's ideal.
+    #[test]
+    fn prominent_detail_squeezes_the_sidebar_to_its_minimum() {
+        let width = ColumnWidth::new(180.0, 260.0, 400.0);
+
+        assert_eq!(
+            resolved_split_column_width(width, NativeNavigationSplitStyle::ProminentDetail),
+            180.0
+        );
+        for balanced in [
+            NativeNavigationSplitStyle::Automatic,
+            NativeNavigationSplitStyle::Balanced,
+        ] {
+            assert_eq!(resolved_split_column_width(width, balanced), 260.0);
+        }
+    }
+
+    /// Column constraints that leave no room to choose must resolve the same way
+    /// under every style, so a fixed-width sidebar cannot drift between them.
+    #[test]
+    fn a_fixed_width_sidebar_resolves_identically_under_every_style() {
+        let fixed = ColumnWidth::new(240.0, 240.0, 240.0);
+
+        for style in [
+            NativeNavigationSplitStyle::Automatic,
+            NativeNavigationSplitStyle::Balanced,
+            NativeNavigationSplitStyle::ProminentDetail,
+        ] {
+            assert_eq!(resolved_split_column_width(fixed, style), 240.0);
+        }
+    }
 }
