@@ -1176,6 +1176,58 @@ fn navigation_stack_fires_lifecycle_hooks_on_push_and_pop() {
     );
 }
 
+/// A destination with `.navigation_pop_enabled(false)` still *handles* the
+/// back button's `Click`: the activation fires `pop_attempted` and keeps the
+/// destination active. Reporting the pop's denial as "unhandled" would tell
+/// a test host the button did nothing.
+#[test]
+fn navigation_stack_denied_pop_reports_attempt_and_keeps_destination() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let attempts = Rc::new(Cell::new(0u32));
+    let mounted_attempts = Rc::clone(&attempts);
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let attempts = Rc::clone(&mounted_attempts);
+        AnyView::new(NavigationStack::new(NavigationView::new(
+            "Root",
+            vstack((NavigationLink::new("Open Locked", move || {
+                let attempts = Rc::clone(&attempts);
+                NavigationView::new("Locked", text("locked content"))
+                    .navigation_pop_enabled(false)
+                    .on_navigation_pop_attempted(move || attempts.set(attempts.get() + 1))
+            }),)),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (open, _) =
+        find_by_label(&update, Role::Button, "Open Locked").expect("the link is missing");
+    assert!(act(&mut runtime, Action::Click, open));
+
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Label, "locked content").is_some(),
+        "the locked destination's content must emit"
+    );
+    let (back, _) = find_only(&update, Role::Button).expect("the back button is missing");
+
+    assert!(
+        act(&mut runtime, Action::Click, back),
+        "a denied pop is still a handled activation"
+    );
+    assert_eq!(attempts.get(), 1, "one denied pop reports one attempt");
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Label, "locked content").is_some(),
+        "the denied pop must keep the destination active"
+    );
+    assert!(
+        find_by_label(&update, Role::Button, "Open Locked").is_none(),
+        "the root page must not return on a denied pop"
+    );
+}
+
 #[test]
 fn navigation_split_emits_sidebar_and_selected_detail() {
     let selection = Binding::container(None::<i32>);

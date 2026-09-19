@@ -1392,10 +1392,14 @@ pub(crate) fn navigation_stack_accessibility(
                 AccessibilityActionTarget::Activate {
                     action: Rc::new(RefCell::new(
                         move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
-                            if !renderer.attempt_navigation_pop(&back_slot_key, env) {
-                                return false;
+                            // A denied pop is a handled activation whose
+                            // outcome is "attempt reported, destination
+                            // stays" — `attempt_pop` already fired
+                            // `pop_attempted`. `request_pop` runs only when
+                            // the destination allows it.
+                            if renderer.attempt_navigation_pop(&back_slot_key, env) {
+                                controller.request_pop(1);
                             }
-                            controller.request_pop(1);
                             true
                         },
                     )),

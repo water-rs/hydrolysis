@@ -119,20 +119,25 @@ pub(crate) fn color_picker_accessibility(
                 action: Rc::new(RefCell::new(
                     move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
                         match origin {
-                            Some(origin) => renderer.show_color_picker(
-                                value.clone(),
-                                support_alpha,
-                                support_hdr,
-                                origin,
-                                env,
-                            ),
-                            None => renderer.activate_color_picker(
-                                value.clone(),
-                                support_alpha,
-                                support_hdr,
-                                env,
-                            ),
+                            Some(origin) => {
+                                renderer.show_color_picker(
+                                    value.clone(),
+                                    support_alpha,
+                                    support_hdr,
+                                    origin,
+                                    env,
+                                );
+                            }
+                            None => {
+                                renderer.activate_color_picker(
+                                    value.clone(),
+                                    support_alpha,
+                                    support_hdr,
+                                    env,
+                                );
+                            }
                         }
+                        true
                     },
                 )),
             }

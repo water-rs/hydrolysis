@@ -200,32 +200,39 @@ pub(crate) fn picker_accessibility(
                         action: Rc::new(RefCell::new(
                             move |renderer: &mut crate::renderer::SemanticCore,
                                   env: &Environment| {
+                                // `Click` toggles the popup — opening or
+                                // dismissing is a handled activation either
+                                // way, and so is a menu with nothing to show.
                                 if open.get() {
                                     renderer.dismiss_active_popup_menu();
-                                    return false;
+                                } else {
+                                    match request {
+                                        Some((origin, width, row_height, metrics)) => {
+                                            renderer.show_picker_menu(
+                                                PickerMenuRequest {
+                                                    entries: menu_entries.clone(),
+                                                    selection: selection.clone(),
+                                                    open: Rc::clone(&open),
+                                                    origin,
+                                                    width,
+                                                    row_height,
+                                                    selected,
+                                                },
+                                                metrics,
+                                                env,
+                                            );
+                                        }
+                                        None => {
+                                            renderer.activate_picker_menu(
+                                                menu_entries.clone(),
+                                                selection.clone(),
+                                                &open,
+                                                env,
+                                            );
+                                        }
+                                    }
                                 }
-                                match request {
-                                    Some((origin, width, row_height, metrics)) => renderer
-                                        .show_picker_menu(
-                                            PickerMenuRequest {
-                                                entries: menu_entries.clone(),
-                                                selection: selection.clone(),
-                                                open: Rc::clone(&open),
-                                                origin,
-                                                width,
-                                                row_height,
-                                                selected,
-                                            },
-                                            metrics,
-                                            env,
-                                        ),
-                                    None => renderer.activate_picker_menu(
-                                        menu_entries.clone(),
-                                        selection.clone(),
-                                        &open,
-                                        env,
-                                    ),
-                                }
+                                true
                             },
                         )),
                     }

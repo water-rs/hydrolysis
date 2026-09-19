@@ -395,10 +395,13 @@ pub(crate) fn menu_accessibility(
                     let nodes = popup_menu_nodes(&items.get());
                     match request {
                         Some((anchor, metrics)) => {
-                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, env)
+                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, env);
                         }
-                        None => renderer.activate_popup_menu_nodes(nodes, env),
+                        None => {
+                            renderer.activate_popup_menu_nodes(nodes, env);
+                        }
                     }
+                    true
                 },
             )),
         };

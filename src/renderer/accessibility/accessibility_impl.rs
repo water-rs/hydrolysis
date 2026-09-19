@@ -1361,31 +1361,34 @@ fn handle_accessibility_scroll_action(
     axis: ScrollAxis,
     action: AccessibilityAction,
 ) -> bool {
-    let step = ACCESSIBILITY_SCROLL_STEP;
     match action {
-        AccessibilityAction::ScrollLeft => match axis {
-            ScrollAxis::Horizontal | ScrollAxis::All => handle.apply_scroll_delta(step, 0.0, false),
-            ScrollAxis::Vertical => false,
-            _ => panic!("scroll axis variant is not supported by hydrolysis"),
-        },
-        AccessibilityAction::ScrollRight => match axis {
-            ScrollAxis::Horizontal | ScrollAxis::All => {
-                handle.apply_scroll_delta(-step, 0.0, false)
+        AccessibilityAction::Focus => true,
+        _ => {
+            // A direction the axis does not support is declined; one it does
+            // support is handled whether or not the scroll could still move.
+            let delta = match (action, axis) {
+                (AccessibilityAction::ScrollLeft, ScrollAxis::Horizontal | ScrollAxis::All) => {
+                    Some((ACCESSIBILITY_SCROLL_STEP, 0.0))
+                }
+                (AccessibilityAction::ScrollRight, ScrollAxis::Horizontal | ScrollAxis::All) => {
+                    Some((-ACCESSIBILITY_SCROLL_STEP, 0.0))
+                }
+                (AccessibilityAction::ScrollUp, ScrollAxis::Vertical | ScrollAxis::All) => {
+                    Some((0.0, ACCESSIBILITY_SCROLL_STEP))
+                }
+                (AccessibilityAction::ScrollDown, ScrollAxis::Vertical | ScrollAxis::All) => {
+                    Some((0.0, -ACCESSIBILITY_SCROLL_STEP))
+                }
+                _ => None,
+            };
+            match delta {
+                Some((dx, dy)) => {
+                    let _ = handle.apply_scroll_delta(dx, dy, false);
+                    true
+                }
+                None => false,
             }
-            ScrollAxis::Vertical => false,
-            _ => panic!("scroll axis variant is not supported by hydrolysis"),
-        },
-        AccessibilityAction::ScrollUp => match axis {
-            ScrollAxis::Vertical | ScrollAxis::All => handle.apply_scroll_delta(0.0, step, false),
-            ScrollAxis::Horizontal => false,
-            _ => panic!("scroll axis variant is not supported by hydrolysis"),
-        },
-        AccessibilityAction::ScrollDown => match axis {
-            ScrollAxis::Vertical | ScrollAxis::All => handle.apply_scroll_delta(0.0, -step, false),
-            ScrollAxis::Horizontal => false,
-            _ => panic!("scroll axis variant is not supported by hydrolysis"),
-        },
-        _ => false,
+        }
     }
 }
 
@@ -1432,10 +1435,9 @@ fn handle_accessibility_slider_action(
             action
         ),
     };
-    if (next - previous).abs() <= f64::EPSILON {
-        return false;
+    if (next - previous).abs() > f64::EPSILON {
+        value.set(next);
     }
-    value.set(next);
     true
 }
 
@@ -1478,10 +1480,9 @@ fn handle_accessibility_stepper_action(
             action
         ),
     };
-    if next == previous {
-        return false;
+    if next != previous {
+        value.set(next);
     }
-    value.set(next);
     true
 }
 
@@ -1503,12 +1504,17 @@ fn handle_accessibility_date_picker_action(
     match action {
         // A rendered node carries its trigger anchor; a semantic node carries
         // none and mounts the same window with no placement at all.
-        AccessibilityAction::Click => match origin {
-            Some(origin) => {
-                renderer.show_date_picker(value.clone(), range.clone(), ty, origin, env)
+        AccessibilityAction::Click => {
+            match origin {
+                Some(origin) => {
+                    renderer.show_date_picker(value.clone(), range.clone(), ty, origin, env);
+                }
+                None => {
+                    renderer.activate_date_picker(value.clone(), range.clone(), ty, env);
+                }
             }
-            None => renderer.activate_date_picker(value.clone(), range.clone(), ty, env),
-        },
+            true
+        }
         AccessibilityAction::Focus => true,
         AccessibilityAction::SetValue => {
             let Some(AccessibilityActionData::Value(text)) = data else {
@@ -1523,10 +1529,9 @@ fn handle_accessibility_date_picker_action(
             });
             let previous = value.get().clamp(*range.start(), *range.end());
             let next = parsed.clamp(*range.start(), *range.end());
-            if next == previous {
-                return false;
+            if next != previous {
+                value.set(next);
             }
-            value.set(next);
             true
         }
         _ => panic!(
@@ -1547,7 +1552,8 @@ fn handle_accessibility_text_field_action(
 ) -> bool {
     match action {
         AccessibilityAction::Click | AccessibilityAction::Focus => {
-            renderer.focus_text_input_for_accessibility_node(node_id)
+            renderer.focus_text_input_for_accessibility_node(node_id);
+            true
         }
         AccessibilityAction::SetValue => {
             let Some(AccessibilityActionData::Value(text)) = data else {
@@ -1595,7 +1601,8 @@ fn handle_accessibility_secure_field_action(
 ) -> bool {
     match action {
         AccessibilityAction::Click | AccessibilityAction::Focus => {
-            renderer.focus_text_input_for_accessibility_node(node_id)
+            renderer.focus_text_input_for_accessibility_node(node_id);
+            true
         }
         AccessibilityAction::SetValue => {
             let Some(AccessibilityActionData::Value(text)) = data else {
@@ -1638,10 +1645,9 @@ fn handle_accessibility_picker_select_action(
 ) -> bool {
     match action {
         AccessibilityAction::Click | AccessibilityAction::Focus => {
-            if selection.get() == target {
-                return false;
+            if selection.get() != target {
+                selection.set(target);
             }
-            selection.set(target);
             true
         }
         _ => panic!(
