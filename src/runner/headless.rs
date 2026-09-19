@@ -284,7 +284,7 @@ impl HeadlessRuntime {
             content,
             width,
             height,
-            Rc::new(style),
+            style,
             native_resource_fonts,
         )
     }
@@ -321,7 +321,7 @@ impl HeadlessRuntime {
             content,
             width,
             height,
-            Rc::new(style),
+            style,
             super::fonts::deterministic_test_fonts,
         )
     }
@@ -351,75 +351,6 @@ impl HeadlessRuntime {
             content,
             width,
             height,
-            Rc::new(style),
-            super::fonts::deterministic_test_fonts,
-        )
-    }
-
-    /// Creates a headless runtime for a host that owns its style as a trait
-    /// object — the same contract as [`Self::new`] for `Rc<dyn Style>`
-    /// holders such as test drivers that keep the style beside the runtime.
-    #[must_use]
-    pub fn new_with_style(
-        env: Environment,
-        content: AnyViewBuilder<AnyView>,
-        width: u32,
-        height: u32,
-        style: Rc<dyn crate::Style>,
-    ) -> Self {
-        Self::on_gpu_context(
-            pollster::block_on(OffscreenGpuContext::new()),
-            env,
-            content,
-            width,
-            height,
-            style,
-            native_resource_fonts,
-        )
-    }
-
-    /// The [`Rc<dyn Style>`](crate::Style) counterpart of
-    /// [`Self::new_for_tests`]: deterministic bundled fonts and
-    /// compute-capable adapter selection for test hosts holding the style as
-    /// a trait object.
-    #[cfg(any(test, feature = "testing"))]
-    #[must_use]
-    pub fn new_for_tests_with_style(
-        env: Environment,
-        content: AnyViewBuilder<AnyView>,
-        width: u32,
-        height: u32,
-        style: Rc<dyn crate::Style>,
-    ) -> Self {
-        Self::on_gpu_context(
-            OffscreenGpuContext::new_for_tests_blocking(),
-            env,
-            content,
-            width,
-            height,
-            style,
-            super::fonts::deterministic_test_fonts,
-        )
-    }
-
-    /// The [`Rc<dyn Style>`](crate::Style) counterpart of
-    /// [`Self::new_for_tests_on_context`].
-    #[cfg(any(test, feature = "testing"))]
-    #[must_use]
-    pub fn new_for_tests_on_context_with_style(
-        gpu: OffscreenGpuContext,
-        env: Environment,
-        content: AnyViewBuilder<AnyView>,
-        width: u32,
-        height: u32,
-        style: Rc<dyn crate::Style>,
-    ) -> Self {
-        Self::on_gpu_context(
-            gpu,
-            env,
-            content,
-            width,
-            height,
             style,
             super::fonts::deterministic_test_fonts,
         )
@@ -431,7 +362,7 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
-        style: Rc<dyn crate::Style>,
+        style: impl crate::Style,
         build_fonts: fn() -> parley::FontContext,
     ) -> Self {
         let inspector = init_main_thread_executors();
@@ -446,7 +377,7 @@ impl HeadlessRuntime {
         env.insert(HydrolysisTextContextMenuMode::Overlay);
         crate::theme::install_default_tokens(&mut env);
         style.install_tokens(&mut env);
-        let theme: Rc<dyn crate::engine::WidgetTheme> = style;
+        let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
             crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
         ));
