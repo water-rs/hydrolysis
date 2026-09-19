@@ -249,7 +249,6 @@ pub struct FrameProfile {
 }
 
 impl FrameProfile {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn with_total(mut self, total: Duration) -> Self {
         self.total = total;
         self

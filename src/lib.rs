@@ -57,11 +57,9 @@ pub use platform::{
 };
 pub use renderer::{HydroState, HydrolysisRenderTarget, HydrolysisRenderer, RenderContext};
 pub use runner::run;
+pub use runner::{FrameCounters, FramePhases, FrameProfile, SemanticPumpResult, SemanticRuntime};
 #[cfg(not(target_arch = "wasm32"))]
-pub use runner::{
-    FrameCounters, FramePhases, FrameProfile, HeadlessPumpResult, HeadlessRuntime,
-    HeadlessSnapshot, SemanticPumpResult, SemanticRuntime,
-};
+pub use runner::{HeadlessPumpResult, HeadlessRuntime, HeadlessSnapshot};
 pub use view_renderer::HydrolysisViewRenderer;
 #[cfg(hydrolysis_macos_system_webview)]
 pub use widgets::platform::webview::MacSystemWebViewController;

@@ -11,14 +11,15 @@
 //! bounds, so the only inputs are keyboard and IME events to the focused node
 //! and accessibility actions addressed to nodes directly.
 
-use super::headless::{DrainExecutorOnDrop, HeadlessMainThreadExecutor};
+use super::executor::{DrainExecutorOnDrop, HeadlessMainThreadExecutor};
 use super::*;
 use crate::renderer::SemanticCore;
+#[cfg(target_arch = "wasm32")]
+use std::sync::Arc;
 
 /// What one semantic pump produced: whether the retained tree was (re)built or
 /// re-emitted this pump, the phase timings, and the resulting accessibility
 /// tree update plus focused node when the `accessibility` feature is on.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct SemanticPumpResult {
     pub rebuilt: bool,
@@ -32,7 +33,6 @@ pub struct SemanticPumpResult {
 /// One window in a [`SemanticRuntime`]: the platform [`Window`] (title,
 /// state, content builder), the [`SemanticCore`] owning its retained tree,
 /// and the input events queued for the next pump.
-#[cfg(not(target_arch = "wasm32"))]
 struct SemanticWindow {
     window: Window,
     core: SemanticCore,
@@ -43,7 +43,6 @@ struct SemanticWindow {
     refresh_requested: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl SemanticWindow {
     fn new(window: Window, fonts: &FontCollection) -> Self {
         let mut core = SemanticCore::new(Instant::now());
@@ -72,7 +71,6 @@ impl SemanticWindow {
 /// Construct with [`Self::new`]; pump with [`Self::pump`] or
 /// [`Self::pump_at`]. A pump that finds no pending work is cheap and returns
 /// `rebuilt: false` with no tree update.
-#[cfg(not(target_arch = "wasm32"))]
 pub struct SemanticRuntime {
     env: Environment,
     window: SemanticWindow,
@@ -88,7 +86,6 @@ pub struct SemanticRuntime {
     _executor_teardown: DrainExecutorOnDrop,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl SemanticRuntime {
     /// Creates a semantic runtime over `content` mounted in `env`.
     ///
@@ -102,7 +99,13 @@ impl SemanticRuntime {
         width: u32,
         height: u32,
     ) -> Self {
-        Self::on_env(env, content, width, height, native_resource_fonts)
+        // A native app loads `resources/fonts` from the filesystem; a browser
+        // page has no synchronous resource directory to scan, so the semantic
+        // runtime there shapes with the default collection alone.
+        #[cfg(not(target_arch = "wasm32"))]
+        return Self::on_env(env, content, width, height, native_resource_fonts);
+        #[cfg(target_arch = "wasm32")]
+        Self::on_env(env, content, width, height, parley::FontContext::new)
     }
 
     /// Creates a semantic runtime for WaterUI test hosts: the same runtime
@@ -132,11 +135,21 @@ impl SemanticRuntime {
         height: u32,
         build_fonts: fn() -> parley::FontContext,
     ) -> Self {
+        // The inspector endpoint is a TCP server a browser page cannot host —
+        // on wasm32 the executor installs alone, with no probe to report to.
+        #[cfg(not(target_arch = "wasm32"))]
         let inspector = init_main_thread_executors();
+        #[cfg(not(target_arch = "wasm32"))]
         let inspector_probe = inspector
             .as_ref()
             .map(waterui::inspector::InspectorRuntime::runtime_probe);
+        #[cfg(target_arch = "wasm32")]
+        let inspector_probe: Option<Arc<dyn waterui::task::RuntimeProbe>> = {
+            init_global_executor();
+            None
+        };
         let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        #[cfg(not(target_arch = "wasm32"))]
         waterui::inspector::install(&mut env, inspector);
         let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
         install_native_component_hooks(&mut env);
@@ -425,7 +438,6 @@ impl SemanticRuntime {
 /// The window's origin as an environment value — the `input_env` the rendered
 /// runner builds around each event. Kept identical so key dispatch resolves
 /// the same environment in both runtimes.
-#[cfg(not(target_arch = "wasm32"))]
 fn semantic_window_origin(window: &SemanticWindow) -> HydrolysisWindowOrigin {
     HydrolysisWindowOrigin {
         x: window.window.frame.get().x(),
@@ -436,7 +448,6 @@ fn semantic_window_origin(window: &SemanticWindow) -> HydrolysisWindowOrigin {
 /// Applies one window's queued input events. Keyboard and IME events dispatch
 /// to the focused node through the core's key/text paths; geometry-routed
 /// events have no semantic target and are dropped.
-#[cfg(not(target_arch = "wasm32"))]
 fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) -> bool {
     let mut should_close = window.window.state.get() == waterui::window::WindowState::Closed;
     let events: Vec<InputEvent> = window.pending_events.drain(..).collect();
@@ -507,7 +518,6 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
 /// gesture deadlines, smoothed scrolls and animations — everything a rendered
 /// advance does that does not need a scene. Reactive patch and rebuild
 /// requests raised along the way become the window's refresh flag.
-#[cfg(not(target_arch = "wasm32"))]
 fn advance_semantic_window(window: &mut SemanticWindow, env: &Environment, now: Instant) {
     window.core.set_frame_instant(now);
     if window.core.handle_gesture_tick(now, env) {
@@ -528,7 +538,6 @@ fn advance_semantic_window(window: &mut SemanticWindow, env: &Environment, now: 
 /// One pump of a window's semantic pass: builds the retained tree from the
 /// window's `body()` when none exists, otherwise patches and re-emits it when
 /// work is pending. Returns whether the tree was emitted this pump.
-#[cfg(not(target_arch = "wasm32"))]
 fn pump_semantic_window(window: &mut SemanticWindow, env: &Environment) -> bool {
     #[cfg(feature = "accessibility")]
     window
