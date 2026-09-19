@@ -11,8 +11,8 @@ use waterui::View;
 use waterui::ViewExt as _;
 use waterui::component::vstack;
 use waterui::graphics::color::Srgb;
-use waterui_controls::{button, slider::slider, toggle};
-use waterui_testing::{Role, Styled, UiBuilder};
+use waterui_controls::{Menu, button, label, slider::slider, toggle};
+use waterui_testing::{OffscreenApp, Role, Styled, UiBuilder};
 
 fn control_shell<V: View>(content: V) -> impl View {
     vstack((content,))
@@ -187,4 +187,27 @@ fn disabled_button_ignores_action(ui: UiBuilder<Styled<hydrolysis_m3::Material3>
         .label("Submit")
         .tap_at(0.5, 0.5);
     assert_eq!(count.get(), 0, "disabled-button: action must not run");
+}
+
+fn actions_menu_view() -> impl waterui::View {
+    control_shell(Menu::new(
+        label("Actions").icon(()),
+        (
+            button("Refresh").action(|| {}),
+            Menu::new("Advanced", (button("Archive").action(|| {}),)),
+        ),
+    ))
+}
+
+// Origin: waterui `components/foundation/controls/tests/e2e_semantics.rs` —
+// the geometric half of `menu_button_exposes_accessible_name`; the accessible
+// name half stays in waterui as a semantic test.
+#[waterui::test(actions_menu_view, theme = hydrolysis_m3::Material3::defaults(), viewport = (320, 240), offscreen)]
+fn menu_button_exposes_accessible_name(app: &mut OffscreenApp) {
+    let menu = app.query().role(Role::BUTTON).label("Actions").single();
+    let bounds = menu.bounds();
+    assert!(
+        bounds.width() > 0.0 && bounds.height() > 0.0,
+        "menu-button-exposes-accessible-name: menu trigger bounds must be non-zero"
+    );
 }

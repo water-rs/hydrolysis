@@ -24,7 +24,7 @@ use waterui_canvas::Canvas;
 use waterui_core::handler::AnyViewBuilder;
 use waterui_core::layout::{Point, Rect, Size};
 use waterui_core::{AnyView, Environment};
-use waterui_testing::{PerfConfig, Role, TestHost, mount_app, ui};
+use waterui_testing::{PerfConfig, Role, TestHost, ui};
 
 /// Installs the custom foreground token the origin tests layered over the
 /// theme package: the harness no longer takes a theme-installer closure, so
@@ -107,23 +107,24 @@ fn default_theme_renders_hydrolysis_widgets() {
 }
 
 /// `mount_app` runs the application path: the app's own environment is
-/// mounted verbatim, and the captured snapshot takes the window's declared
-/// frame. (The origin's scale-factor half moved off the harness API —
-/// `mount_app` no longer takes one — so the frame alone is asserted.)
+/// mounted verbatim, and the configured scale factor scales the captured
+/// snapshot. The origin's `install_default_theme(&mut env)` on the app
+/// environment has no equivalent here — the style the builder carries now
+/// installs the theme.
 ///
 /// Origin: waterui `testing/src/tests.rs`.
 #[test]
 fn mount_app_hosts_main_window_with_app_environment() {
-    let env = Environment::new();
-    let mut app = App::new(|| text("Mounted app").body(), env);
-    app.main_window_mut()
-        .frame
-        .set(Rect::new(Point::zero(), Size::new(200.0, 100.0)));
-    let mut app = mount_app(app, Material3::defaults());
+    let app = App::new(|| text("Mounted app").body(), Environment::new());
+    let mut app = ui()
+        .theme(Material3::defaults())
+        .viewport(200, 100)
+        .scale_factor(2.0)
+        .mount_app(app);
     app.query().label("Mounted app").assert_exists();
     let snapshot = app.snapshot();
-    assert_eq!(snapshot.width, 200);
-    assert_eq!(snapshot.height, 100);
+    assert_eq!(snapshot.width, 400);
+    assert_eq!(snapshot.height, 200);
 }
 
 // Origin: waterui `testing/src/tests.rs`.
