@@ -672,6 +672,10 @@ impl SemanticCore {
             .find(|(id, _)| *id == ROOT)
             .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
 
+        // The deepest popup holding real (non-root) focus owns the merged
+        // tree's focus — iterating in z-order, the last such popup wins.
+        // Every other case leaves the merged focus on the main tree.
+        let mut focused_popup = None;
         for (index, popup) in popups.enumerate() {
             let Some(update) = popup
                 .take_accessibility_tree_update()
@@ -680,6 +684,9 @@ impl SemanticCore {
                 continue;
             };
             let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
+            if update.focus != ROOT {
+                focused_popup = Some(AccessibilityNodeId(update.focus.0 + offset));
+            }
             for (id, mut node) in update.nodes {
                 let children: Vec<_> = node
                     .children()
@@ -697,6 +704,9 @@ impl SemanticCore {
 
         if let Some((_, root)) = merged.nodes.iter_mut().find(|(id, _)| *id == ROOT) {
             root.set_children(root_children);
+        }
+        if let Some(focus) = focused_popup {
+            merged.focus = focus;
         }
         Some(merged)
     }

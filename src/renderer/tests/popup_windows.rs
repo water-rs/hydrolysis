@@ -196,4 +196,23 @@ fn a_popup_only_change_publishes_the_merged_tree() {
         find_by_label(&update, Role::Button, "Tint").is_some(),
         "the published update must still carry the clean main window's nodes"
     );
+
+    // The focused popup owns the merged tree's focus: the published focus
+    // is the swatch's shifted id, not the main tree's.
+    assert_eq!(
+        update.focus, swatch,
+        "the merged focus must follow the focused popup item"
+    );
+
+    // Closing the panel retires the popup; the merged focus returns to the
+    // main tree's focused node — the trigger that opened it.
+    assert!(act(&mut runtime, Action::Click, swatch));
+    let update = runtime
+        .pump_at(true, Instant::now())
+        .tree_update
+        .expect("the close frame must publish an accessibility tree");
+    assert_eq!(
+        update.focus, trigger,
+        "the merged focus must return to the main tree once the popup closes"
+    );
 }
