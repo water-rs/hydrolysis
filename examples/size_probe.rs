@@ -1,10 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
-mod shared;
-
 use hydrolysis::run;
-use shared::M3Style;
 use waterui::Environment;
 use waterui::app::App;
 use waterui::prelude::*;
@@ -43,8 +40,8 @@ fn main() {
         std::process::exit(0);
     });
 
-    let mut env = Environment::new();
-    hydrolysis_m3::install_defaults(&mut env);
-    let style = M3Style::new(&env);
-    run(App::new(main_view, env).title("size-probe"), style);
+    run(
+        App::new(main_view, Environment::new()).title("size-probe"),
+        hydrolysis_m3::Material3::defaults(),
+    );
 }
