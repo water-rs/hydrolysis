@@ -1361,34 +1361,40 @@ fn handle_accessibility_scroll_action(
     axis: ScrollAxis,
     action: AccessibilityAction,
 ) -> bool {
-    match action {
-        AccessibilityAction::Focus => true,
-        _ => {
-            // A direction the axis does not support is declined; one it does
-            // support is handled whether or not the scroll could still move.
-            let delta = match (action, axis) {
-                (AccessibilityAction::ScrollLeft, ScrollAxis::Horizontal | ScrollAxis::All) => {
-                    Some((ACCESSIBILITY_SCROLL_STEP, 0.0))
-                }
-                (AccessibilityAction::ScrollRight, ScrollAxis::Horizontal | ScrollAxis::All) => {
-                    Some((-ACCESSIBILITY_SCROLL_STEP, 0.0))
-                }
-                (AccessibilityAction::ScrollUp, ScrollAxis::Vertical | ScrollAxis::All) => {
-                    Some((0.0, ACCESSIBILITY_SCROLL_STEP))
-                }
-                (AccessibilityAction::ScrollDown, ScrollAxis::Vertical | ScrollAxis::All) => {
-                    Some((0.0, -ACCESSIBILITY_SCROLL_STEP))
-                }
-                _ => None,
-            };
-            match delta {
-                Some((dx, dy)) => {
-                    let _ = handle.apply_scroll_delta(dx, dy, false);
-                    true
-                }
-                None => false,
-            }
+    if matches!(action, AccessibilityAction::Focus) {
+        return true;
+    }
+    let step = ACCESSIBILITY_SCROLL_STEP;
+    // `Axis` is `#[non_exhaustive]`: a variant hydrolysis does not know is a
+    // framework bug and must panic; a direction a known axis does not serve
+    // is a declined action and reports `false`. A supported direction is
+    // handled whether or not the scroll could still move.
+    let delta = match axis {
+        ScrollAxis::Horizontal => match action {
+            AccessibilityAction::ScrollLeft => Some((step, 0.0)),
+            AccessibilityAction::ScrollRight => Some((-step, 0.0)),
+            _ => None,
+        },
+        ScrollAxis::Vertical => match action {
+            AccessibilityAction::ScrollUp => Some((0.0, step)),
+            AccessibilityAction::ScrollDown => Some((0.0, -step)),
+            _ => None,
+        },
+        ScrollAxis::All => match action {
+            AccessibilityAction::ScrollLeft => Some((step, 0.0)),
+            AccessibilityAction::ScrollRight => Some((-step, 0.0)),
+            AccessibilityAction::ScrollUp => Some((0.0, step)),
+            AccessibilityAction::ScrollDown => Some((0.0, -step)),
+            _ => None,
+        },
+        _ => panic!("scroll axis variant is not supported by hydrolysis"),
+    };
+    match delta {
+        Some((dx, dy)) => {
+            let _ = handle.apply_scroll_delta(dx, dy, false);
+            true
         }
+        None => false,
     }
 }
 

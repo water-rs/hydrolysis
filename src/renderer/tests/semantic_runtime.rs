@@ -674,6 +674,13 @@ fn list_emits_all_rows_and_scrolls() {
         Some(0.0),
         "ScrollUp did not return the offset to the top"
     );
+
+    // A vertical list does not serve horizontal directions: the action is
+    // declined, not handled — only an *unknown* axis variant panics.
+    assert!(
+        !act(&mut runtime, Action::ScrollLeft, list_id),
+        "a direction the axis does not serve must report unhandled"
+    );
 }
 
 #[test]
