@@ -31,13 +31,16 @@ use waterui_form::picker::date::DatePicker;
 use waterui_form::picker::{PickerStyle, picker};
 use waterui_form::secure::secure;
 use waterui_graphics::Color;
-use waterui_layout::stack::vstack;
-use waterui_layout::{Divider, scroll};
+use waterui_graphics::{Scene2D, SceneContent, SceneView};
+use waterui_layout::stack::{VStackLayout, vstack};
+use waterui_layout::{Divider, LazyContainer, scroll};
 use waterui_navigation::NavigationView;
 use waterui_navigation::tab::{Tab, Tabs};
+use waterui_navigation::{NavigationLink, NavigationSplitView, NavigationStack};
 use waterui_text::text;
 
 use crate::runner::SemanticRuntime;
+use crate::{InputEvent, KeyCode, KeyState, Modifiers, keyboard_types};
 
 /// Mounts `content` as the single window of a semantic runtime over a bare
 /// environment — `Environment::new()`, nothing installed. The runtime itself
@@ -686,6 +689,9 @@ fn table_emits_headers_cells_and_scrolls() {
     let (table_id, table_node) = find_only(&update, Role::Table).expect("the table is missing");
     assert!(table_node.supports_action(Action::ScrollDown));
     assert!(table_node.supports_action(Action::ScrollUp));
+    assert!(table_node.supports_action(Action::ScrollLeft));
+    assert!(table_node.supports_action(Action::ScrollRight));
+    assert_eq!(table_node.scroll_x(), Some(0.0));
     let children = table_node.children();
     assert_eq!(
         children.len(),
@@ -730,6 +736,33 @@ fn table_emits_headers_cells_and_scrolls() {
             .expect("the table must keep reporting its scroll offset")
             > 0.0,
         "ScrollDown did not move the scroll offset"
+    );
+
+    // The semantic scroll domain is measured in cells on both axes;
+    // ScrollRight moves the bound horizontal offset directly.
+    assert!(
+        act(&mut runtime, Action::ScrollRight, table_id),
+        "ScrollRight changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, table_node) = find_only(&update, Role::Table).expect("the table vanished");
+    assert!(
+        table_node
+            .scroll_x()
+            .expect("the table must keep reporting its horizontal offset")
+            > 0.0,
+        "ScrollRight did not move the horizontal offset"
+    );
+    assert!(
+        act(&mut runtime, Action::ScrollLeft, table_id),
+        "ScrollLeft changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    let (_, table_node) = find_only(&update, Role::Table).expect("the table vanished");
+    assert_eq!(
+        table_node.scroll_x(),
+        Some(0.0),
+        "ScrollLeft did not return the horizontal offset to the start"
     );
 }
 
@@ -887,4 +920,337 @@ fn layout_only_views_emit_nothing() {
         find_by_label(&update, Role::Label, "only semantic content").is_some(),
         "the text must still emit"
     );
+}
+
+/// Queues one key press for the next pump — the semantic input path's only
+/// windowed input besides IME. The pump drains the event, moves focus or
+/// activates through the semantic target, and re-emits in the same pass.
+fn press(runtime: &mut SemanticRuntime, key: KeyCode, modifiers: Modifiers) {
+    runtime.push_input_event(InputEvent::Key {
+        logical_key: key.to_w3c_key(),
+        physical_code: keyboard_types::Code::Unidentified,
+        repeat: false,
+        key,
+        state: KeyState::Pressed,
+        modifiers,
+    });
+}
+
+#[test]
+fn tab_traverses_the_semantic_tree_and_activation_dispatches_click() {
+    let tapped = Binding::container(false);
+    let on = Binding::container(false);
+    let value = Binding::container(Str::default());
+    let tapped_for_view = tapped.clone();
+    let on_for_view = on.clone();
+    let value_for_view = value.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let tapped = tapped_for_view.clone();
+        AnyView::new(vstack((
+            button("First").action(move || tapped.set(true)),
+            toggle("Mode", &on_for_view),
+            field("Name", &value_for_view),
+            button("Last"),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (first, _) = find_by_label(&update, Role::Button, "First").expect("First is missing");
+    let (switch, _) = find_only(&update, Role::Switch).expect("the toggle is missing");
+    let (name, _) = find_only(&update, Role::TextInput).expect("the field is missing");
+    let (last, _) = find_by_label(&update, Role::Button, "Last").expect("Last is missing");
+
+    // Traversal order is the semantic order of the tree — the order the nodes
+    // emit in — not any pointer-target order.
+    for expected in [first, switch, name, last] {
+        press(
+            &mut runtime,
+            KeyCode::Named("Tab".into()),
+            Modifiers::default(),
+        );
+        let update = pumped(&mut runtime);
+        assert_eq!(
+            update.focus, expected,
+            "Tab must land on {expected:?} — the focused node is reported in the tree"
+        );
+    }
+    // Traversal wraps; Shift-Tab walks the same order in reverse.
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers::default(),
+    );
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, first, "Tab must wrap to the first candidate");
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    let update = pumped(&mut runtime);
+    assert_eq!(
+        update.focus, last,
+        "Shift-Tab must move to the previous candidate"
+    );
+
+    // Return to First: one more Shift-Tab from Last walks the order backwards.
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, first);
+
+    // Enter activates the focused node through the same semantic target a
+    // `Click` action request uses.
+    press(
+        &mut runtime,
+        KeyCode::Named("Enter".into()),
+        Modifiers::default(),
+    );
+    let _ = pumped(&mut runtime);
+    assert!(tapped.get(), "Enter did not activate the focused button");
+
+    // Space on the focused toggle flips its binding through the same path.
+    press(
+        &mut runtime,
+        KeyCode::Named("Tab".into()),
+        Modifiers::default(),
+    );
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, switch);
+    press(
+        &mut runtime,
+        KeyCode::Named("Space".into()),
+        Modifiers::default(),
+    );
+    let _ = pumped(&mut runtime);
+    assert!(on.get(), "Space did not activate the focused toggle");
+}
+
+#[test]
+fn navigation_stack_pushes_and_back_click_pops() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(NavigationStack::new(NavigationView::new(
+            "Root",
+            vstack((NavigationLink::new("Open Detail", || {
+                NavigationView::new("Detail", text("detail content"))
+            }),)),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (open, _) =
+        find_by_label(&update, Role::Button, "Open Detail").expect("the link is missing");
+    assert!(
+        act(&mut runtime, Action::Click, open),
+        "the link Click changed nothing"
+    );
+
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Header, "Detail").is_some(),
+        "the pushed destination's title must emit"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "detail content").is_some(),
+        "the pushed destination's content must emit"
+    );
+    // The pushed page's only Button is the back affordance — its label is
+    // localized, so it is found positionally.
+    let (back, back_node) = find_only(&update, Role::Button).expect("the back button is missing");
+    assert!(back_node.supports_action(Action::Click));
+    assert!(
+        find_by_label(&update, Role::Button, "Open Detail").is_none(),
+        "the root page must leave the tree while a destination is pushed"
+    );
+
+    assert!(
+        act(&mut runtime, Action::Click, back),
+        "the back Click changed nothing"
+    );
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Header, "Root").is_some(),
+        "the previous title must be restored after the pop"
+    );
+    assert!(
+        find_by_label(&update, Role::Button, "Open Detail").is_some(),
+        "the root page's content must be restored after the pop"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "detail content").is_none(),
+        "the popped destination must leave the tree"
+    );
+}
+
+#[test]
+fn navigation_split_emits_sidebar_and_selected_detail() {
+    let selection = Binding::container(None::<i32>);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let selection = selection_for_view.clone();
+        let sidebar_selection = selection.clone();
+        AnyView::new(
+            NavigationSplitView::new(
+                &selection,
+                move || {
+                    let selection = sidebar_selection.clone();
+                    vstack((button("Select Detail").action(move || selection.set(Some(7))),))
+                },
+                |value| NavigationView::new("Detail", text(format!("detail:{value}"))),
+            )
+            .placeholder(|| text("placeholder content")),
+        )
+    }));
+
+    let update = pumped(&mut runtime);
+    let (select, _) = find_by_label(&update, Role::Button, "Select Detail")
+        .expect("the sidebar control is missing");
+    assert!(
+        find_by_label(&update, Role::Label, "placeholder content").is_some(),
+        "an empty selection must emit the placeholder"
+    );
+
+    assert!(
+        act(&mut runtime, Action::Click, select),
+        "the sidebar Click changed nothing"
+    );
+    assert_eq!(
+        selection.get(),
+        Some(7),
+        "the sidebar did not write the selection"
+    );
+    let update = pumped(&mut runtime);
+    assert!(
+        find_by_label(&update, Role::Header, "Detail").is_some(),
+        "the selected detail's title must emit"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "detail:7").is_some(),
+        "the selected detail's content must emit"
+    );
+    assert!(
+        find_by_label(&update, Role::Label, "placeholder content").is_none(),
+        "the placeholder must leave the tree once a detail is selected"
+    );
+}
+
+#[test]
+fn segmented_picker_emits_group_and_click_selects() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Mode",
+            vec![text("Auto").tag(0i32), text("Manual").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Segmented),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, group_node) =
+        find_by_label(&update, Role::Group, "Mode").expect("the segmented group is missing");
+    let children = group_node.children();
+    assert_eq!(
+        children.len(),
+        2,
+        "the group must hold one node per segment"
+    );
+    let auto = lookup(&update, children[0]);
+    let manual = lookup(&update, children[1]);
+    assert_eq!(auto.role(), Role::RadioButton);
+    assert_eq!(auto.label(), Some("Auto"));
+    assert_eq!(auto.is_selected(), Some(true));
+    assert_eq!(manual.role(), Role::RadioButton);
+    assert_eq!(manual.label(), Some("Manual"));
+    assert_eq!(manual.is_selected(), Some(false));
+    assert!(manual.supports_action(Action::Click));
+
+    assert!(
+        act(&mut runtime, Action::Click, children[1]),
+        "the segment Click changed nothing"
+    );
+    assert_eq!(selection.get(), 1, "the segment did not select");
+    let update = pumped(&mut runtime);
+    let (_, group_node) =
+        find_by_label(&update, Role::Group, "Mode").expect("the segmented group vanished");
+    let children = group_node.children();
+    assert_eq!(lookup(&update, children[0]).is_selected(), Some(false));
+    assert_eq!(lookup(&update, children[1]).is_selected(), Some(true));
+}
+
+/// A scene that names itself — the label the semantic tree has to offer its
+/// `Image` node, since a scene reaches the tree as anonymous fills.
+struct Chart;
+
+impl SceneContent for Chart {
+    fn build_scene(&mut self, _scene: &mut dyn Scene2D, _width: f32, _height: f32) -> bool {
+        false
+    }
+
+    fn accessibility_label(&self) -> Option<String> {
+        Some("weekly chart".to_string())
+    }
+}
+
+#[test]
+fn scene_view_emits_an_image_leaf_with_its_content_label() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(SceneView::new(Chart))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, image_node) =
+        find_only(&update, Role::Image).expect("the scene view must emit an Image leaf");
+    assert_eq!(image_node.label(), Some("weekly chart"));
+}
+
+#[test]
+fn lazy_stack_emits_every_item_without_layout() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(LazyContainer::new(
+            VStackLayout::default(),
+            vec![
+                text("Item 1"),
+                text("Item 2"),
+                text("Item 3"),
+                text("Item 4"),
+                text("Item 5"),
+            ],
+        ))
+    }));
+
+    let update = pumped(&mut runtime);
+    for index in 1..=5 {
+        let expected = format!("Item {index}");
+        assert!(
+            find_by_label(&update, Role::Label, &expected).is_some(),
+            "lazy item {expected:?} is missing — there is no viewport to virtualize against"
+        );
+    }
 }
