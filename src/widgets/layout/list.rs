@@ -663,14 +663,14 @@ pub(crate) fn list_accessibility(
     #[cfg(feature = "accessibility")]
     {
         let metrics = handle.metrics();
-        let emit_range = if _rendered {
+        let (emit_range, leading_offset) = if _rendered {
             let window = state
                 .extent_index
                 .borrow()
                 .visible_window(metrics.offset_y, metrics.offset_y + viewport.height());
-            window.start..window.end
+            (window.start..window.end, window.leading_offset)
         } else {
-            0..row_count
+            (0..row_count, 0.0)
         };
         let mut list_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::List),
@@ -684,7 +684,7 @@ pub(crate) fn list_accessibility(
         list_node.set_scroll_y_max(metrics.max_y);
         list_node.add_action(AccessibilityAction::ScrollUp);
         list_node.add_action(AccessibilityAction::ScrollDown);
-        let mut y = viewport.y0 - metrics.offset_y;
+        let mut y = viewport.y0 - metrics.offset_y + leading_offset;
         for index in emit_range {
             let row_env = env.clone();
             let item = materialize_list_item(&list.contents, index, &row_env);
