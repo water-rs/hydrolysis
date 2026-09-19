@@ -1150,7 +1150,11 @@ impl SemanticCore {
                 .position(|target| target.accessibility_node_id == Some(node))
         });
         let mut changed = self.set_keyboard_focus_impl(key, node, visible);
-        changed |= self.set_focused_text_input(text_input);
+        // Text focus is sticky: it follows the semantic focus only onto a
+        // text-input node — focusing a button leaves the caret where it is.
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
         changed
     }
 
@@ -1168,15 +1172,28 @@ impl SemanticCore {
     ) -> bool {
         #[cfg(feature = "accessibility")]
         let node = focus.as_ref().and_then(|key| self.focus_node_for_key(key));
-        self.set_keyboard_focus_impl(
+        let text_input = focus.as_ref().and_then(|key| {
+            self.text_editing
+                .text_input_targets
+                .iter()
+                .position(|target| &target.interaction_key == key)
+        });
+        let mut changed = self.set_keyboard_focus_impl(
             focus,
             #[cfg(feature = "accessibility")]
             node,
             visible,
-        )
+        );
+        // Text focus is sticky: it moves only when the key belongs to a
+        // text-input target — clearing or re-targeting keyboard focus does
+        // not drop the caret.
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
+        changed
     }
 
-    fn set_keyboard_focus_impl(
+    pub(crate) fn set_keyboard_focus_impl(
         &mut self,
         focus: Option<InteractionKey>,
         #[cfg(feature = "accessibility")] node: Option<AccessibilityNodeId>,
@@ -1194,7 +1211,21 @@ impl SemanticCore {
             return false;
         }
         if self.hit_test.keyboard_focus != focus || node_changed {
-            if let Some(binding) = self.hit_test.keyboard_focus_binding.take() {
+            // A `.focused` lens on the field still holding the caret is owned
+            // by the text machinery: semantic focus moving to a non-text node
+            // leaves UI focus — and the binding — on the field. Only a
+            // transition that actually moves the caret (a new text target) or
+            // ends text focus lets this write stand.
+            let caret_keeps_binding = self.hit_test.keyboard_focus.is_some()
+                && self.hit_test.keyboard_focus == self.text_editing.focused_key()
+                && !self
+                    .text_editing
+                    .text_input_targets
+                    .iter()
+                    .any(|target| Some(&target.interaction_key) == focus.as_ref());
+            if let Some(binding) = self.hit_test.keyboard_focus_binding.take()
+                && !caret_keeps_binding
+            {
                 binding.set(false);
             }
             self.hit_test.keyboard_focus = focus;
@@ -1383,7 +1414,13 @@ impl SemanticCore {
             self.set_keyboard_focus_impl(candidate.key.clone(), Some(candidate.node), true);
         #[cfg(not(feature = "accessibility"))]
         let changed = self.set_keyboard_focus(candidate.key.clone(), true);
-        changed | self.set_focused_text_input(text_input)
+        // Text focus follows traversal onto a field, but a non-text
+        // candidate leaves the caret where it is.
+        let mut changed = changed;
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
+        changed
     }
 
     pub(crate) fn handle_keyboard_key_down(

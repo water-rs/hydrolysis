@@ -974,8 +974,54 @@ impl SemanticCore {
 
     pub(crate) fn set_focused_text_input_key(&mut self, focused: Option<InteractionKey>) -> bool {
         let previous = self.text_editing.focused_key();
+        let mut changed = false;
+        match focused.as_ref() {
+            // A field taking UI focus takes the semantic focus with it —
+            // the tree reports focus on the field's node.
+            Some(key) if previous.as_ref() != Some(key) => {
+                #[cfg(feature = "accessibility")]
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    #[cfg(feature = "accessibility")]
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            // The same field re-asserted: repair only a stale link — keyboard
+            // focus still claims the key while its node went un-emitted when
+            // the link was made. Semantic focus sitting on another node is a
+            // legitimate move, not staleness.
+            #[cfg(feature = "accessibility")]
+            Some(key)
+                if self.hit_test.keyboard_focus.as_ref() == Some(key)
+                    && self
+                        .focus_node_for_key(key)
+                        .is_some_and(|node| self.accessibility.focus != node) =>
+            {
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            Some(_) => {}
+            // Clearing UI focus drops the semantic focus only when the tree
+            // was resting on the cleared field — focus on a non-text node
+            // is independent of the text caret.
+            None if previous.is_some() && self.hit_test.keyboard_focus == previous => {
+                changed |= self.set_keyboard_focus_impl(
+                    None,
+                    #[cfg(feature = "accessibility")]
+                    None,
+                    false,
+                );
+            }
+            None => {}
+        }
         if previous == focused {
-            return false;
+            return changed;
         }
         let focus_binding = |key: Option<&InteractionKey>| {
             key.and_then(|key| self.text_editing.index_of(key))

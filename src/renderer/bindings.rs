@@ -100,10 +100,14 @@ impl SemanticCore {
         })
     }
 
+    /// The focused text input's accessibility node — UI focus is the text
+    /// caret's home, deliberately separate from the semantic tree's focus
+    /// (`accessibility.focus`, reported as `TreeUpdate::focus`): focusing a
+    /// non-text node leaves the caret on the field it belongs to.
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn focused_ui_node(&self) -> Option<AccessibilityNodeId> {
-        self.keyboard_focus_node()
+        self.focused_text_input_accessibility_node()
     }
 
     pub fn clear_ui_focus(&mut self) -> bool {
