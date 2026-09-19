@@ -466,7 +466,8 @@ impl HeadlessRuntime {
     }
 
     /// Whether the runtime is quiescent: no queued input, no spawned work
-    /// awaiting a drain, no pending popup mounts, and no renderer-scheduled
+    /// awaiting a drain, no pending popup mounts, no window — the main window
+    /// or a popup — with a frame still pending, and no renderer-scheduled
     /// semantic work (patches, rebuilds, animations, gesture deadlines,
     /// gliding scrolls) in this window or any popup.
     ///
@@ -481,9 +482,11 @@ impl HeadlessRuntime {
         !self.runtime.platform.has_pending_events()
             && !self.local_executor.has_pending()
             && self.pending_window_queue.borrow().is_empty()
+            && !self.runtime.mode.is_pending()
             && !self.runtime.renderer.has_scheduled_semantic_work()
             && self.popup_windows.iter().all(|popup| {
-                !popup.platform.has_pending_events()
+                !popup.mode.is_pending()
+                    && !popup.platform.has_pending_events()
                     && !popup.renderer.has_scheduled_semantic_work()
             })
     }
@@ -499,11 +502,11 @@ impl HeadlessRuntime {
     /// up to date.
     #[must_use]
     pub fn has_pending_semantic_update(&self) -> bool {
-        self.runtime.renderer.has_pending_semantic_update()
-            || self
-                .popup_windows
-                .iter()
-                .any(|popup| popup.renderer.has_pending_semantic_update())
+        self.runtime.mode.is_pending()
+            || self.runtime.renderer.has_pending_semantic_update()
+            || self.popup_windows.iter().any(|popup| {
+                popup.mode.is_pending() || popup.renderer.has_pending_semantic_update()
+            })
     }
 
     pub fn pump(&mut self, capture_snapshot: bool) -> HeadlessPumpResult {
@@ -563,21 +566,33 @@ impl HeadlessRuntime {
                 self.local_executor.drain()
             })
         });
-        if capture_snapshot
-            && !self.popup_windows.is_empty()
-            && let Some(snapshot) = render_result
-                .as_mut()
-                .and_then(|result| result.snapshot.as_mut())
-        {
-            for popup in &mut self.popup_windows {
-                let Some(popup_snapshot) =
-                    render_window_with_capture(popup, &self.env, true, &mut || {
-                        self.local_executor.drain()
-                    })
-                    .snapshot
-                else {
-                    continue;
-                };
+        // A popup window pumps its scene the way the main window does: the
+        // scene pump is where its retained tree — and with it the window's
+        // accessibility update — is built. A popup that only ever rendered on
+        // capture frames would composite into snapshots yet never reach the
+        // merged tree, so an open popup gets a frame whenever its own work is
+        // pending, while readback stays limited to the frames that composite
+        // it into a snapshot.
+        let mut popups_rebuilt = false;
+        for popup in &mut self.popup_windows {
+            let composite = capture_snapshot
+                && render_result
+                    .as_ref()
+                    .is_some_and(|result| result.snapshot.is_some());
+            let redraw_requested = popup.platform.take_redraw_request();
+            if !(composite || popup.mode.is_pending() || redraw_requested) {
+                continue;
+            }
+            let popup_result = render_window_with_capture(popup, &self.env, composite, &mut || {
+                self.local_executor.drain()
+            });
+            popups_rebuilt |= popup_result.rebuilt;
+            if let (Some(snapshot), Some(popup_snapshot)) = (
+                render_result
+                    .as_mut()
+                    .and_then(|result| result.snapshot.as_mut()),
+                popup_result.snapshot,
+            ) {
                 composite_popup_snapshot(snapshot, &popup_snapshot, popup.window.frame.get());
             }
         }
@@ -595,6 +610,7 @@ impl HeadlessRuntime {
 
         HeadlessPumpResult {
             rebuilt: render_result.as_ref().is_some_and(|result| result.rebuilt)
+                || popups_rebuilt
                 || drained_before
                 || drained_after,
             profile: profile.with_total(frame_started_at.elapsed()),
