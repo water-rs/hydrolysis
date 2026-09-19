@@ -91,7 +91,7 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
     );
 
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the first frame must publish an accessibility tree");
     assert!(
@@ -110,7 +110,7 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
         runtime.push_input_event(event);
     }
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the click frame must publish an accessibility tree");
     let (copy, copy_node) = find_by_label(&update, Role::Button, "Copy")
@@ -135,7 +135,7 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
     );
 
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the activation frame must publish an accessibility tree");
     assert!(
@@ -163,7 +163,7 @@ fn a_popup_only_change_publishes_the_merged_tree() {
     );
 
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the first frame must publish an accessibility tree");
     let (trigger, _) =
@@ -175,7 +175,7 @@ fn a_popup_only_change_publishes_the_merged_tree() {
     assert!(act(&mut runtime, Action::Click, trigger));
 
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the picker's first frame must publish an accessibility tree");
     let (swatch, _) = find_by_label(&update, Role::Button, "Red")
@@ -185,7 +185,7 @@ fn a_popup_only_change_publishes_the_merged_tree() {
     // no pending update, yet the pump must still publish the merged tree.
     assert!(act(&mut runtime, Action::Focus, swatch));
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("a popup-only change must still publish the merged tree");
     assert!(
@@ -208,7 +208,7 @@ fn a_popup_only_change_publishes_the_merged_tree() {
     // main tree's focused node — the trigger that opened it.
     assert!(act(&mut runtime, Action::Click, swatch));
     let update = runtime
-        .pump_at(true, Instant::now())
+        .pump_at(false, Instant::now())
         .tree_update
         .expect("the close frame must publish an accessibility tree");
     assert_eq!(
@@ -222,7 +222,7 @@ fn a_popup_only_change_publishes_the_merged_tree() {
 fn pump_until_settled(runtime: &mut HeadlessRuntime) -> Option<TreeUpdate> {
     let mut last = None;
     for _ in 0..64 {
-        let result = runtime.pump_at(true, Instant::now());
+        let result = runtime.pump_at(false, Instant::now());
         if let Some(update) = result.tree_update {
             last = Some(update);
         }
@@ -264,7 +264,7 @@ fn a_clean_pump_publishes_no_tree_update() {
     let update = pump_until_settled(&mut runtime)
         .expect("the first frame must publish an accessibility tree");
     assert!(
-        runtime.pump_at(true, Instant::now()).tree_update.is_none(),
+        runtime.pump_at(false, Instant::now()).tree_update.is_none(),
         "a settled pump with no popup must publish nothing"
     );
 
@@ -285,7 +285,7 @@ fn a_clean_pump_publishes_no_tree_update() {
         "the menu's window must be merged before the clean-pump check"
     );
     assert!(
-        runtime.pump_at(true, Instant::now()).tree_update.is_none(),
+        runtime.pump_at(false, Instant::now()).tree_update.is_none(),
         "a settled pump with an open popup must publish nothing"
     );
 }
