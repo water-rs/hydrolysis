@@ -15,7 +15,10 @@ use waterui_controls::button::button;
 use waterui_controls::menu::CommandExt as _;
 use waterui_core::AnyView;
 use waterui_core::handler::AnyViewBuilder;
+use waterui_form::picker::color::ColorPicker;
+use waterui_graphics::Color;
 use waterui_layout::frame::Frame;
+use waterui_layout::stack::vstack;
 
 use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
@@ -138,5 +141,59 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
     assert!(
         find_by_label(&update, Role::Button, "Copy").is_none(),
         "the popup's nodes must leave the merged tree once it closes"
+    );
+}
+/// A popup that changes while the main window is clean must still publish:
+/// the merged update describes every open window, not only the one that
+/// emitted. A `Focus` inside a colour picker's swatch panel re-emits the
+/// popup core without touching the main window — the pump's update carries
+/// the popup's changed tree anyway.
+#[test]
+fn a_popup_only_change_publishes_the_merged_tree() {
+    let tint = Binding::container(Color::srgb(0, 0, 0));
+    let tint_for_view = tint.clone();
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        AnyViewBuilder::<AnyView>::new(move || {
+            AnyView::new(vstack((ColorPicker::new("Tint", &tint_for_view),)))
+        }),
+        320,
+        240,
+        MinimalTestTheme::default(),
+    );
+
+    let update = runtime
+        .pump_at(true, Instant::now())
+        .tree_update
+        .expect("the first frame must publish an accessibility tree");
+    let (trigger, _) =
+        find_by_label(&update, Role::Button, "Tint").expect("the color picker is missing");
+    assert!(
+        find_by_label(&update, Role::Button, "Red").is_none(),
+        "swatches must not appear before the picker opens"
+    );
+    assert!(act(&mut runtime, Action::Click, trigger));
+
+    let update = runtime
+        .pump_at(true, Instant::now())
+        .tree_update
+        .expect("the picker's first frame must publish an accessibility tree");
+    let (swatch, _) = find_by_label(&update, Role::Button, "Red")
+        .expect("the swatch panel must merge into the returned tree");
+
+    // Focusing the swatch re-emits only the popup core; the main window has
+    // no pending update, yet the pump must still publish the merged tree.
+    assert!(act(&mut runtime, Action::Focus, swatch));
+    let update = runtime
+        .pump_at(true, Instant::now())
+        .tree_update
+        .expect("a popup-only change must still publish the merged tree");
+    assert!(
+        find_by_label(&update, Role::Button, "Red").is_some(),
+        "the published update must carry the popup's nodes"
+    );
+    assert!(
+        find_by_label(&update, Role::Button, "Tint").is_some(),
+        "the published update must still carry the clean main window's nodes"
     );
 }

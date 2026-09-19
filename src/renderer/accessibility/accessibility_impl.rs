@@ -521,9 +521,11 @@ impl AccessibilityBuilder {
         }
     }
 
-    pub(crate) fn finalize_tree_update(&mut self) {
-        self.node_ids
-            .retain(|key, _| self.active_node_keys.contains(key));
+    /// The update `finalize_tree_update` publishes: the synthesized window
+    /// root over the registered nodes, with the current focus. Factored so
+    /// the merged multi-window path can re-emit a quiet window's last state
+    /// from the live registry instead of cloning a stored update.
+    fn assembled_tree_update(&self) -> AccessibilityTreeUpdate {
         let mut root = AccessibilityNode::new(AccessibilityNodeRole::Window);
         root.set_label(self.root_label.clone());
         if self.root_bounds.width() > 0.0 && self.root_bounds.height() > 0.0 {
@@ -533,6 +535,17 @@ impl AccessibilityBuilder {
         let mut nodes = Vec::with_capacity(self.nodes.len() + 1);
         nodes.push((ACCESSIBILITY_ROOT_NODE_ID, root));
         nodes.extend(self.nodes.iter().cloned());
+        AccessibilityTreeUpdate {
+            nodes,
+            tree: Some(AccessibilityTree::new(ACCESSIBILITY_ROOT_NODE_ID)),
+            tree_id: AccessibilityTreeId::ROOT,
+            focus: self.focus,
+        }
+    }
+
+    pub(crate) fn finalize_tree_update(&mut self) {
+        self.node_ids
+            .retain(|key, _| self.active_node_keys.contains(key));
         if !self.nodes.iter().any(|(id, _)| *id == self.focus) {
             self.focus = ACCESSIBILITY_ROOT_NODE_ID;
         }
@@ -542,12 +555,7 @@ impl AccessibilityBuilder {
             .map(|(id, _)| *id)
             .collect::<BTreeSet<_>>();
         self.interaction_nodes.retain(|_, node| live.contains(node));
-        self.pending_tree_update = Some(AccessibilityTreeUpdate {
-            nodes,
-            tree: Some(AccessibilityTree::new(ACCESSIBILITY_ROOT_NODE_ID)),
-            tree_id: AccessibilityTreeId::ROOT,
-            focus: self.focus,
-        });
+        self.pending_tree_update = Some(self.assembled_tree_update());
     }
 }
 
@@ -612,19 +620,30 @@ impl SemanticCore {
         self.accessibility.pending_tree_update.take()
     }
 
+    /// The tree this window would publish if it emitted now: the last
+    /// emitted node set with the current focus, rebuilt from the live
+    /// registry. A clean frame has nothing new to say, but the merged
+    /// multi-window update must still describe the window — a sibling popup
+    /// emitting alone would otherwise drop it from the host's tree (the main
+    /// root's children list is republished whole each merge).
+    #[cfg(feature = "accessibility")]
+    fn current_accessibility_tree_update(&self) -> Option<AccessibilityTreeUpdate> {
+        (!self.accessibility.nodes.is_empty()).then(|| self.accessibility.assembled_tree_update())
+    }
+
     /// The accessibility tree of every open window, merged into one update.
     ///
-    /// The main window's core takes its pending update; each popup core
-    /// contributes its own pending update with every node id shifted into a
-    /// per-window range (node ids are unique per core), and each popup root
-    /// attaches to the main root's children so the merged tree stays one
-    /// tree. Actions addressed at a shifted id demultiplex back to the owning
-    /// window's core by the same stride — see the runtime's
-    /// `perform_accessibility_action`.
+    /// The main window's core contributes its pending update, or — when the
+    /// frame left it clean — the same tree re-emitted from its live registry,
+    /// so a popup emitting alone still publishes. Each popup contributes its
+    /// own pending or current nodes with every id shifted into a per-window
+    /// range (node ids are unique per core), and each popup root attaches to
+    /// the main root's children so the merged tree stays one tree. Actions
+    /// addressed at a shifted id demultiplex back to the owning window's core
+    /// by the same stride — see the runtime's `perform_accessibility_action`.
     ///
-    /// A popup with no pending update contributes nothing: a window that
-    /// settled without changing leaves the merged tree as the main window's
-    /// own update reports it.
+    /// A window contributes nothing only when it has never emitted: there is
+    /// no published tree to describe.
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn take_merged_accessibility_tree_update<'a>(
@@ -639,7 +658,9 @@ impl SemanticCore {
         const WINDOW_ID_STRIDE: u64 = 1 << 32;
         const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
 
-        let mut merged = self.take_accessibility_tree_update()?;
+        let mut merged = self
+            .take_accessibility_tree_update()
+            .or_else(|| self.current_accessibility_tree_update())?;
         let mut popups = popups.into_iter().peekable();
         if popups.peek().is_none() {
             return Some(merged);
@@ -652,7 +673,10 @@ impl SemanticCore {
             .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
 
         for (index, popup) in popups.enumerate() {
-            let Some(update) = popup.take_accessibility_tree_update() else {
+            let Some(update) = popup
+                .take_accessibility_tree_update()
+                .or_else(|| popup.current_accessibility_tree_update())
+            else {
                 continue;
             };
             let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
