@@ -269,7 +269,7 @@ impl BrowserRunnerHandle {
     }
 }
 
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     wasm_bindgen_futures::spawn_local(async move {
         let schedule_frame_ref: ScheduleFrameSlot = Rc::new(RefCell::new(None));
         let browser_schedule = {
@@ -309,8 +309,11 @@ pub fn run(app: App) {
         let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
         super::install_native_component_hooks(&mut env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
+        crate::theme::install_default_tokens(&mut env);
+        style.install_tokens(&mut env);
+        let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
-            crate::view_renderer::HydrolysisViewRenderer::default(),
+            crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
         ));
 
         // The application's fonts are fetched while the GPU adapter and device
@@ -325,11 +328,11 @@ pub fn run(app: App) {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), theme)
         };
         let fonts = FontCollection::new(font_cx);
         fonts.clone().install(&mut env);
-        super::fonts::seed_renderer(&mut renderer, &fonts);
+        super::fonts::seed_core(&mut renderer, &fonts);
         let runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);
         let accessibility_actions = Rc::new(RefCell::new(VecDeque::new()));
         let accessibility_bridge =

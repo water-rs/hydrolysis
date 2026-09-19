@@ -28,7 +28,7 @@ use waterui::shape::{Circle, RoundedRectangle, ShapeExt as _};
 use waterui_core::handler::AnyViewBuilder;
 use waterui_core::{AnyView, Binding, Computed};
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, OffscreenGpuContext};
 
@@ -152,6 +152,7 @@ fn measure_rebuild(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> 
             builder,
             WINDOW_W,
             WINDOW_H,
+            MinimalTestTheme::default(),
         );
         let result = rt.pump_at(false, Instant::now());
         assert!(
@@ -170,8 +171,14 @@ fn measure_rebuild(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> 
 fn measure_replay(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> (Stats, u32) {
     let builder = AnyViewBuilder::<AnyView>::new(move || replay_screen(cards, with_text));
     let env = test_environment();
-    let mut rt =
-        HeadlessRuntime::new_for_tests_on_context(gpu.clone(), env, builder, WINDOW_W, WINDOW_H);
+    let mut rt = HeadlessRuntime::new_for_tests_on_context(
+        gpu.clone(),
+        env,
+        builder,
+        WINDOW_W,
+        WINDOW_H,
+        MinimalTestTheme::default(),
+    );
 
     let start = Instant::now();
     let _ = rt.pump_at(false, start); // initial rebuild establishes the retained frame

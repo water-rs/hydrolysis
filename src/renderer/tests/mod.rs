@@ -40,7 +40,6 @@ use waterui_navigation::tab::{Tab, TabsLayout};
 
 use crate::engine::{Brush, DrawContext, WidgetTheme};
 use crate::platform::PlatformWindow as _;
-use crate::widgets::util::widget_theme;
 use waterui_backend_core::widget::{
     BadgeMetrics, ButtonMetrics, DividerMetrics, InputFieldMetrics, InteractionFocusBinding,
     InteractionMotion, ListMetrics, ModalInteraction, NavigationMetrics, NavigationMotion,
@@ -52,10 +51,14 @@ use waterui_core::EasingCurve;
 use waterui_core::handler::SharedAction;
 
 fn test_renderer() -> HydrolysisRenderer {
+    test_renderer_with_theme(MinimalTestTheme::default())
+}
+
+fn test_renderer_with_theme(theme: MinimalTestTheme) -> HydrolysisRenderer {
     let mut platform =
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
-    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device());
+    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme));
     renderer.set_frame_resources(
         surface.adapter(),
         surface.device(),
@@ -127,9 +130,7 @@ fn themed_test_environment() -> Environment {
     let mut env = Environment::new();
     crate::testing::install_theme(&mut env);
     crate::localization::install(&mut env);
-    let badge_draws = Rc::new(RefCell::new(Vec::new()));
-    env.insert(BadgeDrawLog(Rc::clone(&badge_draws)));
-    env.insert(Box::new(MinimalTestTheme { badge_draws }) as Box<dyn WidgetTheme>);
+    env.insert(BadgeDrawLog(Rc::new(RefCell::new(Vec::new()))));
     env
 }
 
@@ -800,7 +801,11 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     let env = test_environment();
     let bounds = vello::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
@@ -1801,8 +1806,14 @@ impl DrawContext for NoopDrawContext {
 }
 
 #[derive(Default)]
-struct MinimalTestTheme {
+pub(crate) struct MinimalTestTheme {
     badge_draws: Rc<RefCell<Vec<Rect>>>,
+}
+
+impl crate::Style for MinimalTestTheme {
+    /// The minimal theme installs no tokens of its own — the runtime's
+    /// framework defaults (`install_default_tokens`) are all a test needs.
+    fn install_tokens(&self, _env: &mut Environment) {}
 }
 
 impl WidgetTheme for MinimalTestTheme {
@@ -2243,23 +2254,6 @@ impl WidgetTheme for MinimalTestTheme {
     fn draw_table_header_background(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
     fn draw_table_cell_border(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
     fn draw_table_column_separator(&self, _draw: &mut dyn DrawContext, _from: Point, _to: Point) {}
-}
-
-#[test]
-fn widget_theme_can_be_replaced_in_environment() {
-    let env = test_environment();
-
-    let metrics = widget_theme(&env).button_metrics(ButtonStyle::Plain, ButtonSize::default());
-    assert_eq!(metrics.min_width, 123.0);
-    assert_eq!(metrics.min_height, 45.0);
-
-    let mut draw = NoopDrawContext;
-    widget_theme(&env).draw_button_chrome(
-        &mut draw,
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        ButtonStyle::Plain,
-        WidgetInteractionState::NONE,
-    );
 }
 
 #[test]
@@ -2859,7 +2853,9 @@ fn badge_indicator_anchors_to_the_content_trailing_edge() {
     // fresh renderer.
     let capture = |view: Badge, env: &Environment| {
         log.0.borrow_mut().clear();
-        let mut renderer = test_renderer();
+        let mut renderer = test_renderer_with_theme(MinimalTestTheme {
+            badge_draws: Rc::clone(&log.0),
+        });
         capture_root_window(&mut renderer, view, env, bounds);
         log.0.borrow().clone()
     };

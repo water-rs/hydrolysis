@@ -7,6 +7,7 @@ use super::{
 use crate::platform::{
     InputEvent, OffscreenSurface, PlatformWindow as _, SurfaceError, SurfaceFrame, SurfaceProvider,
 };
+use crate::renderer::tests::MinimalTestTheme;
 use crate::renderer::{HydrolysisRenderer, InteractionKey};
 use core::time::Duration;
 use std::rc::Rc;
@@ -370,7 +371,11 @@ fn runtime_window_sized(
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,
@@ -475,7 +480,11 @@ fn test_runtime_window() -> RuntimeWindow<HeadlessPlatformWindow> {
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,

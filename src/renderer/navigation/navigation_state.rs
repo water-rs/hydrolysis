@@ -470,7 +470,7 @@ fn put_destination_state(
     panic!("Hydrolysis navigation destination identity {identity} was lost during its callback");
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn install_navigation_root_state(
         &mut self,
         slot_key: &NavigationKey,
@@ -518,70 +518,6 @@ impl HydrolysisRenderer {
         state.appeared(env);
         slot.root_state = Some(state);
         slot.root_is_active = true;
-    }
-
-    pub(crate) fn begin_navigation_scene_capture(&mut self) {
-        self.navigation_captures
-            .push(NavigationSceneCapture::default());
-    }
-
-    pub(crate) fn finish_navigation_scene_capture(
-        &mut self,
-        scene: vello::Scene,
-    ) -> NavigationCapturedScene {
-        let capture = self
-            .navigation_captures
-            .pop()
-            .expect("navigation scene capture must be active");
-        assert!(
-            !capture.capturing_element,
-            "navigation element capture must finish before its page capture"
-        );
-        NavigationCapturedScene {
-            scene,
-            sources: capture.sources,
-            destinations: capture.destinations,
-        }
-    }
-
-    pub(crate) fn begin_navigation_element_capture(&mut self) -> bool {
-        let Some(capture) = self.navigation_captures.last_mut() else {
-            return false;
-        };
-        assert!(
-            !capture.capturing_element,
-            "navigation transition metadata cannot be nested"
-        );
-        capture.capturing_element = true;
-        true
-    }
-
-    pub(crate) fn finish_navigation_element_capture(
-        &mut self,
-        source: bool,
-        id: Id,
-        bounds: vello::kurbo::Rect,
-        scene: vello::Scene,
-    ) {
-        let capture = self
-            .navigation_captures
-            .last_mut()
-            .expect("navigation element capture requires an active page capture");
-        assert!(
-            capture.capturing_element,
-            "navigation element capture was not started"
-        );
-        capture.capturing_element = false;
-        let elements = if source {
-            &mut capture.sources
-        } else {
-            &mut capture.destinations
-        };
-        let previous = elements.insert(id, NavigationMatchedElement { bounds, scene });
-        assert!(
-            previous.is_none(),
-            "navigation transition id {id:?} was declared more than once in one page"
-        );
     }
 
     pub(crate) fn bind_navigation_entries(&mut self, key: &NavigationKey) -> NavigationEntries {
@@ -699,6 +635,72 @@ impl HydrolysisRenderer {
         if let Some(transaction_id) = transaction_id {
             let _ = controller.transition_completed(transaction_id);
         }
+    }
+}
+
+impl HydrolysisRenderer {
+    pub(crate) fn begin_navigation_scene_capture(&mut self) {
+        self.navigation_captures
+            .push(NavigationSceneCapture::default());
+    }
+
+    pub(crate) fn finish_navigation_scene_capture(
+        &mut self,
+        scene: vello::Scene,
+    ) -> NavigationCapturedScene {
+        let capture = self
+            .navigation_captures
+            .pop()
+            .expect("navigation scene capture must be active");
+        assert!(
+            !capture.capturing_element,
+            "navigation element capture must finish before its page capture"
+        );
+        NavigationCapturedScene {
+            scene,
+            sources: capture.sources,
+            destinations: capture.destinations,
+        }
+    }
+
+    pub(crate) fn begin_navigation_element_capture(&mut self) -> bool {
+        let Some(capture) = self.navigation_captures.last_mut() else {
+            return false;
+        };
+        assert!(
+            !capture.capturing_element,
+            "navigation transition metadata cannot be nested"
+        );
+        capture.capturing_element = true;
+        true
+    }
+
+    pub(crate) fn finish_navigation_element_capture(
+        &mut self,
+        source: bool,
+        id: Id,
+        bounds: vello::kurbo::Rect,
+        scene: vello::Scene,
+    ) {
+        let capture = self
+            .navigation_captures
+            .last_mut()
+            .expect("navigation element capture requires an active page capture");
+        assert!(
+            capture.capturing_element,
+            "navigation element capture was not started"
+        );
+        capture.capturing_element = false;
+        let elements = if source {
+            &mut capture.sources
+        } else {
+            &mut capture.destinations
+        };
+        let previous = elements.insert(id, NavigationMatchedElement { bounds, scene });
+        assert!(
+            previous.is_none(),
+            "navigation transition id {id:?} was declared more than once in one page"
+        );
     }
 }
 

@@ -1,4 +1,3 @@
-use crate::engine::WidgetTheme;
 use nami::Computed;
 use waterui_core::Environment;
 use waterui_core::interaction::Disabled;
@@ -12,12 +11,6 @@ use waterui_core::interaction::Disabled;
 pub(crate) fn widget_disabled(env: &Environment) -> Computed<bool> {
     env.get::<Disabled>()
         .map_or_else(|| Computed::constant(false), |scope| scope.signal().clone())
-}
-
-pub(crate) fn widget_theme(env: &Environment) -> &dyn WidgetTheme {
-    env.get::<Box<dyn WidgetTheme>>()
-        .map(Box::as_ref)
-        .expect("hydrolysis widget theme is not installed in the environment")
 }
 
 pub(crate) fn inset_rect(rect: vello::kurbo::Rect, dx: f64, dy: f64) -> vello::kurbo::Rect {

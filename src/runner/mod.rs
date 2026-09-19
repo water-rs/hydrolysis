@@ -52,6 +52,8 @@ mod diagnostics;
 mod fonts;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
+#[cfg(not(target_arch = "wasm32"))]
+mod semantic;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
@@ -67,6 +69,8 @@ use diagnostics::*;
 use fonts::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use headless::{HeadlessPumpResult, HeadlessRuntime};
+#[cfg(not(target_arch = "wasm32"))]
+pub use semantic::{SemanticPumpResult, SemanticRuntime};
 use window::*;
 // Frame and tree profiles are published to the inspector endpoint, which exists
 // only where `waterui::inspector` does.
@@ -164,7 +168,7 @@ fn install_headless_window_managers(
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "winit")))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     let inspector = init_main_thread_executors();
     let inspector_probe = inspector
         .as_ref()
@@ -191,8 +195,11 @@ pub fn run(app: App) {
     install_native_component_hooks(&mut env);
     install_headless_window_managers(&mut env, Rc::clone(&pending_window_queue));
     env.insert(HydrolysisTextContextMenuMode::Overlay);
+    crate::theme::install_default_tokens(&mut env);
+    style.install_tokens(&mut env);
+    let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
     env.insert(waterui_core::ViewRenderer::new(
-        crate::view_renderer::HydrolysisViewRenderer::default(),
+        crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
     ));
     // The application's fonts, discovered once. Every window's renderer is
     // seeded from this collection, and a self-drawn component that typesets
@@ -210,9 +217,9 @@ pub fn run(app: App) {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
         };
-        seed_renderer(&mut renderer, &fonts);
+        seed_core(&mut renderer, &fonts);
         let mut runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);
         render_window(&mut runtime, &env, &mut || local_executor.drain());
         pending_windows.extend(pending_window_queue.borrow_mut().drain(..));
@@ -220,15 +227,15 @@ pub fn run(app: App) {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     init_global_executor();
-    web_runner::run(app);
+    web_runner::run(app, style);
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "winit"))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     initialize_tracing_from_env();
-    winit_runner::run(app, init_main_thread_executors());
+    winit_runner::run(app, style, init_main_thread_executors());
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "winit"))]

@@ -13,6 +13,7 @@ mod renderer;
 mod runner;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod theme;
 mod view_renderer;
 mod widgets;
 
@@ -20,6 +21,27 @@ mod widgets;
 pub(crate) use waterui_backend_core::{animation, gesture, scroll, time};
 
 pub use engine::{Brush, DrawContext, WidgetTheme};
+use waterui_core::Environment;
+
+/// A presentation style for the rendered Hydrolysis runtime.
+///
+/// A `Style` is the runtime's widget theme plus the package's token set:
+/// the runtime installs the framework default colour and font tokens
+/// ([`crate::theme::install_default_tokens`]), then calls
+/// [`Self::install_tokens`] so the package's tokens win, and finally owns the
+/// style itself and hands `&dyn WidgetTheme` to the layout and encode
+/// contexts.
+///
+/// The semantic runtime (`SemanticRuntime`) takes no `Style`: widget
+/// structure, roles, labels, values, states and actions never depend on one.
+/// A theme read during view build or patch is a compile error by
+/// construction — build and patch contexts cannot reach a theme.
+pub trait Style: WidgetTheme + 'static {
+    /// Installs the style package's colour, font and other environment
+    /// tokens. Called after [`crate::theme::install_default_tokens`], so
+    /// tokens installed here replace the framework defaults.
+    fn install_tokens(&self, env: &mut Environment);
+}
 pub use gpu_view::{HydrolysisExt, HydrolysisGpuView};
 /// The W3C UI Events key vocabulary this backend speaks, re-exported so hosts
 /// that synthesize key events use the same version of it.
@@ -37,7 +59,8 @@ pub use renderer::{HydroState, HydrolysisRenderTarget, HydrolysisRenderer, Rende
 pub use runner::run;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::{
-    FrameCounters, FramePhases, FrameProfile, HeadlessPumpResult, HeadlessRuntime, HeadlessSnapshot,
+    FrameCounters, FramePhases, FrameProfile, HeadlessPumpResult, HeadlessRuntime,
+    HeadlessSnapshot, SemanticPumpResult, SemanticRuntime,
 };
 pub use view_renderer::HydrolysisViewRenderer;
 #[cfg(hydrolysis_macos_system_webview)]

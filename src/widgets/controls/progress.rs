@@ -1,7 +1,7 @@
 use crate::animation::AnimationKey;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
-    WidgetRenderContext, circle_arc_path, measure_progress_intrinsic,
+    HydroNativeView, HydroState, RenderContext, RetainedSubview, WidgetRenderContext,
+    circle_arc_path, measure_progress_intrinsic,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{Node as AccessibilityNode, Role as AccessibilityNodeRole};
@@ -15,8 +15,6 @@ use waterui_core::Environment;
 use waterui_core::Native;
 use waterui_core::layout::Size as LayoutSize;
 use waterui_core::layout::{ProposalSize, ViewDimensions};
-
-use crate::widgets::util::widget_theme;
 
 const LINEAR_DETERMINATE_ANIMATION_KEY: usize = 1;
 const CIRCULAR_DETERMINATE_ANIMATION_KEY: usize = 2;
@@ -53,15 +51,24 @@ impl ProgressRenderState {
     }
 
     /// Eagerly build the label sub-views (the measure path has no renderer).
-    pub(crate) fn prebuild_labels(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild_labels(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label.ensure_built(renderer, env);
         self.value_label.ensure_built(renderer, env);
     }
 }
 
 impl HydroNativeView for Native<ProgressConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_progress_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_progress_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -69,8 +76,8 @@ impl HydroNativeView for Native<ProgressConfig> {
 /// (passing the config label's extracted default text) and the retained node path
 /// (passing the [`RetainedSubview`]'s build-time default text).
 pub(crate) fn progress_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     default_label: Option<String>,
     value: &Computed<f64>,
     env: &Environment,
@@ -90,8 +97,7 @@ pub(crate) fn progress_accessibility(
         if current.is_finite() {
             node.set_numeric_value(current.clamp(0.0, 1.0));
         }
-        let bounds = crate::renderer::transformed_rect(ctx.hit_transform, ctx.bounds);
-        let _ = renderer.register_accessibility_node(node, bounds, env, None);
+        let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
     }
     #[cfg(not(feature = "accessibility"))]
     {
@@ -107,8 +113,8 @@ pub(crate) fn measure_progress_node(
     _proposal: ProposalSize,
     _state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let size = match render_state.style {
         ProgressStyle::Linear => {
             let metrics = theme.progress_metrics(ProgressIndicatorStyle::Linear);
@@ -158,7 +164,13 @@ pub(crate) fn render_progress_node(
             let progress = state.borrow();
             (progress.label.default_a11y_label(), progress.value.clone())
         };
-        progress_accessibility(ctx.renderer_mut(), render_ctx, default_label, &value, env);
+        progress_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            default_label,
+            &value,
+            env,
+        );
     }
     render_progress_parts(ctx, state, env);
 }
@@ -168,7 +180,7 @@ pub(crate) fn render_progress_parts(
     state: &Rc<RefCell<ProgressRenderState>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     // Stable identity of this progress node: the retained state `Rc`'s address keys
     // the indeterminate repeating phase so it survives structural changes.
     let node_id = Rc::as_ptr(state) as usize;
@@ -351,4 +363,21 @@ pub(crate) fn render_progress_parts(
             panic!("hydrolysis ProgressStyle variant is not implemented");
         }
     }
+}
+
+/// Emits a retained progress indicator's accessibility node for the semantic
+/// walk — the same node `progress_accessibility` registers, with no bounds.
+/// The label and value-label sub-views flush visual-only, so there is nothing
+/// else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_progress_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ProgressRenderState>>,
+    env: &Environment,
+) {
+    let (default_label, value) = {
+        let progress = state.borrow();
+        (progress.label.default_a11y_label(), progress.value.clone())
+    };
+    progress_accessibility(renderer, None, default_label, &value, env);
 }

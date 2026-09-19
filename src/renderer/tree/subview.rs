@@ -3,6 +3,8 @@
 //! shaping fast path.
 
 use super::*;
+use crate::engine::WidgetTheme;
+use std::rc::Rc;
 
 /// A [`SubView`] adapter that measures a child [`RenderNode`] **on demand** at
 /// whatever proposal the real [`Layout`] passes — the node analogue of
@@ -20,6 +22,9 @@ pub(super) struct NodeSubView<'a> {
     node: MainThreadBound<&'a RenderNode>,
     state: MainThreadBound<&'a RefCell<&'a mut HydroState>>,
     env: MainThreadBound<Environment>,
+    /// The widget theme widget leaves measure against, forwarded by
+    /// `measure` to [`RenderNode::measure`]. Main-thread only, like `state`.
+    theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch: StretchAxis,
     priority: i32,
     /// Per-proposal memo for this layout pass (containers probe children with
@@ -70,6 +75,7 @@ impl<'a> NodeSubView<'a> {
         node: &'a RenderNode,
         state: &'a RefCell<&'a mut HydroState>,
         env: &'a Environment,
+        theme: &'a Rc<dyn WidgetTheme>,
     ) -> Self {
         let resolved_text = try_resolve_node_text_leaf(node, env).map(|(input, max_lines)| {
             ResolvedNodeTextMeasure {
@@ -84,6 +90,7 @@ impl<'a> NodeSubView<'a> {
             node: MainThreadBound::new(node),
             state: MainThreadBound::new(state),
             env: MainThreadBound::new(env.clone()),
+            theme: MainThreadBound::new(Rc::clone(theme)),
             measure_cache: MainThreadBound::new(RefCell::new(Vec::new())),
             resolved_text,
         }
@@ -129,7 +136,8 @@ impl SubView for NodeSubView<'_> {
         }
         let dimensions = {
             let mut state = self.state.borrow_mut();
-            self.node.measure(&mut state, &self.env, proposal)
+            self.node
+                .measure(&mut state, &self.env, &self.theme, proposal)
         };
         let dimensions = self.apply_stretch(dimensions, proposal);
         self.measure_cache

@@ -8,61 +8,75 @@ impl_widget_behavior!(
     crate::widgets::controls::button::ButtonRenderState,
     crate::widgets::controls::button::render_button_node,
     crate::widgets::controls::button::measure_button_node
+    ; prepare: ensure_label_built
+    ; a11y: crate::widgets::controls::button::emit_button_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::toggle::ToggleRenderState,
     crate::widgets::controls::toggle::render_toggle_node,
     crate::widgets::controls::toggle::measure_toggle_node
+    ; a11y: crate::widgets::controls::toggle::emit_toggle_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::slider::SliderRenderState,
     crate::widgets::controls::slider::render_slider_node,
     crate::widgets::controls::slider::measure_slider_node
+    ; a11y: crate::widgets::controls::slider::emit_slider_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::stepper::StepperRenderState,
     crate::widgets::controls::stepper::render_stepper_node,
     crate::widgets::controls::stepper::measure_stepper_node
+    ; a11y: crate::widgets::controls::stepper::emit_stepper_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::progress::ProgressRenderState,
     crate::widgets::controls::progress::render_progress_node,
     crate::widgets::controls::progress::measure_progress_node
+    ; a11y: crate::widgets::controls::progress::emit_progress_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::button::MenuRenderState,
     crate::widgets::controls::button::render_menu_node,
     crate::widgets::controls::button::measure_menu_node
+    ; prepare: ensure_label_built
+    ; a11y: crate::widgets::controls::button::emit_menu_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::date_picker::DatePickerRenderState,
     crate::widgets::controls::date_picker::render_date_picker_node,
     crate::widgets::controls::date_picker::measure_date_picker_node
+    ; a11y: crate::widgets::controls::date_picker::emit_date_picker_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::color_picker::ColorPickerRenderState,
     crate::widgets::controls::color_picker::render_color_picker_node,
     crate::widgets::controls::color_picker::measure_color_picker_node
+    ; a11y: crate::widgets::controls::color_picker::emit_color_picker_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::picker::PickerRenderState,
     crate::widgets::controls::picker::render_picker_node,
     crate::widgets::controls::picker::measure_picker_node
+    ; a11y: crate::widgets::controls::picker::emit_picker_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::text_field::TextFieldRenderState,
     crate::widgets::controls::text_field::render_text_field_node,
     crate::widgets::controls::text_field::measure_text_field_node
+    ; a11y: crate::widgets::controls::text_field::emit_text_field_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::controls::text_field::SecureFieldRenderState,
     crate::widgets::controls::text_field::render_secure_field_node,
     crate::widgets::controls::text_field::measure_secure_field_node
+    ; a11y: crate::widgets::controls::text_field::emit_secure_field_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::layout::badge::BadgeRenderState,
     crate::widgets::layout::badge::render_badge_node,
     crate::widgets::layout::badge::measure_badge_node
+    ; a11y: crate::widgets::layout::badge::emit_badge_accessibility
 );
 
 impl RenderNode {
@@ -87,15 +101,12 @@ impl RenderNode {
     /// Build a persistent button node: retain the config behind an `Rc<RefCell<…>>`
     /// (its `Label` carries the live content signal; its action is invoked through the
     /// shared cell), and re-render it every flush so a reactive label stays live.
-    pub(super) fn build_button(
-        config: ButtonConfig,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
+    pub(super) fn build_button(config: ButtonConfig, env: &Environment) -> RenderNode {
         use crate::widgets::controls::button::ButtonRenderState;
         let mut state = ButtonRenderState::from_config(config);
-        // Pre-build the general label sub-view (the measure path has no renderer).
-        state.prebuild_label(renderer, env);
+        // Create the general label sub-view unstyled; the layout-time prepare
+        // pass paints it with the theme and builds it before first measure.
+        state.init_label();
         let state = Rc::new(RefCell::new(state));
         Self::build_widget(state, StretchAxis::None, env)
     }
@@ -107,7 +118,7 @@ impl RenderNode {
     pub(super) fn build_toggle(
         config: ToggleConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::toggle::ToggleRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -124,7 +135,7 @@ impl RenderNode {
     pub(super) fn build_slider(
         config: SliderConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::slider::SliderRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -141,7 +152,7 @@ impl RenderNode {
     pub(super) fn build_stepper(
         config: StepperConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::stepper::StepperRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -158,7 +169,7 @@ impl RenderNode {
     pub(super) fn build_progress(
         config: ProgressConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::progress::ProgressRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -171,16 +182,12 @@ impl RenderNode {
     /// Build a persistent menu node: its trigger label is a move-only `AnyView`
     /// pre-built into a [`RetainedSubview`]; its `accessibility_label` and `items`
     /// signals are read through `read_signal` so a change schedules a frame.
-    pub(super) fn build_menu(
-        menu: ResolvedMenu,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
+    pub(super) fn build_menu(menu: ResolvedMenu, env: &Environment) -> RenderNode {
         use crate::widgets::controls::button::MenuRenderState;
         let stretch = <ResolvedMenu as waterui_core::NativeView>::stretch_axis(&menu);
-        let mut state = MenuRenderState::from_resolved(menu);
-        state.prebuild_label(renderer, env);
-        let state = Rc::new(RefCell::new(state));
+        // The label sub-view (created by `from_resolved`) is painted with the
+        // theme and built by the layout-time prepare pass before first measure.
+        let state = Rc::new(RefCell::new(MenuRenderState::from_resolved(menu)));
         Self::build_widget(state, stretch, env)
     }
 
@@ -192,7 +199,7 @@ impl RenderNode {
     pub(super) fn build_date_picker(
         config: DatePickerConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::date_picker::DatePickerRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -210,7 +217,7 @@ impl RenderNode {
     pub(super) fn build_color_picker(
         config: ColorPickerConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::color_picker::ColorPickerRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -241,7 +248,7 @@ impl RenderNode {
     pub(super) fn build_text_field(
         config: ResolvedTextFieldConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::text_field::TextFieldRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -261,7 +268,7 @@ impl RenderNode {
     pub(super) fn build_secure_field(
         config: SecureFieldConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::controls::text_field::SecureFieldRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -278,7 +285,7 @@ impl RenderNode {
     pub(super) fn build_badge(
         config: BadgeConfig,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::layout::badge::BadgeRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);

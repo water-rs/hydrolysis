@@ -54,8 +54,8 @@ pub(crate) fn popup_menu_node(item: ResolvedMenuItem) -> PopupMenuNode {
 /// leaf-provided default when no override is installed. Shared by the dispatch
 /// path and the retained `Widget`-node path so both produce the same a11y tree.
 pub(crate) fn graphics_image_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     env: &Environment,
     default_label: Option<String>,
 ) {
@@ -67,12 +67,7 @@ pub(crate) fn graphics_image_accessibility(
         if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
             node.set_label(label);
         }
-        let _ = renderer.register_accessibility_node(
-            node,
-            transformed_rect(ctx.hit_transform, ctx.bounds),
-            env,
-            None,
-        );
+        let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
     }
     #[cfg(not(feature = "accessibility"))]
     {
@@ -103,6 +98,7 @@ pub(crate) fn measure_gradient_node(
     proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     graphics_dimensions_from_proposal(proposal)
 }
@@ -119,7 +115,7 @@ pub(crate) fn render_gradient_node(
         .is_some_and(AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        graphics_image_accessibility(ctx.renderer_mut(), render_ctx, env, None);
+        graphics_image_accessibility(ctx.renderer_mut(), Some(render_ctx), env, None);
     }
     render_gradient_parts(ctx, gradient, env);
 }
@@ -147,6 +143,7 @@ pub(crate) fn measure_shape_node(
     proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     graphics_dimensions_from_proposal(proposal)
 }
@@ -163,7 +160,7 @@ pub(crate) fn render_shape_node(
         .is_some_and(AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        graphics_image_accessibility(ctx.renderer_mut(), render_ctx, env, None);
+        graphics_image_accessibility(ctx.renderer_mut(), Some(render_ctx), env, None);
     }
     render_shape_parts(ctx, shape, env);
 }
@@ -194,6 +191,7 @@ pub(crate) fn measure_morph_shape_node(
     proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     graphics_dimensions_from_proposal(proposal)
 }
@@ -213,7 +211,7 @@ pub(crate) fn render_morph_shape_node(
         .is_some_and(AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        graphics_image_accessibility(ctx.renderer_mut(), render_ctx, env, None);
+        graphics_image_accessibility(ctx.renderer_mut(), Some(render_ctx), env, None);
     }
     render_morph_shape_parts(ctx, shape, env);
 }
@@ -252,8 +250,8 @@ pub(crate) fn render_morph_shape_parts(
 /// dispatch path ([`HydrolysisRenderer::render_str`]) and the retained
 /// `Widget`-node path so both produce the same a11y tree.
 pub(crate) fn str_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     text: &Str,
     env: &Environment,
 ) {
@@ -271,12 +269,7 @@ pub(crate) fn str_accessibility(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
             );
             node.set_label(label);
-            let _ = renderer.register_accessibility_node(
-                node,
-                transformed_rect(ctx.hit_transform, ctx.bounds),
-                env,
-                None,
-            );
+            let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
         }
     }
     #[cfg(not(feature = "accessibility"))]
@@ -293,6 +286,7 @@ pub(crate) fn measure_str_node(
     proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     HydrolysisRenderer::measure_text_dimensions(
         state,
@@ -313,7 +307,7 @@ pub(crate) fn render_str_node(
     env: &Environment,
 ) {
     let render_ctx = ctx.render_context();
-    str_accessibility(ctx.renderer_mut(), render_ctx, &text.borrow(), env);
+    str_accessibility(ctx.renderer_mut(), Some(render_ctx), &text.borrow(), env);
     render_str_parts(ctx, text, env);
 }
 
@@ -333,4 +327,27 @@ pub(crate) fn render_str_parts(
         HorizontalAlignment::Leading,
         env,
     );
+}
+
+/// Emits a retained `Str` leaf's accessibility node for the semantic walk —
+/// the same node `str_accessibility` registers, with no bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_str_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    text: &Rc<RefCell<Str>>,
+    env: &Environment,
+) {
+    str_accessibility(renderer, None, &text.borrow(), env);
+}
+
+/// Emits a static graphics leaf's `Image` accessibility node for the semantic
+/// walk — the same node `graphics_image_accessibility` registers, with no
+/// bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_graphics_leaf_accessibility<T>(
+    renderer: &mut crate::renderer::SemanticCore,
+    _state: &Rc<RefCell<T>>,
+    env: &Environment,
+) {
+    graphics_image_accessibility(renderer, None, env, None);
 }

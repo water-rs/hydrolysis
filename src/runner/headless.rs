@@ -220,6 +220,9 @@ pub struct HeadlessRuntime {
     runtime: RuntimeWindow<HeadlessPlatformWindow>,
     pending_window_queue: Rc<RefCell<Vec<Window>>>,
     popup_windows: Vec<RuntimeWindow<HeadlessPlatformWindow>>,
+    /// The style the runtime was launched with, kept so popup windows'
+    /// renderers measure and encode with the same widget theme.
+    theme: Rc<dyn crate::engine::WidgetTheme>,
     /// Every window this runtime opens renders on this one device: the main
     /// window, and each popup it later vends. Requesting a device per window
     /// made a runtime that opens a popup pay for two.
@@ -256,7 +259,7 @@ impl Drop for ReclaimGpuOnDrop {
 
 /// Drains the thread-shared executor when the owning runtime drops.
 #[cfg(not(target_arch = "wasm32"))]
-struct DrainExecutorOnDrop(HeadlessMainThreadExecutor);
+pub(super) struct DrainExecutorOnDrop(pub(super) HeadlessMainThreadExecutor);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for DrainExecutorOnDrop {
@@ -273,6 +276,7 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             pollster::block_on(OffscreenGpuContext::new()),
@@ -280,6 +284,7 @@ impl HeadlessRuntime {
             content,
             width,
             height,
+            style,
             native_resource_fonts,
         )
     }
@@ -308,6 +313,7 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             OffscreenGpuContext::new_for_tests_blocking(),
@@ -315,6 +321,7 @@ impl HeadlessRuntime {
             content,
             width,
             height,
+            style,
             super::fonts::deterministic_test_fonts,
         )
     }
@@ -336,6 +343,7 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             gpu,
@@ -343,6 +351,7 @@ impl HeadlessRuntime {
             content,
             width,
             height,
+            style,
             super::fonts::deterministic_test_fonts,
         )
     }
@@ -353,6 +362,7 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
         build_fonts: fn() -> parley::FontContext,
     ) -> Self {
         let inspector = init_main_thread_executors();
@@ -365,8 +375,11 @@ impl HeadlessRuntime {
         install_native_component_hooks(&mut env);
         install_headless_window_managers(&mut env, Rc::clone(&pending_window_queue));
         env.insert(HydrolysisTextContextMenuMode::Overlay);
+        crate::theme::install_default_tokens(&mut env);
+        style.install_tokens(&mut env);
+        let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
-            crate::view_renderer::HydrolysisViewRenderer::default(),
+            crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
         ));
         // The application's fonts, built once. Every window's renderer is
         // seeded from this collection, and a self-drawn component that typesets
@@ -410,9 +423,9 @@ impl HeadlessRuntime {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
         };
-        super::seed_renderer(&mut renderer, &fonts);
+        super::seed_core(&mut renderer, &fonts);
 
         Self {
             env,
@@ -428,6 +441,7 @@ impl HeadlessRuntime {
             ),
             pending_window_queue,
             popup_windows: Vec::new(),
+            theme,
             fonts,
             _executor_teardown: DrainExecutorOnDrop(local_executor.clone()),
             _gpu_reclaim: ReclaimGpuOnDrop(gpu.clone()),
@@ -449,9 +463,9 @@ impl HeadlessRuntime {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&self.theme))
         };
-        super::seed_renderer(&mut renderer, &self.fonts);
+        super::seed_core(&mut renderer, &self.fonts);
         RuntimeWindow::new(
             window,
             platform,
@@ -462,62 +476,6 @@ impl HeadlessRuntime {
                 slow_frame_threshold_override: None,
             },
         )
-    }
-
-    /// The accessibility tree of every window this application has open.
-    ///
-    /// A popup — a context menu, a picker — is its own window with its own
-    /// renderer, and so its own tree. Reporting only the main window's tree
-    /// means a menu is invisible to anything reading the accessibility tree,
-    /// which is how context menus came to have no test coverage at all: the
-    /// items are there, and nothing could see them.
-    ///
-    /// Each popup's ids are shifted into their own range, because every
-    /// renderer numbers its nodes from the same origin, and its root is
-    /// attached to the main root so the result is one tree.
-    #[cfg(feature = "accessibility")]
-    fn take_merged_accessibility_tree_update(&mut self) -> Option<AccessibilityTreeUpdate> {
-        use accesskit::NodeId as AccessibilityNodeId;
-
-        /// Node ids are unique per renderer, so each window gets its own range.
-        const WINDOW_ID_STRIDE: u64 = 1 << 32;
-        const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
-
-        let mut merged = self.runtime.renderer.take_accessibility_tree_update()?;
-        if self.popup_windows.is_empty() {
-            return Some(merged);
-        }
-
-        let mut root_children = merged
-            .nodes
-            .iter()
-            .find(|(id, _)| *id == ROOT)
-            .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
-
-        for (index, popup) in self.popup_windows.iter_mut().enumerate() {
-            let Some(update) = popup.renderer.take_accessibility_tree_update() else {
-                continue;
-            };
-            let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
-            for (id, mut node) in update.nodes {
-                let children: Vec<_> = node
-                    .children()
-                    .iter()
-                    .map(|child| AccessibilityNodeId(child.0 + offset))
-                    .collect();
-                node.set_children(children);
-                let shifted = AccessibilityNodeId(id.0 + offset);
-                if id == ROOT {
-                    root_children.push(shifted);
-                }
-                merged.nodes.push((shifted, node));
-            }
-        }
-
-        if let Some((_, root)) = merged.nodes.iter_mut().find(|(id, _)| *id == ROOT) {
-            root.set_children(root_children);
-        }
-        Some(merged)
     }
 
     fn mount_pending_popup_windows(&mut self) {
@@ -626,63 +584,12 @@ impl HeadlessRuntime {
         self.pump_at(capture_snapshot, Instant::now())
     }
 
-    pub fn pump_semantic(&mut self) -> HeadlessPumpResult {
-        self.pump_semantic_at(Instant::now())
-    }
-
     pub fn pump_offscreen(&mut self) -> HeadlessPumpResult {
         self.pump_at(false, Instant::now())
     }
 
     pub fn pump_snapshot(&mut self) -> HeadlessPumpResult {
         self.pump_at(true, Instant::now())
-    }
-
-    pub fn pump_semantic_at(&mut self, at: Instant) -> HeadlessPumpResult {
-        let frame_started_at = Instant::now();
-        self.runtime.renderer.set_frame_instant(at);
-        let executor_before_started_at = Instant::now();
-        let drained_before = self.local_executor.drain();
-        let executor_before = executor_before_started_at.elapsed();
-        let input_started_at = Instant::now();
-        let _ = handle_input_events(&mut self.runtime, &self.env);
-        let input = input_started_at.elapsed();
-        let animation_started_at = Instant::now();
-        let _ = advance_runtime(&mut self.runtime, &self.env, at);
-        let animation = animation_started_at.elapsed();
-        self.mount_pending_popup_windows();
-        for popup in &mut self.popup_windows {
-            popup.renderer.set_frame_instant(at);
-            let _ = handle_input_events(popup, &self.env);
-            let _ = advance_runtime(popup, &self.env, at);
-        }
-        let rebuilt = pump_window_semantics(&mut self.runtime, &self.env);
-        for popup in &mut self.popup_windows {
-            let _ = pump_window_semantics(popup, &self.env);
-        }
-        let executor_after_started_at = Instant::now();
-        let drained_after = self.local_executor.drain();
-        let executor_after = executor_after_started_at.elapsed();
-
-        HeadlessPumpResult {
-            rebuilt: rebuilt || drained_before || drained_after,
-            profile: FrameProfile {
-                phases: FramePhases {
-                    executor_before,
-                    input,
-                    animation,
-                    executor_after,
-                    ..FramePhases::default()
-                },
-                ..FrameProfile::default()
-            }
-            .with_total(frame_started_at.elapsed()),
-            #[cfg(feature = "accessibility")]
-            tree_update: self.take_merged_accessibility_tree_update(),
-            snapshot: None,
-            #[cfg(feature = "accessibility")]
-            ui_focus: self.runtime.renderer.focused_ui_node(),
-        }
     }
 
     /// The main window's renderer, for tests that assert on frame internals.

@@ -6,51 +6,60 @@ use super::*;
 impl_widget_behavior!(
     crate::widgets::layout::list::ListRenderState,
     crate::widgets::layout::list::render_list_node,
-    |state: &crate::widgets::layout::list::ListRenderState, proposal, hydro, env| {
-        crate::widgets::layout::list::measure_list_node(&state.config, proposal, hydro, env)
+    |state: &crate::widgets::layout::list::ListRenderState, proposal, hydro, env, theme| {
+        crate::widgets::layout::list::measure_list_node(&state.config, proposal, hydro, env, theme)
     }
+    ; a11y: crate::widgets::layout::list::emit_list_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::layout::table::TableRenderState,
     crate::widgets::layout::table::render_table_node,
-    |state: &crate::widgets::layout::table::TableRenderState, proposal, hydro, env| {
-        crate::widgets::layout::table::measure_table_node(&state.config, proposal, hydro, env)
+    |state: &crate::widgets::layout::table::TableRenderState, proposal, hydro, env, theme| {
+        crate::widgets::layout::table::measure_table_node(&state.config, proposal, hydro, env, theme)
     }
+    ; a11y: crate::widgets::layout::table::emit_table_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::nav::navigation::NavigationViewRenderState,
     crate::widgets::nav::navigation::render_navigation_view_node,
     crate::widgets::nav::navigation::measure_navigation_view_node
+    ; a11y: crate::widgets::nav::navigation::emit_navigation_view_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::nav::navigation::NavigationSplitRenderState,
     crate::widgets::nav::navigation::render_navigation_split_node,
     crate::widgets::nav::navigation::measure_navigation_split_node
+    ; a11y: crate::widgets::nav::navigation::emit_navigation_split_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::nav::navigation::NavigationStackRenderState,
     crate::widgets::nav::navigation::render_navigation_stack_node,
     crate::widgets::nav::navigation::measure_navigation_stack_node
+    ; a11y: crate::widgets::nav::navigation::emit_navigation_stack_accessibility
 );
 impl_widget_behavior!(
     crate::widgets::nav::tabs::TabsRenderState,
     crate::widgets::nav::tabs::render_tabs_node,
     crate::widgets::nav::tabs::measure_tabs_node
+    ; a11y: crate::widgets::nav::tabs::emit_tabs_accessibility
 );
 impl_widget_behavior!(
     ResolvedGradient,
     crate::renderer::render_gradient_node,
     crate::renderer::measure_gradient_node
+    ; a11y: crate::renderer::views::emit_graphics_leaf_accessibility
 );
 impl_widget_behavior!(
     ResolvedShape,
     crate::renderer::render_shape_node,
     crate::renderer::measure_shape_node
+    ; a11y: crate::renderer::views::emit_graphics_leaf_accessibility
 );
 impl_widget_behavior!(
     ResolvedMorphShape,
     crate::renderer::render_morph_shape_node,
     crate::renderer::measure_morph_shape_node
+    ; a11y: crate::renderer::views::emit_graphics_leaf_accessibility
 );
 #[cfg(hydrolysis_macos_system_webview)]
 impl_widget_behavior!(
@@ -78,6 +87,7 @@ impl_widget_behavior!(
     Str,
     crate::renderer::views::render_str_node,
     crate::renderer::views::measure_str_node
+    ; a11y: crate::renderer::views::emit_str_accessibility
 );
 
 impl RenderNode {
@@ -91,7 +101,7 @@ impl RenderNode {
     pub(super) fn build_list(
         config: ListConfig,
         env: &Environment,
-        renderer: &HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::layout::list::ListRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
@@ -121,7 +131,7 @@ impl RenderNode {
     pub(super) fn build_navigation_view(
         navigation: NavigationView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::nav::navigation::NavigationViewRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&navigation);
@@ -139,7 +149,7 @@ impl RenderNode {
     pub(super) fn build_navigation_split(
         split: NavigationSplitLayout,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::nav::navigation::NavigationSplitRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&split);
@@ -174,7 +184,7 @@ impl RenderNode {
     pub(super) fn build_tabs(
         tabs: TabsLayout,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::nav::tabs::TabsRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&tabs);
@@ -223,7 +233,7 @@ impl RenderNode {
     pub(super) fn build_webview(
         webview: WebView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         use crate::widgets::platform::webview::WebViewRenderState;
         let stretch = waterui_core::View::stretch_axis(&webview);
@@ -239,7 +249,7 @@ impl RenderNode {
     pub(super) fn build_webview(
         _webview: WebView,
         _env: &Environment,
-        _renderer: &mut HydrolysisRenderer,
+        _renderer: &mut SemanticCore,
     ) -> RenderNode {
         unsupported_webview()
     }

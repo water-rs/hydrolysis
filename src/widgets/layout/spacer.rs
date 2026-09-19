@@ -6,13 +6,23 @@ use waterui_core::{Environment, Native};
 use waterui_layout::spacer::Spacer;
 
 impl HydroNativeView for Native<()> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 }
 
 impl HydroNativeView for Native<Spacer> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 }
@@ -23,6 +33,7 @@ pub(crate) fn measure_empty_node(
     _proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     ViewDimensions::new(LayoutSize::zero())
 }
@@ -51,6 +62,7 @@ pub(crate) fn measure_spacer_node(
     _proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     ViewDimensions::new(LayoutSize::zero())
 }

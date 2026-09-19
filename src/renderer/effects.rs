@@ -487,6 +487,34 @@ impl ViewEffectRuntime {
     }
 }
 
+impl SemanticCore {
+    /// Register a retained render-tree GPU surface runtime (owned by a
+    /// `GpuSurfaceNode`) so its off-thread redraw handle is polled. Called once
+    /// at node build time; the node keeps the only other `Rc`, so a dropped node
+    /// is pruned by [`HydrolysisRenderer::poll_gpu_surface_redraw_handles`].
+    pub(crate) fn register_node_gpu_surface(
+        &mut self,
+        runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
+    ) {
+        self.node_gpu_surfaces.push(runtime);
+    }
+
+    pub(crate) fn register_node_view_effect(&mut self, runtime: Rc<RefCell<ViewEffectRuntime>>) {
+        self.node_view_effects.push(Rc::downgrade(&runtime));
+    }
+
+    /// Register a retained render-tree applied-filter runtime (owned by an
+    /// `AppliedFilterNode`) so animated filters are refreshed on redraw-only
+    /// frames. Called once at node build time; pruned by strong count when the
+    /// owning node is dropped.
+    pub(crate) fn register_node_applied_filter(
+        &mut self,
+        runtime: Rc<RefCell<AppliedFilterRuntime>>,
+    ) {
+        self.node_applied_filters.push(runtime);
+    }
+}
+
 impl HydrolysisRenderer {
     pub(crate) fn effect_setup_resources(
         &self,
@@ -635,32 +663,6 @@ impl HydrolysisRenderer {
             self.signals.request_redraw();
         }
         requested
-    }
-
-    /// Register a retained render-tree GPU surface runtime (owned by a
-    /// `GpuSurfaceNode`) so its off-thread redraw handle is polled. Called once
-    /// at node build time; the node keeps the only other `Rc`, so a dropped node
-    /// is pruned by [`Self::poll_gpu_surface_redraw_handles`].
-    pub(crate) fn register_node_gpu_surface(
-        &mut self,
-        runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
-    ) {
-        self.node_gpu_surfaces.push(runtime);
-    }
-
-    pub(crate) fn register_node_view_effect(&mut self, runtime: Rc<RefCell<ViewEffectRuntime>>) {
-        self.node_view_effects.push(Rc::downgrade(&runtime));
-    }
-
-    /// Register a retained render-tree applied-filter runtime (owned by an
-    /// `AppliedFilterNode`) so animated filters are refreshed on redraw-only
-    /// frames. Called once at node build time; pruned by strong count when the
-    /// owning node is dropped.
-    pub(crate) fn register_node_applied_filter(
-        &mut self,
-        runtime: Rc<RefCell<AppliedFilterRuntime>>,
-    ) {
-        self.node_applied_filters.push(runtime);
     }
 
     /// Atlas pages rendered this frame; every filter of a nesting level shares

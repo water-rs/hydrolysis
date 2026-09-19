@@ -8,7 +8,6 @@ use waterui_backend_core::widget::PickerMetrics;
 use waterui_controls::label::LabelDisplayMode;
 use waterui_controls::{Stepper, button, stepper::stepper};
 use waterui_core::{SignalExt as _, id::Id};
-use waterui_form::picker::PickerStyle;
 use waterui_form::picker::date::{Date, DatePickerType, DateTime};
 use waterui_layout::frame::Frame;
 use waterui_layout::padding::EdgeInsets;
@@ -279,6 +278,137 @@ pub(crate) fn popup_menu_window(
         origin,
         LayoutSize::new(width as f32, height as f32),
     ));
+    (popup, state)
+}
+
+/// The semantic counterpart of [`popup_menu_window`]: the same rows —
+/// borderless `Button` commands, dividers, and submenu items that open a
+/// deeper window — without the metrics-dependent chrome. A semantic window
+/// has no frame to size and no corner chrome to round, so none is built; the
+/// emitted accessibility tree is identical to the rendered popup's.
+#[cfg(feature = "accessibility")]
+pub(crate) fn semantic_popup_menu_window(
+    nodes: Vec<PopupMenuNode>,
+    group: PopupMenuStateGroup,
+    depth: usize,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let group_for_content = group.clone();
+    let state_for_content = state.clone();
+    let nodes_for_content = nodes.clone();
+    let popup_content = move || {
+        let mut rows = Vec::with_capacity(nodes_for_content.len());
+        for node in nodes_for_content.clone() {
+            match node {
+                PopupMenuNode::Command {
+                    label,
+                    action,
+                    disabled,
+                    ..
+                } => {
+                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                        move |group: PopupMenuStateGroup, env: Environment| {
+                            if disabled {
+                                return;
+                            }
+                            group.close_all();
+                            call_action_discarding_result(&action, &env);
+                        },
+                    );
+                    rows.push(AnyView::new(button));
+                }
+                PopupMenuNode::Divider => rows.push(AnyView::new(Divider)),
+                PopupMenuNode::Menu { label, items, .. } => {
+                    let next_depth = depth + 1;
+                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                        move |group: PopupMenuStateGroup, env: Environment| {
+                            if items.is_empty() {
+                                return;
+                            }
+                            group.truncate(next_depth);
+                            let (window, child_state) =
+                                semantic_popup_menu_window(items.clone(), group.clone(), next_depth);
+                            group.push(child_state);
+                            env.get::<PopupWindowManager>()
+                                .expect(
+                                    "hydrolysis popup menus require PopupWindowManager in environment",
+                                )
+                                .show(window);
+                        },
+                    );
+                    rows.push(AnyView::new(button));
+                }
+            }
+        }
+        let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
+            rows.into_iter().collect();
+        AnyView::new(
+            menu_content
+                .alignment(HorizontalAlignment::Leading)
+                .spacing(0.0)
+                .with(group_for_content.clone()),
+        )
+    };
+    let mut popup = Window::new(
+        TEXT_CONTEXT_MENU_WINDOW_TITLE,
+        state_for_content,
+        popup_content,
+    )
+    .style(WindowStyle::Borderless)
+    .resizable(false)
+    .background(Color::transparent());
+    popup.closable = false;
+    (popup, state)
+}
+
+/// The semantic counterpart of [`picker_menu_window`]: the same selection
+/// rows — borderless `Button`s that write the binding and close the menu —
+/// without the frame sizing or panel chrome.
+#[cfg(feature = "accessibility")]
+pub(crate) fn semantic_picker_menu_window(
+    entries: Vec<PickerMenuEntry>,
+    selection: Binding<Id>,
+    open: Rc<Cell<bool>>,
+    group: PopupMenuStateGroup,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let group_for_content = group.clone();
+    let state_for_content = state.clone();
+    let entries_for_content = entries.clone();
+    let popup_content = move || {
+        let mut rows = Vec::with_capacity(entries_for_content.len());
+        for entry in entries_for_content.clone() {
+            let label = entry.label.clone();
+            let target = entry.tag;
+            let row_selection = selection.clone();
+            let row_group = group_for_content.clone();
+            let row_open = Rc::clone(&open);
+            rows.push(AnyView::new(
+                button(label)
+                    .style(ButtonStyle::Borderless)
+                    .action(move || {
+                        if row_selection.get() != target {
+                            row_selection.set(target);
+                        }
+                        row_open.set(false);
+                        row_group.close_all();
+                    }),
+            ));
+        }
+        let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
+            rows.into_iter().collect();
+        AnyView::new(
+            menu_content
+                .alignment(HorizontalAlignment::Leading)
+                .spacing(0.0)
+                .with(group_for_content.clone()),
+        )
+    };
+    let mut popup = Window::new("WaterUI Picker Menu", state_for_content, popup_content)
+        .style(WindowStyle::Borderless)
+        .resizable(false)
+        .background(Color::transparent());
+    popup.closable = false;
     (popup, state)
 }
 
@@ -637,7 +767,7 @@ pub(crate) fn date_picker_window(
     (popup, state)
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn active_popup_menu_visible(&self) -> bool {
         self.popup_menu.active_popup_menu_group.is_some()
     }
@@ -724,6 +854,7 @@ impl HydrolysisRenderer {
         &mut self,
         nodes: Vec<PopupMenuNode>,
         origin: LayoutPoint,
+        metrics: TextContextMenuMetrics,
         env: &Environment,
     ) -> bool {
         if nodes.is_empty() {
@@ -731,7 +862,6 @@ impl HydrolysisRenderer {
         }
         self.dismiss_active_popup_menu();
         let group = PopupMenuStateGroup::new();
-        let metrics = widget_theme(env).text_context_menu_metrics();
         let popup_origin = popup_window_origin(origin, env);
         let (window, state) = popup_menu_window(nodes, popup_origin, group.clone(), 0, metrics);
         group.push(state);
@@ -742,9 +872,63 @@ impl HydrolysisRenderer {
         true
     }
 
+    /// The semantic half of showing a popup menu: the same window the rendered
+    /// runtime opens, minus the metrics-dependent chrome. It mounts through
+    /// `PopupWindowManager` as a semantic window, so the items appear in the
+    /// merged accessibility tree exactly as they do in the rendered runtime —
+    /// the semantic runtime has no pointer to open it and no frame to place.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_popup_menu_nodes(
+        &mut self,
+        nodes: Vec<PopupMenuNode>,
+        env: &Environment,
+    ) -> bool {
+        if nodes.is_empty() {
+            return false;
+        }
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) = semantic_popup_menu_window(nodes, group.clone(), 0);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis popup menus require PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
+    /// The semantic half of showing a picker menu: the same selection window
+    /// the rendered runtime opens, without frame metrics.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_picker_menu(
+        &mut self,
+        entries: Vec<PickerMenuEntry>,
+        selection: Binding<Id>,
+        open: &Rc<Cell<bool>>,
+        env: &Environment,
+    ) -> bool {
+        if entries.is_empty() {
+            return false;
+        }
+        self.dismiss_active_popup_menu();
+        open.set(true);
+        let group = PopupMenuStateGroup::new();
+        let (window, state) =
+            semantic_picker_menu_window(entries, selection, Rc::clone(open), group.clone());
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis picker menus require PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
     pub(crate) fn show_picker_menu(
         &mut self,
         request: PickerMenuRequest,
+        metrics: PickerMetrics,
         env: &Environment,
     ) -> bool {
         if request.entries.is_empty() {
@@ -753,7 +937,6 @@ impl HydrolysisRenderer {
         self.dismiss_active_popup_menu();
         request.open.set(true);
         let group = PopupMenuStateGroup::new();
-        let metrics = widget_theme(env).picker_metrics(PickerStyle::Menu);
         let popup_origin = popup_window_origin(request.origin, env);
         let (window, state) = picker_menu_window(
             request.entries,

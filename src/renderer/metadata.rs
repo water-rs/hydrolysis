@@ -184,29 +184,22 @@ impl HydrolysisRenderer {
         let should_focus = renderer.read_signal(&value.0);
         let start = renderer.text_editing.text_input_targets.len();
         render_content(renderer);
-        let end = renderer.text_editing.text_input_targets.len();
-        let focus_target_count = end - start;
-        assert!(
-            focus_target_count == 1,
-            "hydrolysis .focused() requires exactly one TextField or SecureField in the wrapped subtree, found {focus_target_count}"
-        );
-        let target = renderer
-            .text_editing
-            .text_input_targets
-            .get_mut(start)
-            .expect("hydrolysis focused metadata missing registered text input target");
-        assert!(
-            target.focus_binding.is_none(),
-            "hydrolysis does not allow multiple .focused() modifiers to target the same control"
-        );
-        target.focus_binding = Some(value.0.clone());
-        let target_key = target.interaction_key.clone();
+        renderer.wire_focused_target(value, should_focus, start);
+    }
 
-        if should_focus {
-            renderer.set_focused_text_input_key(Some(target_key));
-        } else if renderer.text_editing.is_focused(&target_key) {
-            renderer.set_focused_text_input_key(None);
-        }
+    /// The semantic counterpart of [`Self::apply_focused`]: the same focus
+    /// wiring over the text-input targets the semantic walk registered, with
+    /// no renderer in hand.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn apply_focused_semantic(
+        renderer: &mut SemanticCore,
+        value: &Focused,
+        render_content: impl FnOnce(&mut SemanticCore),
+    ) {
+        let should_focus = renderer.read_signal(&value.0);
+        let start = renderer.text_editing.text_input_targets.len();
+        render_content(renderer);
+        renderer.wire_focused_target(value, should_focus, start);
     }
 
     /// Render the given content and, when hit-testing is disabled, truncate every
@@ -318,9 +311,19 @@ impl HydrolysisRenderer {
                 None
             } else {
                 node.add_action(AccessibilityAction::Click);
-                let activation_point = accessibility_activation_point(bounds);
-                Some(AccessibilityActionTarget::PointerPrimaryClick {
-                    point: activation_point,
+                // Direct semantic activation: invoke the gesture's own action
+                // with the same layered environment the pointer path uses.
+                let captured_env = env.clone();
+                let action = Rc::clone(&effect.action);
+                Some(AccessibilityActionTarget::Activate {
+                    action: Rc::new(RefCell::new(
+                        move |_renderer: &mut crate::renderer::SemanticCore,
+                              runtime_env: &Environment| {
+                            let action_env = captured_env.layered_on(runtime_env);
+                            action.borrow_mut()(&action_env);
+                            true
+                        },
+                    )),
                 })
             };
             let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
@@ -346,7 +349,7 @@ impl HydrolysisRenderer {
             let color_signal = style.state_layer_color.resolve(env);
             let color = resolved_color_to_peniko(renderer.read_signal(&color_signal));
             let interaction = local_interaction_state(interaction, ctx.hit_transform);
-            let theme = crate::widgets::util::widget_theme(env);
+            let theme = renderer.theme();
             let mut draw = renderer.draw_context(ctx);
             theme.draw_interaction_state_layer(
                 &mut draw,
@@ -392,6 +395,52 @@ impl HydrolysisRenderer {
             return;
         }
         render_content(renderer);
+    }
+
+    /// The semantic counterpart of [`Self::apply_gesture_observer`]: the tap's
+    /// own accessibility node — role, label, `Click` → [`AccessibilityActionTarget::Activate`],
+    /// or `disabled` — with no bounds, no pointer or gesture targets, and no
+    /// interaction state layer. The content walk stays the caller's, wrapped
+    /// in the same descendant-exclusion suppression the rendered path applies.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn emit_gesture_observer_accessibility(
+        renderer: &mut SemanticCore,
+        env: &Environment,
+        effect: &GestureObserverEffect,
+    ) {
+        let disabled = env
+            .get::<waterui_core::interaction::Disabled>()
+            .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
+        if matches!(effect.gesture, Gesture::Tap(_)) && env.get::<AccessibilityRole>().is_some() {
+            let mut node = AccessibilityNode::new(
+                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+            );
+            if let Some(label) =
+                renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+            {
+                node.set_label(label);
+            }
+            node.add_action(AccessibilityAction::Focus);
+            let action_target = if disabled {
+                node.set_disabled();
+                None
+            } else {
+                node.add_action(AccessibilityAction::Click);
+                let captured_env = env.clone();
+                let action = Rc::clone(&effect.action);
+                Some(AccessibilityActionTarget::Activate {
+                    action: Rc::new(RefCell::new(
+                        move |_renderer: &mut crate::renderer::SemanticCore,
+                              runtime_env: &Environment| {
+                            let action_env = captured_env.layered_on(runtime_env);
+                            action.borrow_mut()(&action_env);
+                            true
+                        },
+                    )),
+                })
+            };
+            let _ = renderer.register_accessibility_node_semantic(node, env, action_target);
+        }
     }
 
     /// Register the hover-enter/move/exit target for `handler`, then render the

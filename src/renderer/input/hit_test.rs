@@ -1,5 +1,4 @@
 use super::*;
-use crate::widgets::util::widget_theme;
 use nami::{Computed, Signal as _};
 use waterui::drag_drop::DragData;
 use waterui_backend_core::widget::{
@@ -157,7 +156,7 @@ pub(crate) struct HoverSync {
 }
 
 pub(crate) type PointerAction =
-    Rc<RefCell<dyn FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool>>;
+    Rc<RefCell<dyn FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool>>;
 pub(crate) type KeyboardStepAction = Rc<RefCell<dyn FnMut(bool) -> bool>>;
 pub(crate) type HoverAction = Rc<RefCell<dyn FnMut(&Environment) -> bool>>;
 pub(crate) type HoverMoveAction = Rc<RefCell<dyn FnMut(vello::kurbo::Point, &Environment) -> bool>>;
@@ -374,12 +373,13 @@ impl HitTestState {
             .enumerate()
             .filter(|(_, target)| target.bounds.contains(point))
             .max_by(|(left_index, left), (right_index, right)| {
-                HydrolysisRenderer::target_hit_priority(left.key.depth, left.key.order, *left_index)
-                    .cmp(&HydrolysisRenderer::target_hit_priority(
+                SemanticCore::target_hit_priority(left.key.depth, left.key.order, *left_index).cmp(
+                    &SemanticCore::target_hit_priority(
                         right.key.depth,
                         right.key.order,
                         *right_index,
-                    ))
+                    ),
+                )
             })
             .map(|(index, _)| index)
     }
@@ -392,7 +392,7 @@ impl HitTestState {
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     fn call_drop_action(
         action: &Rc<RefCell<BoxedAction<()>>>,
         captured_env: &Environment,
@@ -553,7 +553,9 @@ impl HydrolysisRenderer {
             self.clear_scrollbar_drag();
         }
     }
+}
 
+impl HydrolysisRenderer {
     pub fn handle_pointer_down(
         &mut self,
         x: f32,
@@ -644,18 +646,18 @@ impl HydrolysisRenderer {
         pointer_indices.sort_unstable_by(|left, right| {
             let left_target = &self.hit_test.pointer_targets[*left];
             let right_target = &self.hit_test.pointer_targets[*right];
-            Self::target_hit_priority(right_target.depth, right_target.order, *right).cmp(
-                &Self::target_hit_priority(left_target.depth, left_target.order, *left),
+            SemanticCore::target_hit_priority(right_target.depth, right_target.order, *right).cmp(
+                &SemanticCore::target_hit_priority(left_target.depth, left_target.order, *left),
             )
         });
         let focused = self.topmost_text_input_index_at_point(point);
         let top_pointer_priority = pointer_indices.first().map(|index| {
             let target = &self.hit_test.pointer_targets[*index];
-            Self::target_hit_priority(target.depth, target.order, *index)
+            SemanticCore::target_hit_priority(target.depth, target.order, *index)
         });
         let focused_priority = focused.map(|index| {
             let target = &self.text_editing.text_input_targets[index];
-            Self::target_hit_priority(target.depth, target.order, index)
+            SemanticCore::target_hit_priority(target.depth, target.order, index)
         });
         if let Some((target, local_position)) =
             self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
@@ -742,7 +744,7 @@ impl HydrolysisRenderer {
                         let keep_selection = {
                             let target = &self.text_editing.text_input_targets[index];
                             let selection_index =
-                                Self::text_selection_index_from_point(target, point);
+                                SemanticCore::text_selection_index_from_point(target, point);
                             let slot = target.selection.borrow();
                             selection_range_contains_index(&target.model, &slot, selection_index)
                         };
@@ -768,9 +770,11 @@ impl HydrolysisRenderer {
                     if self.set_focused_text_input(focused) {
                         refresh_requested = true;
                     }
+                    let metrics = self.theme().text_context_menu_metrics();
                     let changed = self.show_popup_menu_nodes(
                         items,
                         LayoutPoint::new(point.x as f32, point.y as f32),
+                        metrics,
                         env,
                     );
                     return refresh_requested || visual_changed || changed;
@@ -1075,7 +1079,9 @@ impl HydrolysisRenderer {
         );
         changed
     }
+}
 
+impl SemanticCore {
     pub(crate) fn set_keyboard_focus(
         &mut self,
         focus: Option<InteractionKey>,
@@ -1309,7 +1315,9 @@ impl HydrolysisRenderer {
         }
         true
     }
+}
 
+impl HydrolysisRenderer {
     pub fn handle_pointer_cancel(&mut self, env: &Environment) -> bool {
         let Some((pointer_id, pointer_kind)) = self.hit_test.active_pointer else {
             return false;
@@ -1347,17 +1355,20 @@ impl HydrolysisRenderer {
             self.request_redraw();
         }
         refresh_requested |= press_clear.chrome_changed;
+        let frame_instant = self.core.frame_instant;
         let gesture_changed = self
+            .core
             .gesture_engine
-            .handle_pointer_cancel(self.frame_instant(), env);
+            .handle_pointer_cancel(frame_instant, env);
         refresh_requested |= gesture_changed;
         let mut hover_visual_changed = false;
-        for target in &mut self.hit_test.hover_targets {
-            let hovering = self.hit_test.interaction.hovering(&target.slot);
+        let hit_test = &mut self.core.hit_test;
+        for target in &mut hit_test.hover_targets {
+            let hovering = hit_test.interaction.hovering(&target.slot);
             if !hovering {
                 continue;
             }
-            self.hit_test.interaction.set_hovering(&target.slot, false);
+            hit_test.interaction.set_hovering(&target.slot, false);
             if let Some(handles) = &target.handles {
                 handles.set_hovering(false, at);
                 hover_visual_changed = true;
@@ -1434,10 +1445,12 @@ impl HydrolysisRenderer {
         }
         self.handle_scroll(x, y, dx, dy, false)
     }
+}
 
+impl SemanticCore {
     pub(crate) fn register_pointer_target<F>(&mut self, bounds: vello::kurbo::Rect, action: F)
     where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_pointer_target_action(
             bounds,
@@ -1450,7 +1463,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn register_pointer_drag_target<F>(&mut self, bounds: vello::kurbo::Rect, action: F)
     where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_pointer_target_action(
             bounds,
@@ -1523,7 +1536,7 @@ impl HydrolysisRenderer {
         bounds: vello::kurbo::Rect,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1574,7 +1587,7 @@ impl HydrolysisRenderer {
             true,
             None,
             Rc::new(RefCell::new(
-                move |renderer: &mut HydrolysisRenderer,
+                move |renderer: &mut SemanticCore,
                       point: vello::kurbo::Point,
                       env: &Environment| {
                     renderer.begin_or_update_drag(data.get(), point, env)
@@ -1610,7 +1623,9 @@ impl HydrolysisRenderer {
             on_exit: handles.on_exit.clone(),
         });
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn bind_interaction_target(
         &mut self,
         key: InteractionKey,
@@ -1692,9 +1707,9 @@ impl HydrolysisRenderer {
             // the control was disabled does not resurface on re-enable.
             self.hit_test.interaction.set_hovering(&hover_slot, false);
         }
-        let motion = widget_theme(env).interaction_motion();
+        let motion = self.theme().interaction_motion();
         let now = self.frame_instant();
-        let (state, mut press_slot, handles) = self.hit_test.interaction.bind_widget_state(
+        let (state, mut press_slot, handles) = self.core.hit_test.interaction.bind_widget_state(
             &key,
             WidgetInteractionInput {
                 bounds,
@@ -1703,7 +1718,7 @@ impl HydrolysisRenderer {
                 disabled,
             },
             &motion,
-            &mut self.animation_controller,
+            &mut self.core.animation_controller,
             now,
         );
         if let Some(modal) = env
@@ -1738,14 +1753,16 @@ impl HydrolysisRenderer {
         }
         (state, press_slot, handles)
     }
+}
 
+impl SemanticCore {
     pub(crate) fn register_interactive_pointer_target<F>(
         &mut self,
         bounds: vello::kurbo::Rect,
         press_slot: PressSlot,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_interactive_pointer_target_with_keyboard(bounds, press_slot, true, action);
     }
@@ -1757,7 +1774,7 @@ impl HydrolysisRenderer {
         keyboard_focusable: bool,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1786,7 +1803,7 @@ impl HydrolysisRenderer {
         action: F,
         keyboard_step: K,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
         K: 'static + FnMut(bool) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {

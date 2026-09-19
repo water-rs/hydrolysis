@@ -88,11 +88,19 @@ enum AccessibilityLocalNodeKey {
     Semantic(i64),
 }
 
+/// A semantic activation handler: the closure a widget's accessibility node
+/// runs for `Click`, independent of geometry or pointer input.
+#[cfg(feature = "accessibility")]
+pub(crate) type AccessibilityActivation =
+    Rc<RefCell<dyn FnMut(&mut SemanticCore, &Environment) -> bool>>;
+
 #[cfg(feature = "accessibility")]
 #[derive(Clone)]
 pub(crate) enum AccessibilityActionTarget {
-    PointerPrimaryClick {
-        point: vello::kurbo::Point,
+    /// Direct semantic activation: `Click` invokes the widget's own activation
+    /// handler, no pointer and no coordinates.
+    Activate {
+        action: AccessibilityActivation,
     },
     Toggle {
         binding: nami::Binding<bool>,
@@ -111,7 +119,10 @@ pub(crate) enum AccessibilityActionTarget {
         value: nami::Binding<DateTime>,
         range: RangeInclusive<DateTime>,
         ty: DatePickerType,
-        origin: LayoutPoint,
+        /// The popup's window anchor when the node was emitted by a rendered
+        /// frame; `None` in the semantic tree, where activation only marks the
+        /// popup state — a window is presentation.
+        origin: Option<LayoutPoint>,
     },
     TextField {
         value: nami::Binding<StyledStr>,
@@ -335,10 +346,16 @@ impl AccessibilityBuilder {
         }
     }
 
+    /// Registers `node` and returns its stable id.
+    ///
+    /// `bounds` is the flushed hit rect — `Some` for the rendered runtime,
+    /// `None` for the semantic runtime, whose nodes carry no geometry at all.
+    /// A `Some` rect with non-positive extent is not an element and registers
+    /// nothing, matching the layout-driven emission's contract.
     pub(crate) fn register_node_internal(
         &mut self,
         mut node: AccessibilityNode,
-        bounds: vello::kurbo::Rect,
+        bounds: Option<vello::kurbo::Rect>,
         env: &Environment,
         action_target: Option<AccessibilityActionTarget>,
         attach_to_root: bool,
@@ -347,7 +364,7 @@ impl AccessibilityBuilder {
         if self.suppression_depth > 0 {
             return None;
         }
-        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        if bounds.is_some_and(|bounds| bounds.width() <= 0.0 || bounds.height() <= 0.0) {
             return None;
         }
         // This node represents the view the enclosing naming scope wraps, so it
@@ -376,7 +393,9 @@ impl AccessibilityBuilder {
             node.set_author_id(scope.value().as_str().to_string());
         }
         let node_id = self.stable_node_id(semantic_key);
-        node.set_bounds(kurbo_rect_to_accesskit_rect(bounds));
+        if let Some(bounds) = bounds {
+            node.set_bounds(kurbo_rect_to_accesskit_rect(bounds));
+        }
         self.nodes.push((node_id, node));
         if attach_to_root {
             if let Some(parent_id) = self.parent_stack.last().copied() {
@@ -487,7 +506,9 @@ impl AccessibilityBuilder {
             .retain(|key, _| self.active_node_keys.contains(key));
         let mut root = AccessibilityNode::new(AccessibilityNodeRole::Window);
         root.set_label(self.root_label.clone());
-        root.set_bounds(kurbo_rect_to_accesskit_rect(self.root_bounds));
+        if self.root_bounds.width() > 0.0 && self.root_bounds.height() > 0.0 {
+            root.set_bounds(kurbo_rect_to_accesskit_rect(self.root_bounds));
+        }
         root.set_children(self.root_children.clone());
         let mut nodes = Vec::with_capacity(self.nodes.len() + 1);
         nodes.push((ACCESSIBILITY_ROOT_NODE_ID, root));
@@ -552,7 +573,7 @@ pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Op
     Some(child_env)
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     #[cfg(feature = "accessibility")]
     pub fn set_accessibility_root_label(&mut self, label: &str) {
         self.accessibility.root_label.clear();
@@ -634,9 +655,14 @@ impl HydrolysisRenderer {
             return false;
         };
         let changed = match target {
-            AccessibilityActionTarget::PointerPrimaryClick { point } => {
-                handle_accessibility_pointer_action(self, action, point, env)
-            }
+            AccessibilityActionTarget::Activate { action: activation } => match action {
+                AccessibilityAction::Click => (activation.borrow_mut())(self, env),
+                AccessibilityAction::Focus => true,
+                _ => panic!(
+                    "hydrolysis accessibility activation does not support action {:?}",
+                    action
+                ),
+            },
             AccessibilityActionTarget::Toggle { binding } => match action {
                 AccessibilityAction::Click => {
                     let next = !binding.get();
@@ -787,6 +813,26 @@ impl HydrolysisRenderer {
         bounds: vello::kurbo::Rect,
         env: &Environment,
     ) -> AccessibilityContainerScope {
+        self.begin_accessibility_container_inner(Some(bounds), env)
+    }
+
+    /// The semantic counterpart of [`Self::begin_accessibility_container`]:
+    /// the same scope logic with no rect — a semantic container has no
+    /// zero-extent case to suppress, and its node carries no bounds.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn begin_accessibility_container_semantic(
+        &mut self,
+        env: &Environment,
+    ) -> AccessibilityContainerScope {
+        self.begin_accessibility_container_inner(None, env)
+    }
+
+    #[cfg(feature = "accessibility")]
+    fn begin_accessibility_container_inner(
+        &mut self,
+        bounds: Option<vello::kurbo::Rect>,
+        env: &Environment,
+    ) -> AccessibilityContainerScope {
         debug_assert!(
             accessibility_container_child_environment(env).is_some(),
             "hydrolysis accessibility container scope requires a role or a label"
@@ -824,7 +870,7 @@ impl HydrolysisRenderer {
         let excludes_descendants = env
             .get::<AccessibilityChildren>()
             .is_some_and(AccessibilityChildren::excludes_descendants);
-        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        if bounds.is_some_and(|bounds| bounds.width() <= 0.0 || bounds.height() <= 0.0) {
             self.push_accessibility_suppression();
             return AccessibilityContainerScope {
                 parent_pushed: false,
@@ -832,10 +878,15 @@ impl HydrolysisRenderer {
                 container_node: None,
             };
         }
-        let Some(node_id) = self.register_accessibility_node(node, bounds, env, None) else {
-            // Bounds are positive and the scope is unclaimed, so registration can
-            // only have declined because the whole subtree is suppressed — where
-            // the children emit nothing either, leaving no node to parent them to.
+        self.watch_accessibility_state(env);
+        let Some(node_id) = self
+            .accessibility
+            .register_node_internal(node, bounds, env, None, true, None)
+        else {
+            // Bounds are positive (or semantic `None`) and the scope is unclaimed,
+            // so registration can only have declined because the whole subtree is
+            // suppressed — where the children emit nothing either, leaving no
+            // node to parent them to.
             assert!(
                 self.accessibility.suppression_depth > 0,
                 "hydrolysis accessibility container at positive bounds must register a node"
@@ -880,8 +931,51 @@ impl HydrolysisRenderer {
         action_target: Option<AccessibilityActionTarget>,
     ) -> Option<AccessibilityNodeId> {
         self.watch_accessibility_state(env);
+        self.accessibility.register_node_internal(
+            node,
+            Some(bounds),
+            env,
+            action_target,
+            true,
+            None,
+        )
+    }
+
+    /// Registers a leaf accessibility node in either runtime: bounds from
+    /// `ctx` when a rendered frame supplies one, or none when the semantic
+    /// walk emits the same node without layout.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn register_accessibility_leaf(
+        &mut self,
+        ctx: Option<crate::renderer::RenderContext>,
+        node: AccessibilityNode,
+        env: &Environment,
+        action_target: Option<AccessibilityActionTarget>,
+    ) -> Option<AccessibilityNodeId> {
+        match ctx {
+            Some(ctx) => self.register_accessibility_node(
+                node,
+                crate::renderer::transformed_rect(ctx.hit_transform, ctx.bounds),
+                env,
+                action_target,
+            ),
+            None => self.register_accessibility_node_semantic(node, env, action_target),
+        }
+    }
+
+    /// The semantic counterpart of [`Self::register_accessibility_node`]: the
+    /// same node and action target, with no bounds — the semantic runtime has
+    /// no layout to take a rect from.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn register_accessibility_node_semantic(
+        &mut self,
+        node: AccessibilityNode,
+        env: &Environment,
+        action_target: Option<AccessibilityActionTarget>,
+    ) -> Option<AccessibilityNodeId> {
+        self.watch_accessibility_state(env);
         self.accessibility
-            .register_node_internal(node, bounds, env, action_target, true, None)
+            .register_node_internal(node, None, env, action_target, true, None)
     }
 
     #[cfg(feature = "accessibility")]
@@ -893,8 +987,26 @@ impl HydrolysisRenderer {
         action_target: Option<AccessibilityActionTarget>,
     ) -> Option<AccessibilityNodeId> {
         self.watch_accessibility_state(env);
+        self.accessibility.register_node_internal(
+            node,
+            Some(bounds),
+            env,
+            action_target,
+            false,
+            None,
+        )
+    }
+
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn register_accessibility_child_node_semantic(
+        &mut self,
+        node: AccessibilityNode,
+        env: &Environment,
+        action_target: Option<AccessibilityActionTarget>,
+    ) -> Option<AccessibilityNodeId> {
+        self.watch_accessibility_state(env);
         self.accessibility
-            .register_node_internal(node, bounds, env, action_target, false, None)
+            .register_node_internal(node, None, env, action_target, false, None)
     }
 
     #[cfg(feature = "accessibility")]
@@ -909,7 +1021,26 @@ impl HydrolysisRenderer {
         self.watch_accessibility_state(env);
         self.accessibility.register_node_internal(
             node,
-            bounds,
+            Some(bounds),
+            env,
+            action_target,
+            false,
+            Some(semantic_key),
+        )
+    }
+
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn register_accessibility_child_node_with_key_semantic(
+        &mut self,
+        semantic_key: i64,
+        node: AccessibilityNode,
+        env: &Environment,
+        action_target: Option<AccessibilityActionTarget>,
+    ) -> Option<AccessibilityNodeId> {
+        self.watch_accessibility_state(env);
+        self.accessibility.register_node_internal(
+            node,
+            None,
             env,
             action_target,
             false,
@@ -1075,11 +1206,6 @@ impl HydrolysisRenderer {
 }
 
 #[cfg(feature = "accessibility")]
-pub(crate) fn accessibility_activation_point(bounds: vello::kurbo::Rect) -> vello::kurbo::Point {
-    vello::kurbo::Point::new((bounds.x0 + bounds.x1) * 0.5, (bounds.y0 + bounds.y1) * 0.5)
-}
-
-#[cfg(feature = "accessibility")]
 fn accessibility_role_to_accesskit_role(role: AccessibilityRole) -> AccessibilityNodeRole {
     match role {
         AccessibilityRole::Button => AccessibilityNodeRole::Button,
@@ -1113,32 +1239,6 @@ fn accessibility_role_to_accesskit_role(role: AccessibilityRole) -> Accessibilit
         AccessibilityRole::Group => AccessibilityNodeRole::Group,
         AccessibilityRole::Dialog => AccessibilityNodeRole::Dialog,
         _ => panic!("hydrolysis accessibility role variant is not implemented"),
-    }
-}
-
-#[cfg(feature = "accessibility")]
-fn handle_accessibility_pointer_action(
-    renderer: &mut HydrolysisRenderer,
-    action: AccessibilityAction,
-    point: vello::kurbo::Point,
-    env: &Environment,
-) -> bool {
-    let x = point.x as f32;
-    let y = point.y as f32;
-    match action {
-        AccessibilityAction::Click => {
-            let mut changed = renderer.handle_pointer_down(x, y, PointerButton::Primary, env);
-            changed |= renderer.handle_pointer_up(x, y, PointerButton::Primary, env);
-            changed
-        }
-        // Accessibility focus moves only the accessibility focus ring; it must
-        // not synthesize a pointer press, which would steal the text-input UI
-        // focus (UI focus and accessibility focus are independent).
-        AccessibilityAction::Focus => true,
-        _ => panic!(
-            "hydrolysis accessibility pointer target does not support action {:?}",
-            action
-        ),
     }
 }
 
@@ -1285,19 +1385,23 @@ fn handle_accessibility_stepper_action(
     reason = "threads the full accessibility-action context; grouping into a struct would not improve clarity"
 )]
 fn handle_accessibility_date_picker_action(
-    renderer: &mut HydrolysisRenderer,
+    renderer: &mut SemanticCore,
     value: &nami::Binding<DateTime>,
     range: &RangeInclusive<DateTime>,
     ty: DatePickerType,
-    origin: LayoutPoint,
+    origin: Option<LayoutPoint>,
     action: AccessibilityAction,
     data: Option<AccessibilityActionData>,
     env: &Environment,
 ) -> bool {
     match action {
-        AccessibilityAction::Click => {
-            renderer.show_date_picker(value.clone(), range.clone(), ty, origin, env)
-        }
+        AccessibilityAction::Click => renderer.show_date_picker(
+            value.clone(),
+            range.clone(),
+            ty,
+            origin.unwrap_or_else(|| LayoutPoint::new(0.0, 0.0)),
+            env,
+        ),
         AccessibilityAction::Focus => true,
         AccessibilityAction::SetValue => {
             let Some(AccessibilityActionData::Value(text)) = data else {
@@ -1327,7 +1431,7 @@ fn handle_accessibility_date_picker_action(
 
 #[cfg(feature = "accessibility")]
 fn handle_accessibility_text_field_action(
-    renderer: &mut HydrolysisRenderer,
+    renderer: &mut SemanticCore,
     node_id: AccessibilityNodeId,
     value: &nami::Binding<StyledStr>,
     line_limit: Option<usize>,
@@ -1376,7 +1480,7 @@ fn handle_accessibility_text_field_action(
 
 #[cfg(feature = "accessibility")]
 fn handle_accessibility_secure_field_action(
-    renderer: &mut HydrolysisRenderer,
+    renderer: &mut SemanticCore,
     node_id: AccessibilityNodeId,
     value: &nami::Binding<FormSecure>,
     action: AccessibilityAction,

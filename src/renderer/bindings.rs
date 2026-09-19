@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(super) fn target_hit_priority(
         depth: usize,
         order: usize,

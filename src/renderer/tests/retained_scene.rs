@@ -37,7 +37,7 @@ use waterui_layout::container::LazyContainer;
 use waterui_layout::frame::Frame;
 use waterui_layout::stack::ZStackLayout;
 
-use super::{pumped_test_environment, test_environment};
+use super::{MinimalTestTheme, pumped_test_environment, test_environment};
 use crate::HeadlessRuntime;
 
 /// Aggregated frame-economy metrics over a run of parametric (post-trigger) frames.
@@ -145,7 +145,8 @@ fn run_scenario(
         AnyViewBuilder::<AnyView>::new(move || make_view(&value))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     // Initial structural build.
@@ -188,7 +189,7 @@ fn dynamic_runtime(
         AnyViewBuilder::<AnyView>::new(move || make_view(&value))
     };
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, 400, 640)
+    HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default())
 }
 
 /// Phase 3: a same-size content change to one `Dynamic` node is applied as an isolated
@@ -255,7 +256,8 @@ fn dynamic_size_change_reflows_without_rebuild() {
         AnyViewBuilder::<AnyView>::new(move || dynamic_changing_size_visible(&value))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
 
@@ -305,7 +307,7 @@ fn collection_runtime(list: &List<SelfId<u64>>) -> HeadlessRuntime {
         AnyViewBuilder::<AnyView>::new(move || collection_overlay(&list))
     };
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, 400, 640)
+    HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default())
 }
 
 /// Adding an item to a reactive collection in a constant-size overlay reconciles
@@ -391,7 +393,8 @@ fn fixed_scroll_refreshes_window_frame_without_rebuild() {
         ))))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
@@ -504,7 +507,8 @@ fn steady_state_transform_animation_retains_the_tree() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -559,7 +563,8 @@ fn dynamic_growth_from_empty_renders_content_without_rebuild() {
         AnyView::new(zstack((().size(360.0, 600.0), dynamic.clone())))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
@@ -635,7 +640,8 @@ fn reused_collection_item_reactive_background_tracks_on_selection() {
         AnyViewBuilder::<AnyView>::new(move || reactive_bg_collection(&selected))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
 
@@ -696,7 +702,8 @@ fn collection_membership_exit_animates_then_settles() {
         AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&list))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let before = runtime
         .pump_at(true, start)
@@ -755,7 +762,8 @@ fn collection_membership_enter_animates_then_settles() {
         AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&list))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let before = runtime
         .pump_at(true, start)

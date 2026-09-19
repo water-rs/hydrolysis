@@ -1,8 +1,8 @@
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, WidgetRenderContext,
-    local_interaction_state, measure_label_intrinsic, transformed_rect,
+    HydroNativeView, HydroState, RenderContext, WidgetRenderContext, local_interaction_state,
+    measure_label_intrinsic, transformed_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -18,7 +18,7 @@ use waterui_core::layout::{ProposalSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native};
 
 use crate::renderer::RetainedSubview;
-use crate::widgets::util::{widget_disabled, widget_theme};
+use crate::widgets::util::widget_disabled;
 
 /// The retained render state of a stepper: the cloneable [`StepperConfig`] drives the
 /// +/- buttons + accessibility, and its main label is held as a [`RetainedSubview`]
@@ -38,7 +38,11 @@ impl StepperRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
@@ -48,8 +52,9 @@ impl HydroNativeView for Native<StepperConfig> {
         state: &mut crate::renderer::HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_stepper_intrinsic(view.as_inner(), state, env)
+        measure_stepper_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -57,8 +62,8 @@ impl HydroNativeView for Native<StepperConfig> {
 /// path ([`Native<StepperConfig>::accessibility`]) and the retained `Widget`-node
 /// path so both produce the same a11y tree.
 pub(crate) fn stepper_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     stepper: &StepperConfig,
     env: &Environment,
 ) {
@@ -104,8 +109,7 @@ pub(crate) fn stepper_accessibility(
                 range: stepper.range.clone(),
             })
         };
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+        let _ = renderer.register_accessibility_leaf(ctx, node, env, action_target);
     }
     #[cfg(not(feature = "accessibility"))]
     {
@@ -120,10 +124,10 @@ pub(crate) fn measure_stepper_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let metrics = theme.stepper_metrics();
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     let controls_width = metrics.button_intrinsic_size * 2.0 + metrics.button_spacing;
     let label_width = f64::from(label_size.width);
     let width = if label_width > 0.0 {
@@ -148,7 +152,12 @@ pub(crate) fn render_stepper_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        stepper_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        stepper_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            &state.borrow().config,
+            env,
+        );
     }
     render_stepper_parts(ctx, state, env);
 }
@@ -160,7 +169,7 @@ pub(crate) fn render_stepper_parts(
 ) {
     let minus_interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
     let plus_interaction_key = crate::renderer::InteractionKey::for_rc(state, 1);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let mut state = state.borrow_mut();
     let (range, value, step) = {
         let stepper = &state.config;
@@ -335,10 +344,10 @@ pub(crate) fn measure_stepper_intrinsic(
     stepper: &StepperConfig,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let theme = widget_theme(env);
     let metrics = theme.stepper_metrics();
-    let label_size = measure_label_intrinsic(&stepper.label, state, env);
+    let label_size = measure_label_intrinsic(&stepper.label, state, env, theme);
     let controls_width = metrics.button_intrinsic_size * 2.0 + metrics.button_spacing;
     let label_width = f64::from(label_size.width);
     let width = if label_width > 0.0 {
@@ -348,4 +357,16 @@ pub(crate) fn measure_stepper_intrinsic(
     };
     let height = f64::from(label_size.height).max(metrics.button_intrinsic_size);
     LayoutSize::new(width as f32, height as f32)
+}
+
+/// Emits a retained stepper's accessibility node for the semantic walk — the
+/// same node `stepper_accessibility` registers, with no bounds. The label
+/// sub-view flushes visual-only, so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_stepper_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<StepperRenderState>>,
+    env: &Environment,
+) {
+    stepper_accessibility(renderer, None, &state.borrow().config, env);
 }
