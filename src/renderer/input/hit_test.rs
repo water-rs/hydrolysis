@@ -1081,18 +1081,119 @@ impl HydrolysisRenderer {
     }
 }
 
+/// One stop in keyboard-focus traversal — the semantic node plus the
+/// interaction identities it resolves to. `key` is `None` for a focusable
+/// node that never registered a pointer target, which only happens when the
+/// accessibility feature is off or the widget is pointer-inert.
+struct KeyboardFocusCandidate {
+    key: Option<InteractionKey>,
+    #[cfg(feature = "accessibility")]
+    node: AccessibilityNodeId,
+    text_input: Option<usize>,
+    /// Emission order — only consulted when the candidate list itself is not
+    /// already in tree order (the pointer/text-input path).
+    #[cfg(not(feature = "accessibility"))]
+    order: usize,
+}
+
 impl SemanticCore {
+    /// The accessibility node `key` emitted this frame, when the widget
+    /// stamped a focus link or owns a text-input target.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn focus_node_for_key(&self, key: &InteractionKey) -> Option<AccessibilityNodeId> {
+        self.accessibility
+            .interaction_nodes
+            .get(key)
+            .copied()
+            .or_else(|| {
+                self.text_editing
+                    .text_input_targets
+                    .iter()
+                    .find(|target| &target.interaction_key == key)
+                    .and_then(|target| target.accessibility_node_id)
+            })
+    }
+
+    /// The interaction identity behind `node` — the press slot or text-input
+    /// target the widget linked its emitted node to.
+    #[cfg(feature = "accessibility")]
+    fn focus_key_for_node(&self, node: AccessibilityNodeId) -> Option<InteractionKey> {
+        self.accessibility
+            .interaction_nodes
+            .iter()
+            .find(|(_, linked)| **linked == node)
+            .map(|(key, _)| key.clone())
+            .or_else(|| {
+                self.text_editing
+                    .text_input_targets
+                    .iter()
+                    .find(|target| target.accessibility_node_id == Some(node))
+                    .map(|target| target.interaction_key.clone())
+            })
+    }
+
+    /// Moves keyboard focus to `node` — the semantic-tree identity every
+    /// focus path converges on. The pointer machinery's `InteractionKey` is
+    /// resolved from it where the widget linked one, so a focusable node
+    /// needs no pointer target to take keyboard focus.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn set_keyboard_focus_node(
+        &mut self,
+        node: Option<AccessibilityNodeId>,
+        visible: bool,
+    ) -> bool {
+        let key = node.and_then(|node| self.focus_key_for_node(node));
+        let text_input = node.and_then(|node| {
+            self.text_editing
+                .text_input_targets
+                .iter()
+                .position(|target| target.accessibility_node_id == Some(node))
+        });
+        let mut changed = self.set_keyboard_focus_impl(key, node, visible);
+        changed |= self.set_focused_text_input(text_input);
+        changed
+    }
+
+    /// The currently focused semantic node — `None` while window-level focus
+    /// rests on the tree root.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn keyboard_focus_node(&self) -> Option<AccessibilityNodeId> {
+        (self.accessibility.focus != ACCESSIBILITY_ROOT_NODE_ID).then_some(self.accessibility.focus)
+    }
+
     pub(crate) fn set_keyboard_focus(
         &mut self,
         focus: Option<InteractionKey>,
         visible: bool,
     ) -> bool {
+        #[cfg(feature = "accessibility")]
+        let node = focus.as_ref().and_then(|key| self.focus_node_for_key(key));
+        self.set_keyboard_focus_impl(
+            focus,
+            #[cfg(feature = "accessibility")]
+            node,
+            visible,
+        )
+    }
+
+    fn set_keyboard_focus_impl(
+        &mut self,
+        focus: Option<InteractionKey>,
+        #[cfg(feature = "accessibility")] node: Option<AccessibilityNodeId>,
+        visible: bool,
+    ) -> bool {
         let visible = focus.is_some() && visible;
-        if self.hit_test.keyboard_focus == focus && self.hit_test.keyboard_focus_visible == visible
+        #[cfg(feature = "accessibility")]
+        let node_changed = self.accessibility.focus != node.unwrap_or(ACCESSIBILITY_ROOT_NODE_ID);
+        #[cfg(not(feature = "accessibility"))]
+        let node_changed = false;
+        if self.hit_test.keyboard_focus == focus
+            && self.hit_test.keyboard_focus_visible == visible
+            && !node_changed
         {
             return false;
         }
-        if self.hit_test.keyboard_focus != focus {
+        if self.hit_test.keyboard_focus != focus || node_changed {
             if let Some(binding) = self.hit_test.keyboard_focus_binding.take() {
                 binding.set(false);
             }
@@ -1109,6 +1210,18 @@ impl SemanticCore {
                         .is_some_and(|focused| &slot.key == focused)
                 })
                 .and_then(|slot| slot.focus_binding.clone());
+            #[cfg(feature = "accessibility")]
+            {
+                if self.hit_test.keyboard_focus_binding.is_none() {
+                    self.hit_test.keyboard_focus_binding = node.and_then(|node| {
+                        self.accessibility
+                            .focus_bindings
+                            .get(&node)
+                            .map(|binding| binding.focused().clone())
+                    });
+                }
+                self.accessibility.focus = node.unwrap_or(ACCESSIBILITY_ROOT_NODE_ID);
+            }
             if let Some(binding) = self.hit_test.keyboard_focus_binding.as_ref() {
                 binding.set(true);
             }
@@ -1118,7 +1231,75 @@ impl SemanticCore {
         true
     }
 
-    fn keyboard_focus_candidates(&self) -> Vec<(InteractionKey, Option<usize>, usize)> {
+    /// The traversal order is the semantic order of the emitted tree: the
+    /// nodes that advertise `Focus`, in emission order. The rendered runtime
+    /// emits the same tree, so both runtimes share this single source — the
+    /// pointer-target list plays no part in it.
+    #[cfg(feature = "accessibility")]
+    fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
+        let modal_active = self.hit_test.modal_interaction.is_some()
+            || self
+                .hit_test
+                .pointer_targets
+                .iter()
+                .any(|target| target.modal)
+            || self
+                .text_editing
+                .text_input_targets
+                .iter()
+                .any(|target| target.modal);
+        self.accessibility
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.supports_action(AccessibilityAction::Focus))
+            .filter_map(|(node_id, _)| {
+                let node_id = *node_id;
+                let text_input = self
+                    .text_editing
+                    .text_input_targets
+                    .iter()
+                    .position(|target| target.accessibility_node_id == Some(node_id));
+                let key = self.focus_key_for_node(node_id);
+                // A widget may bind its interaction identity out of keyboard
+                // focus while still advertising `Focus` to assistive clients —
+                // the pointer opt-out wins for keyboard traversal.
+                if key.as_ref().is_some_and(|key| {
+                    self.hit_test.pointer_targets.iter().any(|target| {
+                        !target.keyboard_focusable
+                            && target
+                                .press_slot
+                                .as_ref()
+                                .is_some_and(|slot| &slot.key == key)
+                    })
+                }) {
+                    return None;
+                }
+                if modal_active {
+                    let modal = key.as_ref().is_some_and(|key| {
+                        self.hit_test.pointer_targets.iter().any(|target| {
+                            target.modal
+                                && target
+                                    .press_slot
+                                    .as_ref()
+                                    .is_some_and(|slot| &slot.key == key)
+                        })
+                    }) || text_input
+                        .is_some_and(|index| self.text_editing.text_input_targets[index].modal);
+                    if !modal {
+                        return None;
+                    }
+                }
+                Some(KeyboardFocusCandidate {
+                    key,
+                    node: node_id,
+                    text_input,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "accessibility"))]
+    fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
         let modal_active = self
             .hit_test
             .pointer_targets
@@ -1129,43 +1310,65 @@ impl SemanticCore {
                 .text_input_targets
                 .iter()
                 .any(|target| target.modal);
-        let mut candidates = Vec::new();
+        let mut candidates = Vec::<KeyboardFocusCandidate>::new();
         for target in &self.hit_test.pointer_targets {
             let Some(slot) = target.press_slot.as_ref() else {
                 continue;
             };
             if (modal_active && !target.modal)
                 || !target.keyboard_focusable
-                || candidates.iter().any(|(key, _, _)| key == &slot.key)
+                || candidates
+                    .iter()
+                    .any(|candidate| candidate.key.as_ref() == Some(&slot.key))
             {
                 continue;
             }
-            candidates.push((slot.key.clone(), None, target.order));
+            candidates.push(KeyboardFocusCandidate {
+                key: Some(slot.key.clone()),
+                text_input: None,
+                order: target.order,
+            });
         }
         for (index, target) in self.text_editing.text_input_targets.iter().enumerate() {
             if (modal_active && !target.modal)
                 || candidates
                     .iter()
-                    .any(|(key, _, _)| key == &target.interaction_key)
+                    .any(|candidate| candidate.key.as_ref() == Some(&target.interaction_key))
             {
                 continue;
             }
-            candidates.push((target.interaction_key.clone(), Some(index), target.order));
+            candidates.push(KeyboardFocusCandidate {
+                key: Some(target.interaction_key.clone()),
+                text_input: Some(index),
+                order: target.order,
+            });
         }
-        candidates.sort_unstable_by_key(|(_, _, order)| *order);
+        candidates.sort_unstable_by_key(|candidate| candidate.order);
         candidates
     }
 
     fn move_keyboard_focus(&mut self, reverse: bool) -> bool {
         let candidates = self.keyboard_focus_candidates();
         if candidates.is_empty() {
-            return self.set_keyboard_focus(None, false);
+            #[cfg(feature = "accessibility")]
+            {
+                return self.set_keyboard_focus_node(None, false);
+            }
+            #[cfg(not(feature = "accessibility"))]
+            {
+                return self.set_keyboard_focus(None, false);
+            }
         }
-        let current = self
-            .hit_test
-            .keyboard_focus
-            .as_ref()
-            .and_then(|focused| candidates.iter().position(|(key, _, _)| key == focused));
+        #[cfg(feature = "accessibility")]
+        let current = candidates
+            .iter()
+            .position(|candidate| Some(candidate.node) == self.keyboard_focus_node());
+        #[cfg(not(feature = "accessibility"))]
+        let current = self.hit_test.keyboard_focus.as_ref().and_then(|focused| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.key.as_ref() == Some(focused))
+        });
         let next = if reverse {
             current.map_or(candidates.len() - 1, |index| {
                 index.checked_sub(1).unwrap_or(candidates.len() - 1)
@@ -1173,10 +1376,14 @@ impl SemanticCore {
         } else {
             current.map_or(0, |index| (index + 1) % candidates.len())
         };
-        let (key, text_input, _) = &candidates[next];
-        let mut changed = self.set_keyboard_focus(Some(key.clone()), true);
-        changed |= self.set_focused_text_input(*text_input);
-        changed
+        let candidate = &candidates[next];
+        let text_input = candidate.text_input;
+        #[cfg(feature = "accessibility")]
+        let changed =
+            self.set_keyboard_focus_impl(candidate.key.clone(), Some(candidate.node), true);
+        #[cfg(not(feature = "accessibility"))]
+        let changed = self.set_keyboard_focus(candidate.key.clone(), true);
+        changed | self.set_focused_text_input(text_input)
     }
 
     pub(crate) fn handle_keyboard_key_down(
@@ -1192,19 +1399,29 @@ impl SemanticCore {
             modal.handle_escape(env);
             return true;
         }
-        if matches!(key, KeyCode::Named(value) if value == "Escape")
-            && let Some(focused) = self.hit_test.keyboard_focus.as_ref()
-            && let Some(action) = self
-                .hit_test
-                .pointer_targets
-                .iter()
-                .rev()
-                .filter_map(|target| target.press_slot.as_ref())
-                .find(|slot| &slot.key == focused)
-                .and_then(|slot| slot.escape_action.clone())
-        {
-            action.call(env);
-            return true;
+        if matches!(key, KeyCode::Named(value) if value == "Escape") {
+            #[cfg(feature = "accessibility")]
+            if let Some(action) = self
+                .keyboard_focus_node()
+                .and_then(|node| self.accessibility.focus_bindings.get(&node))
+                .and_then(|binding| binding.escape_action_handle().cloned())
+            {
+                action.call(env);
+                return true;
+            }
+            if let Some(focused) = self.hit_test.keyboard_focus.as_ref()
+                && let Some(action) = self
+                    .hit_test
+                    .pointer_targets
+                    .iter()
+                    .rev()
+                    .filter_map(|target| target.press_slot.as_ref())
+                    .find(|slot| &slot.key == focused)
+                    .and_then(|slot| slot.escape_action.clone())
+            {
+                action.call(env);
+                return true;
+            }
         }
         if matches!(key, KeyCode::Named(value) if value == "Tab")
             && !(modifiers.control || modifiers.alt || modifiers.super_key)
@@ -1218,6 +1435,35 @@ impl SemanticCore {
         let step_backward =
             matches!(key, KeyCode::Named(value) if value == "ArrowLeft" || value == "ArrowDown");
         if step_forward || step_backward {
+            #[cfg(feature = "accessibility")]
+            {
+                if let Some(node) = self.keyboard_focus_node() {
+                    let step_action = if step_forward {
+                        AccessibilityAction::Increment
+                    } else {
+                        AccessibilityAction::Decrement
+                    };
+                    if self
+                        .accessibility
+                        .nodes
+                        .iter()
+                        .any(|(id, emitted)| *id == node && emitted.supports_action(step_action))
+                    {
+                        return self.handle_accessibility_action(
+                            AccessibilityActionRequest {
+                                action: step_action,
+                                target_node: node,
+                                target_tree: AccessibilityTreeId::ROOT,
+                                data: None,
+                            },
+                            env,
+                        );
+                    }
+                }
+            }
+            // A widget may bind a keyboard-step affordance without advertising
+            // the matching semantic actions — the pointer-bound fallback
+            // covers it.
             let modal_active = self.hit_test.modal_interaction.is_some();
             let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
                 return false;
@@ -1247,50 +1493,78 @@ impl SemanticCore {
         if !activates || modifiers.control || modifiers.alt || modifiers.super_key {
             return false;
         }
-        let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
-            return false;
-        };
-        let modal_active = self.hit_test.modal_interaction.is_some();
-        let Some(target) = self
-            .hit_test
-            .pointer_targets
-            .iter()
-            .rev()
-            .find(|target| {
-                (!modal_active || target.modal)
-                    && target
-                        .press_slot
-                        .as_ref()
-                        .is_some_and(|slot| &slot.key == focused)
-            })
-            .cloned()
-        else {
-            return false;
-        };
-        if target.captures_drag {
-            return false;
-        }
-        if self.hit_test.active_keyboard_target.is_some() {
-            return true;
-        }
-        let origin = target.bounds.center();
-        if let Some(slot) = target.press_slot.as_ref() {
-            self.hit_test
-                .interaction
-                .begin_press(slot, origin, self.frame_instant());
-        }
-        if target
-            .interaction
-            .as_ref()
-            .is_some_and(|handles| handles.chrome_state_dependent())
+        #[cfg(feature = "accessibility")]
         {
-            self.request_refresh();
-        } else {
-            self.request_redraw();
+            let Some(node) = self.keyboard_focus_node() else {
+                return false;
+            };
+            if self.focused_text_input_accessibility_node() != Some(node)
+                && self.accessibility.nodes.iter().any(|(id, emitted)| {
+                    *id == node && emitted.supports_action(AccessibilityAction::Click)
+                })
+            {
+                return self.handle_accessibility_action(
+                    AccessibilityActionRequest {
+                        action: AccessibilityAction::Click,
+                        target_node: node,
+                        target_tree: AccessibilityTreeId::ROOT,
+                        data: None,
+                    },
+                    env,
+                );
+            }
+            // A focused node that does not advertise `Click` is not
+            // activatable — the pointer-press fallback would fire an action
+            // the semantics say does not exist.
+            false
         }
-        self.hit_test.active_keyboard_target = Some(target);
-        let _ = env;
-        true
+        #[cfg(not(feature = "accessibility"))]
+        {
+            let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
+                return false;
+            };
+            let modal_active = self.hit_test.modal_interaction.is_some();
+            let Some(target) = self
+                .hit_test
+                .pointer_targets
+                .iter()
+                .rev()
+                .find(|target| {
+                    (!modal_active || target.modal)
+                        && target
+                            .press_slot
+                            .as_ref()
+                            .is_some_and(|slot| &slot.key == focused)
+                })
+                .cloned()
+            else {
+                return false;
+            };
+            if target.captures_drag {
+                return false;
+            }
+            if self.hit_test.active_keyboard_target.is_some() {
+                return true;
+            }
+            let origin = target.bounds.center();
+            if let Some(slot) = target.press_slot.as_ref() {
+                self.hit_test
+                    .interaction
+                    .begin_press(slot, origin, self.frame_instant());
+            }
+            if target
+                .interaction
+                .as_ref()
+                .is_some_and(|handles| handles.chrome_state_dependent())
+            {
+                self.request_refresh();
+            } else {
+                self.request_redraw();
+            }
+            self.hit_test.active_keyboard_target = Some(target);
+            let _ = env;
+            true
+        }
     }
 
     pub(crate) fn handle_keyboard_key_up(&mut self, key: &KeyCode, env: &Environment) -> bool {

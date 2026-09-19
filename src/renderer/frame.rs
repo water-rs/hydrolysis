@@ -90,7 +90,19 @@ impl SemanticCore {
                             .is_some_and(|slot| &slot.key == focused)
                 }) || self.text_editing.text_input_targets.iter().any(|target| {
                     (!modal_active || target.modal) && &target.interaction_key == focused
-                })
+                }) || {
+                    // A key resolved through the semantic focus link stays
+                    // live while its node emits — the semantic runtime
+                    // registers no pointer targets at all.
+                    #[cfg(feature = "accessibility")]
+                    {
+                        self.focus_node_for_key(focused).is_some()
+                    }
+                    #[cfg(not(feature = "accessibility"))]
+                    {
+                        false
+                    }
+                }
             });
         if !keyboard_focus_is_live {
             self.set_keyboard_focus(None, false);

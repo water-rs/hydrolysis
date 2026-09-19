@@ -66,6 +66,7 @@ pub(crate) fn stepper_accessibility(
     ctx: Option<RenderContext>,
     stepper: &StepperConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -109,11 +110,15 @@ pub(crate) fn stepper_accessibility(
                 range: stepper.range.clone(),
             })
         };
-        let _ = renderer.register_accessibility_leaf(ctx, node, env, action_target);
+        if let Some(node_id) = renderer.register_accessibility_leaf(ctx, node, env, action_target) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, stepper, env);
+        let _ = (renderer, ctx, stepper, env, focus_keys);
     }
 }
 
@@ -157,6 +162,10 @@ pub(crate) fn render_stepper_node(
             Some(render_ctx),
             &state.borrow().config,
             env,
+            &[
+                crate::renderer::InteractionKey::for_rc(state, 0),
+                crate::renderer::InteractionKey::for_rc(state, 1),
+            ],
         );
     }
     render_stepper_parts(ctx, state, env);
@@ -368,5 +377,14 @@ pub(crate) fn emit_stepper_accessibility(
     state: &Rc<RefCell<StepperRenderState>>,
     env: &Environment,
 ) {
-    stepper_accessibility(renderer, None, &state.borrow().config, env);
+    stepper_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[
+            crate::renderer::InteractionKey::for_rc(state, 0),
+            crate::renderer::InteractionKey::for_rc(state, 1),
+        ],
+    );
 }

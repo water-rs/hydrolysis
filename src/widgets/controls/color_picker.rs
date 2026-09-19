@@ -78,6 +78,7 @@ pub(crate) fn color_picker_accessibility(
     ctx: Option<RenderContext>,
     color_picker: &ColorPickerConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -103,16 +104,13 @@ pub(crate) fn color_picker_accessibility(
             node.add_action(AccessibilityAction::Click);
         }
         // Direct semantic activation: `Click` shows the color picker under the
-        // trigger's own anchor — the pointer path's exact handler. The semantic
-        // runtime has no trigger rect, so the popup window mounts at the origin
-        // — placement is presentation detail, the panel itself is semantic.
-        let origin = match ctx {
-            Some(ctx) => {
-                let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                LayoutPoint::new(bounds.x0 as f32, bounds.y1 as f32)
-            }
-            None => LayoutPoint::new(0.0, 0.0),
-        };
+        // trigger's own anchor — the pointer path's exact handler. A rendered
+        // node carries the anchor; a semantic node carries none and mounts the
+        // same window with no placement at all.
+        let origin = ctx.map(|ctx| {
+            let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+            LayoutPoint::new(bounds.x0 as f32, bounds.y1 as f32)
+        });
         let action_target = (!disabled).then(|| {
             let value = color_picker.value.clone();
             let support_alpha = color_picker.support_alpha;
@@ -120,30 +118,41 @@ pub(crate) fn color_picker_accessibility(
             AccessibilityActionTarget::Activate {
                 action: Rc::new(RefCell::new(
                     move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
-                        renderer.show_color_picker(
-                            value.clone(),
-                            support_alpha,
-                            support_hdr,
-                            origin,
-                            env,
-                        )
+                        match origin {
+                            Some(origin) => renderer.show_color_picker(
+                                value.clone(),
+                                support_alpha,
+                                support_hdr,
+                                origin,
+                                env,
+                            ),
+                            None => renderer.activate_color_picker(
+                                value.clone(),
+                                support_alpha,
+                                support_hdr,
+                                env,
+                            ),
+                        }
                     },
                 )),
             }
         });
-        match ctx {
+        let node_id = match ctx {
             Some(ctx) => {
                 let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+                renderer.register_accessibility_node(node, bounds, env, action_target)
             }
-            None => {
-                let _ = renderer.register_accessibility_node_semantic(node, env, action_target);
+            None => renderer.register_accessibility_node_semantic(node, env, action_target),
+        };
+        if let Some(node_id) = node_id {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
             }
         }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, color_picker, env);
+        let _ = (renderer, ctx, color_picker, env, focus_keys);
     }
 }
 
@@ -188,6 +197,7 @@ pub(crate) fn render_color_picker_node(
             Some(render_ctx),
             &state.borrow().config,
             env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
         );
     }
     render_color_picker_parts(ctx, state, env);
@@ -361,5 +371,11 @@ pub(crate) fn emit_color_picker_accessibility(
     state: &Rc<RefCell<ColorPickerRenderState>>,
     env: &Environment,
 ) {
-    color_picker_accessibility(renderer, None, &state.borrow().config, env);
+    color_picker_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[crate::renderer::InteractionKey::for_rc(state, 0)],
+    );
 }

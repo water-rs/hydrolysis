@@ -66,6 +66,7 @@ pub(crate) fn picker_accessibility(
 ) {
     #[cfg(feature = "accessibility")]
     {
+        let owner = state;
         let state = state.borrow();
         let picker = &state.config;
         let menu_open = Rc::clone(&state.menu_open);
@@ -229,16 +230,18 @@ pub(crate) fn picker_accessibility(
                         )),
                     }
                 });
-                match ctx {
+                let trigger_id = match ctx {
                     Some(ctx) => {
                         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                        let _ =
-                            renderer.register_accessibility_node(node, bounds, env, action_target);
+                        renderer.register_accessibility_node(node, bounds, env, action_target)
                     }
-                    None => {
-                        let _ =
-                            renderer.register_accessibility_node_semantic(node, env, action_target);
-                    }
+                    None => renderer.register_accessibility_node_semantic(node, env, action_target),
+                };
+                if let Some(trigger_id) = trigger_id {
+                    renderer.register_accessibility_focus_link(
+                        &crate::renderer::InteractionKey::for_rc(owner, 0),
+                        trigger_id,
+                    );
                 }
             }
             PickerStyle::Radio | PickerStyle::Segmented => {
@@ -336,6 +339,11 @@ pub(crate) fn picker_accessibility(
                     };
                     if let Some(child_id) = child_id {
                         group.push_child(child_id);
+                        let discriminator = i32::from(item.tag) as u32 as usize;
+                        renderer.register_accessibility_focus_link(
+                            &crate::renderer::InteractionKey::for_rc(owner, discriminator),
+                            child_id,
+                        );
                     }
                 }
                 match ctx {

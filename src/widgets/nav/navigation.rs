@@ -2030,7 +2030,12 @@ pub(crate) fn emit_navigation_split_accessibility(
     let mut state = state.borrow_mut();
     state.primary.emit_accessibility(renderer, env);
     let primary_selection = renderer.read_signal(&state.primary_selection);
-    if let Some(selected) = primary_selection {
+    // The middle column exists only on a three-column split; a two-column
+    // split's primary selection drives the detail column, exactly as the
+    // rendered path routes it.
+    if state.is_three_column()
+        && let Some(selected) = primary_selection
+    {
         state.ensure_content(selected, false, renderer, env);
         state
             .content
@@ -2039,10 +2044,14 @@ pub(crate) fn emit_navigation_split_accessibility(
             .2
             .emit_accessibility(renderer, env);
     }
-    let detail_selection = state
-        .secondary_selection
-        .as_ref()
-        .map_or(primary_selection, |binding| renderer.read_signal(binding));
+    let detail_selection = if state.is_three_column() {
+        state
+            .secondary_selection
+            .as_ref()
+            .and_then(|binding| renderer.read_signal(binding))
+    } else {
+        primary_selection
+    };
     if let Some(selected) = detail_selection {
         state.ensure_detail(selected, false, renderer, env);
         state

@@ -98,9 +98,10 @@ impl HydroNativeView for Native<TabsLayout> {
     }
 }
 
-/// Emits a tab list's accessibility tree from per-tab `(tag, default_label,
-/// is_selected)` triples. Shared by the dispatch path and the retained `Widget`-node
-/// path (which extracts each default label from its tab's [`RetainedSubview`]).
+/// Emits a tab list's accessibility tree from per-tab `(tag, interaction_key,
+/// default_label, is_selected)` tuples. Shared by the dispatch path and the
+/// retained `Widget`-node path (which extracts each default label from its
+/// tab's [`RetainedSubview`]).
 #[cfg(feature = "accessibility")]
 pub(crate) fn tabs_accessibility(
     renderer: &mut crate::renderer::SemanticCore,
@@ -108,7 +109,7 @@ pub(crate) fn tabs_accessibility(
     theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     selection: &Binding<Id>,
     style: NativeTabStyle,
-    labels: &[(Id, Option<String>, bool)],
+    labels: &[(Id, crate::renderer::InteractionKey, Option<String>, bool)],
     env: &Environment,
 ) {
     let disabled = renderer.read_signal(&widget_disabled(env));
@@ -125,7 +126,7 @@ pub(crate) fn tabs_accessibility(
     if let Some(label) = tab_list_label {
         tab_list.set_label(label);
     }
-    for (index, (tag, default_label, is_selected)) in labels.iter().enumerate() {
+    for (index, (tag, interaction_key, default_label, is_selected)) in labels.iter().enumerate() {
         let mut tab_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Tab),
         );
@@ -161,6 +162,7 @@ pub(crate) fn tabs_accessibility(
         };
         if let Some(tab_node_id) = tab_node_id {
             tab_list.push_child(tab_node_id);
+            renderer.register_accessibility_focus_link(interaction_key, tab_node_id);
         }
     }
     match ctx.zip(bar_rect) {
@@ -230,13 +232,17 @@ pub(crate) fn render_tabs_node(
             let (selection, style, labels) = {
                 let st = state.borrow();
                 let selected_index = st.selected_index(selected_id);
-                let labels: Vec<(Id, Option<String>, bool)> = st
+                let labels: Vec<(Id, crate::renderer::InteractionKey, Option<String>, bool)> = st
                     .tabs
                     .iter()
                     .enumerate()
                     .map(|(index, tab)| {
                         (
                             tab.tag,
+                            crate::renderer::InteractionKey::for_rc(
+                                state,
+                                i32::from(tab.tag) as u32 as usize,
+                            ),
                             tab.label.default_a11y_label(),
                             index == selected_index,
                         )
@@ -443,17 +449,22 @@ pub(crate) fn emit_tabs_accessibility(
     state: &Rc<RefCell<TabsRenderState>>,
     env: &Environment,
 ) {
+    let owner = state;
     let mut state = state.borrow_mut();
     let selected_id = renderer.read_signal(&state.selection);
     let (selection, style, labels) = {
         let selected_index = state.selected_index(selected_id);
-        let labels: Vec<(Id, Option<String>, bool)> = state
+        let labels: Vec<(Id, crate::renderer::InteractionKey, Option<String>, bool)> = state
             .tabs
             .iter()
             .enumerate()
             .map(|(index, tab)| {
                 (
                     tab.tag,
+                    crate::renderer::InteractionKey::for_rc(
+                        owner,
+                        i32::from(tab.tag) as u32 as usize,
+                    ),
                     tab.label.default_a11y_label(),
                     index == selected_index,
                 )

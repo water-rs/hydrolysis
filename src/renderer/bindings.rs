@@ -103,7 +103,7 @@ impl SemanticCore {
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn focused_ui_node(&self) -> Option<AccessibilityNodeId> {
-        self.focused_text_input_accessibility_node()
+        self.keyboard_focus_node()
     }
 
     pub fn clear_ui_focus(&mut self) -> bool {

@@ -66,6 +66,7 @@ pub(crate) fn toggle_accessibility(
     ctx: Option<RenderContext>,
     toggle: &ToggleConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -97,11 +98,15 @@ pub(crate) fn toggle_accessibility(
                 binding: toggle.toggle.clone(),
             })
         };
-        let _ = renderer.register_accessibility_leaf(ctx, node, env, action_target);
+        if let Some(node_id) = renderer.register_accessibility_leaf(ctx, node, env, action_target) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, toggle, env);
+        let _ = (renderer, ctx, toggle, env, focus_keys);
     }
 }
 
@@ -143,6 +148,7 @@ pub(crate) fn render_toggle_node(
             Some(render_ctx),
             &state.borrow().config,
             env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
         );
     }
     render_toggle_parts(ctx, state, env);
@@ -406,5 +412,11 @@ pub(crate) fn emit_toggle_accessibility(
     state: &Rc<RefCell<ToggleRenderState>>,
     env: &Environment,
 ) {
-    toggle_accessibility(renderer, None, &state.borrow().config, env);
+    toggle_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[crate::renderer::InteractionKey::for_rc(state, 0)],
+    );
 }

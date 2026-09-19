@@ -154,14 +154,18 @@ pub(crate) fn button_accessibility(
                 action: button_activation(state, env),
             })
         };
-        match ctx {
+        let node_id = match ctx {
             Some(ctx) => {
                 let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+                renderer.register_accessibility_node(node, bounds, env, action_target)
             }
-            None => {
-                let _ = renderer.register_accessibility_node_semantic(node, env, action_target);
-            }
+            None => renderer.register_accessibility_node_semantic(node, env, action_target),
+        };
+        if let Some(node_id) = node_id {
+            renderer.register_accessibility_focus_link(
+                &crate::renderer::InteractionKey::for_rc(state, 0),
+                node_id,
+            );
         }
     }
     #[cfg(not(feature = "accessibility"))]
@@ -398,14 +402,18 @@ pub(crate) fn menu_accessibility(
                 },
             )),
         };
-        match ctx {
+        let node_id = match ctx {
             Some(ctx) => {
                 let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                let _ = renderer.register_accessibility_node(node, bounds, env, Some(activation));
+                renderer.register_accessibility_node(node, bounds, env, Some(activation))
             }
-            None => {
-                let _ = renderer.register_accessibility_node_semantic(node, env, Some(activation));
-            }
+            None => renderer.register_accessibility_node_semantic(node, env, Some(activation)),
+        };
+        if let Some(node_id) = node_id {
+            renderer.register_accessibility_focus_link(
+                &crate::renderer::InteractionKey::for_rc(state, 0),
+                node_id,
+            );
         }
     }
     #[cfg(not(feature = "accessibility"))]

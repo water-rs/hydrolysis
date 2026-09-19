@@ -3,10 +3,6 @@
 //! `HydrolysisExt` provides `.hydrolysis()` to wrap any cloneable view into
 //! a `GpuSurface` rendered by hydrolysis.
 
-// Proving `wgpu` types `Send` through rayon's `IntoParallelIterator` walks a
-// deep trait graph inside wgpu; the default solver budget cannot close it.
-#![recursion_limit = "256"]
-
 mod engine;
 mod env;
 mod gpu_view;

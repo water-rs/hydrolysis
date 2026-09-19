@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, VecDeque};
 #[cfg(feature = "accessibility")]
 use std::ops::RangeInclusive;
 #[cfg(feature = "accessibility")]
+use waterui_backend_core::widget::InteractionFocusBinding;
+#[cfg(feature = "accessibility")]
 use waterui_form::picker::date::{DatePickerType, DateTime};
 
 #[cfg(feature = "accessibility")]
@@ -120,8 +122,8 @@ pub(crate) enum AccessibilityActionTarget {
         range: RangeInclusive<DateTime>,
         ty: DatePickerType,
         /// The popup's window anchor when the node was emitted by a rendered
-        /// frame; `None` in the semantic tree, where activation only marks the
-        /// popup state — a window is presentation.
+        /// frame; `None` in the semantic tree, where activation mounts the
+        /// same window with no placement at all.
         origin: Option<LayoutPoint>,
     },
     TextField {
@@ -146,6 +148,18 @@ pub(crate) struct AccessibilityBuilder {
     pub(crate) nodes: Vec<(AccessibilityNodeId, AccessibilityNode)>,
     pub(crate) root_children: Vec<AccessibilityNodeId>,
     pub(crate) actions: BTreeMap<AccessibilityNodeId, AccessibilityActionTarget>,
+    /// The [`InteractionFocusBinding`] a node was emitted under, keyed by node
+    /// — the same modifier state the pointer path reads for press slots, so a
+    /// keyboard-focused node writes its author binding regardless of whether a
+    /// pointer target exists.
+    pub(crate) focus_bindings: BTreeMap<AccessibilityNodeId, InteractionFocusBinding>,
+    /// The accessibility node each interaction identity emitted this frame —
+    /// the pointer machinery's anchor into the semantic tree: a press resolves
+    /// the node keyboard focus lands on, and a widget's focus-ring state reads
+    /// the focused node back through its interaction key. Kept across frames
+    /// (pointer targets bind before the emit walk re-stamps them) and pruned
+    /// with the live node set at finalize.
+    pub(crate) interaction_nodes: BTreeMap<InteractionKey, AccessibilityNodeId>,
     pub(crate) next_node_id: u64,
     node_ids: BTreeMap<AccessibilityNodeKey, AccessibilityNodeId>,
     active_node_keys: BTreeSet<AccessibilityNodeKey>,
@@ -172,6 +186,8 @@ impl Default for AccessibilityBuilder {
             nodes: Vec::new(),
             root_children: Vec::new(),
             actions: BTreeMap::new(),
+            focus_bindings: BTreeMap::new(),
+            interaction_nodes: BTreeMap::new(),
             next_node_id: ACCESSIBILITY_FIRST_NODE_ID,
             node_ids: BTreeMap::new(),
             active_node_keys: BTreeSet::new(),
@@ -205,6 +221,7 @@ impl AccessibilityBuilder {
         self.nodes.clear();
         self.root_children.clear();
         self.actions.clear();
+        self.focus_bindings.clear();
         self.active_node_keys.clear();
         self.owner_ordinals.clear();
         self.owner_stack.clear();
@@ -412,6 +429,9 @@ impl AccessibilityBuilder {
         if let Some(target) = action_target {
             self.actions.insert(node_id, target);
         }
+        if let Some(binding) = env.get::<InteractionFocusBinding>() {
+            self.focus_bindings.insert(node_id, binding.clone());
+        }
         Some(node_id)
     }
 
@@ -516,6 +536,12 @@ impl AccessibilityBuilder {
         if !self.nodes.iter().any(|(id, _)| *id == self.focus) {
             self.focus = ACCESSIBILITY_ROOT_NODE_ID;
         }
+        let live = self
+            .nodes
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<BTreeSet<_>>();
+        self.interaction_nodes.retain(|_, node| live.contains(node));
         self.pending_tree_update = Some(AccessibilityTreeUpdate {
             nodes,
             tree: Some(AccessibilityTree::new(ACCESSIBILITY_ROOT_NODE_ID)),
@@ -611,11 +637,7 @@ impl SemanticCore {
         );
         if target_node == ACCESSIBILITY_ROOT_NODE_ID {
             return match action {
-                AccessibilityAction::Focus => {
-                    let changed = self.accessibility.focus != ACCESSIBILITY_ROOT_NODE_ID;
-                    self.accessibility.focus = ACCESSIBILITY_ROOT_NODE_ID;
-                    changed
-                }
+                AccessibilityAction::Focus => self.set_keyboard_focus_node(None, false),
                 AccessibilityAction::Click => false,
                 _ => panic!(
                     "hydrolysis accessibility root does not support action {:?}",
@@ -644,9 +666,7 @@ impl SemanticCore {
             if action == AccessibilityAction::Focus
                 && node.supports_action(AccessibilityAction::Focus)
             {
-                let changed = self.accessibility.focus != target_node;
-                self.accessibility.focus = target_node;
-                return changed;
+                return self.set_keyboard_focus_node(Some(target_node), false);
             }
             assert!(
                 !node.supports_action(action),
@@ -737,9 +757,26 @@ impl SemanticCore {
             }
         };
         if changed && focus_action {
-            self.accessibility.focus = target_node;
+            self.set_keyboard_focus_node(Some(target_node), false);
         }
         changed
+    }
+
+    /// Links the widget's interaction identity to the accessibility node it
+    /// just emitted. Pointer paths hold interaction keys, not node ids — this
+    /// map is how a pointer press resolves the node keyboard focus lands on,
+    /// and how a bound widget reads the focused node back through its own key.
+    /// The map exists only where the semantic tree does — under the
+    /// accessibility feature.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn register_accessibility_focus_link(
+        &mut self,
+        key: &crate::renderer::InteractionKey,
+        node_id: AccessibilityNodeId,
+    ) {
+        self.accessibility
+            .interaction_nodes
+            .insert(key.clone(), node_id);
     }
 
     #[cfg(feature = "accessibility")]
@@ -1399,13 +1436,14 @@ fn handle_accessibility_date_picker_action(
     env: &Environment,
 ) -> bool {
     match action {
-        AccessibilityAction::Click => renderer.show_date_picker(
-            value.clone(),
-            range.clone(),
-            ty,
-            origin.unwrap_or_else(|| LayoutPoint::new(0.0, 0.0)),
-            env,
-        ),
+        // A rendered node carries its trigger anchor; a semantic node carries
+        // none and mounts the same window with no placement at all.
+        AccessibilityAction::Click => match origin {
+            Some(origin) => {
+                renderer.show_date_picker(value.clone(), range.clone(), ty, origin, env)
+            }
+            None => renderer.activate_date_picker(value.clone(), range.clone(), ty, env),
+        },
         AccessibilityAction::Focus => true,
         AccessibilityAction::SetValue => {
             let Some(AccessibilityActionData::Value(text)) = data else {

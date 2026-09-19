@@ -620,6 +620,8 @@ pub(crate) fn list_accessibility(
     state: &Rc<RefCell<ListRenderState>>,
     env: &Environment,
 ) {
+    #[cfg(feature = "accessibility")]
+    let owner = state;
     let state = state.borrow();
     let list = &state.config;
     let row_count_signal = list.contents.len();
@@ -776,6 +778,13 @@ pub(crate) fn list_accessibility(
             };
             if let Some(row_node_id) = row_node_id {
                 list_node.push_child(row_node_id);
+                let row_interaction_base = (i32::from(*row_id) as u32 as usize)
+                    .checked_mul(3)
+                    .expect("hydrolysis List interaction identity overflow");
+                renderer.register_accessibility_focus_link(
+                    &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base),
+                    row_node_id,
+                );
             }
             if let Some(footer) = chrome.footer.clone() {
                 let footer_rect = vello::kurbo::Rect::new(

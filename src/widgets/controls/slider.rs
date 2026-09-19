@@ -94,8 +94,8 @@ fn slider_accessibility_parts(
     label: &Label,
     range: &RangeInclusive<f64>,
     value: &Binding<f64>,
-    disabled: &nami::Computed<bool>,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -118,7 +118,7 @@ fn slider_accessibility_parts(
         node.add_action(AccessibilityAction::Focus);
         // A disabled slider stays in the tree (focusable, announced as
         // disabled) but exposes no value actions and no action target.
-        let action_target = if renderer.read_signal(disabled) {
+        let action_target = if renderer.read_signal(&widget_disabled(env)) {
             node.set_disabled();
             None
         } else {
@@ -131,11 +131,15 @@ fn slider_accessibility_parts(
                 step: slider_step_for_range(range.clone()),
             })
         };
-        let _ = renderer.register_accessibility_leaf(ctx, node, env, action_target);
+        if let Some(node_id) = renderer.register_accessibility_leaf(ctx, node, env, action_target) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, label, range, value, disabled, env);
+        let _ = (renderer, ctx, label, range, value, env, focus_keys);
     }
 }
 
@@ -200,8 +204,8 @@ pub(crate) fn render_slider_node(
             &slider.label,
             &slider.range,
             &slider.value,
-            &widget_disabled(env),
             env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
         );
     }
     render_slider_parts(ctx, state, env);
@@ -452,6 +456,7 @@ pub(crate) fn emit_slider_accessibility(
     state: &Rc<RefCell<SliderRenderState>>,
     env: &Environment,
 ) {
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
     let mut state = state.borrow_mut();
     slider_accessibility_parts(
         renderer,
@@ -459,8 +464,8 @@ pub(crate) fn emit_slider_accessibility(
         &state.label,
         &state.range,
         &state.value,
-        &widget_disabled(env),
         env,
+        &[interaction_key],
     );
     state.min_value_label.emit_accessibility(renderer, env);
     state.max_value_label.emit_accessibility(renderer, env);

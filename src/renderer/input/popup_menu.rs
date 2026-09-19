@@ -500,15 +500,10 @@ fn color_picker_palette() -> [(&'static str, Color); 12] {
     ]
 }
 
-pub(crate) fn color_picker_window(
-    value: Binding<Color>,
-    support_alpha: bool,
-    support_hdr: bool,
-    origin: LayoutPoint,
-    group: PopupMenuStateGroup,
-    env: &Environment,
-) -> (Window, Binding<WindowState>) {
-    let state = Binding::container(WindowState::Normal);
+/// The color-picker panel's rendered extent — swatch grid plus the optional
+/// alpha/headroom rows. Placement is a rendered-frame concern; the semantic
+/// window carries no origin.
+fn color_picker_size(support_alpha: bool, support_hdr: bool) -> (f64, f64) {
     let width = 280.0;
     let swatch = 40.0;
     let gap = 8.0;
@@ -516,6 +511,24 @@ pub(crate) fn color_picker_window(
     let alpha_row_height = if support_alpha { 48.0 } else { 0.0 };
     let hdr_row_height = if support_hdr { 48.0 } else { 0.0 };
     let height = 16.0 + rows * swatch + 2.0 * gap + alpha_row_height + hdr_row_height + 16.0;
+    (width, height)
+}
+
+/// The color-picker window itself: palette swatches plus the optional
+/// alpha/headroom rows. Shared by the rendered popup path (which then sets a
+/// frame) and the semantic activation path (which mounts the window with no
+/// placement at all).
+fn color_picker_window_base(
+    value: Binding<Color>,
+    support_alpha: bool,
+    support_hdr: bool,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let (width, _) = color_picker_size(support_alpha, support_hdr);
+    let swatch = 40.0;
+    let gap = 8.0;
     let group_for_content = group.clone();
     let state_for_content = state.clone();
     let popup_env = env.clone();
@@ -601,6 +614,22 @@ pub(crate) fn color_picker_window(
         .resizable(false)
         .background(Color::transparent());
     popup.closable = false;
+    (popup, state)
+}
+
+/// The rendered popup path: the shared color-picker window anchored at the
+/// trigger's resolved origin. The semantic activation path mounts
+/// [`color_picker_window_base`] directly and sets no frame.
+pub(crate) fn color_picker_window(
+    value: Binding<Color>,
+    support_alpha: bool,
+    support_hdr: bool,
+    origin: LayoutPoint,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let (popup, state) = color_picker_window_base(value, support_alpha, support_hdr, group, env);
+    let (width, height) = color_picker_size(support_alpha, support_hdr);
     popup.frame.set(LayoutRect::new(
         origin,
         LayoutSize::new(width as f32, height as f32),
@@ -633,11 +662,36 @@ fn apply_staged_date_time(
     value.set(next);
 }
 
-pub(crate) fn date_picker_window(
+/// The date-picker panel's rendered extent from the picker's field
+/// configuration — date calendar plus optional time rows. Placement is a
+/// rendered-frame concern; the semantic window carries no origin.
+fn date_picker_size(ty: DatePickerType) -> (f64, f64) {
+    let uses_date = matches!(
+        ty,
+        DatePickerType::Date
+            | DatePickerType::DateHourAndMinute
+            | DatePickerType::DateHourMinuteAndSecond
+    );
+    let uses_time = !matches!(ty, DatePickerType::Date);
+    let width = 360.0;
+    let height = if uses_date && uses_time {
+        520.0
+    } else if uses_date {
+        430.0
+    } else {
+        260.0
+    };
+    (width, height)
+}
+
+/// The date-picker window itself: calendar and time-stepper staging rows plus
+/// the cancel/apply bar. Shared by the rendered popup path (which then sets a
+/// frame) and the semantic activation path (which mounts the window with no
+/// placement at all).
+fn date_picker_window_base(
     value: Binding<DateTime>,
     range: RangeInclusive<DateTime>,
     ty: DatePickerType,
-    origin: LayoutPoint,
     group: PopupMenuStateGroup,
     env: &Environment,
 ) -> (Window, Binding<WindowState>) {
@@ -660,14 +714,6 @@ pub(crate) fn date_picker_window(
         ty,
         DatePickerType::HourMinuteAndSecond | DatePickerType::DateHourMinuteAndSecond
     );
-    let width = 360.0;
-    let height = if uses_date && uses_time {
-        520.0
-    } else if uses_date {
-        430.0
-    } else {
-        260.0
-    };
     let range_start = *range.start();
     let range_end = *range.end();
     let group_for_content = group.clone();
@@ -760,6 +806,22 @@ pub(crate) fn date_picker_window(
         .resizable(false)
         .background(Color::transparent());
     popup.closable = false;
+    (popup, state)
+}
+
+/// The rendered popup path: the shared date-picker window anchored at the
+/// trigger's resolved origin. The semantic activation path mounts
+/// [`date_picker_window_base`] directly and sets no frame.
+pub(crate) fn date_picker_window(
+    value: Binding<DateTime>,
+    range: RangeInclusive<DateTime>,
+    ty: DatePickerType,
+    origin: LayoutPoint,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let (popup, state) = date_picker_window_base(value, range, ty, group, env);
+    let (width, height) = date_picker_size(ty);
     popup.frame.set(LayoutRect::new(
         origin,
         LayoutSize::new(width as f32, height as f32),
@@ -1003,6 +1065,52 @@ impl SemanticCore {
             .expect("hydrolysis date picker requires PopupWindowManager in environment")
             .show(window);
         self.popup_menu.active_popup_menu_group = Some(group);
+        true
+    }
+
+    /// The semantic half of showing a color picker: the same panel window the
+    /// rendered runtime opens, mounted with no placement — a semantic popup
+    /// has no frame to anchor and no pointer origin to anchor it to.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_color_picker(
+        &mut self,
+        value: Binding<Color>,
+        support_alpha: bool,
+        support_hdr: bool,
+        env: &Environment,
+    ) -> bool {
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) =
+            color_picker_window_base(value, support_alpha, support_hdr, group.clone(), env);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis color picker requires PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
+    /// The semantic half of showing a date picker: the same staging window
+    /// the rendered runtime opens, mounted with no placement.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_date_picker(
+        &mut self,
+        value: Binding<DateTime>,
+        range: RangeInclusive<DateTime>,
+        ty: DatePickerType,
+        env: &Environment,
+    ) -> bool {
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) = date_picker_window_base(value, range, ty, group.clone(), env);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis date picker requires PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
         true
     }
 

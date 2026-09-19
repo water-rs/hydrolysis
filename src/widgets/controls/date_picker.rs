@@ -69,6 +69,7 @@ pub(crate) fn date_picker_accessibility(
     ctx: Option<RenderContext>,
     date_picker: &DatePickerConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -98,7 +99,7 @@ pub(crate) fn date_picker_accessibility(
             let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
             waterui_core::layout::Point::new(bounds.x0 as f32, bounds.y1 as f32)
         });
-        let _ = renderer.register_accessibility_leaf(
+        if let Some(node_id) = renderer.register_accessibility_leaf(
             ctx,
             node,
             env,
@@ -108,11 +109,15 @@ pub(crate) fn date_picker_accessibility(
                 ty: date_picker.ty,
                 origin,
             }),
-        );
+        ) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, date_picker, env);
+        let _ = (renderer, ctx, date_picker, env, focus_keys);
     }
 }
 
@@ -183,6 +188,7 @@ pub(crate) fn render_date_picker_node(
             Some(render_ctx),
             &state.borrow().config,
             env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
         );
     }
     render_date_picker_parts(ctx, state, env);
@@ -300,7 +306,8 @@ pub(crate) fn emit_date_picker_accessibility(
     state: &Rc<RefCell<DatePickerRenderState>>,
     env: &Environment,
 ) {
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
     let mut state = state.borrow_mut();
-    date_picker_accessibility(renderer, None, &state.config, env);
+    date_picker_accessibility(renderer, None, &state.config, env, &[interaction_key]);
     state.label_view.emit_accessibility(renderer, env);
 }
