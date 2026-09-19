@@ -3,19 +3,27 @@
 //! arbitrary sub-views.
 
 use super::*;
+use crate::engine::WidgetTheme;
+use std::rc::Rc;
 
 /// The measure half of a native leaf view. Rendering is owned by the retained
 /// [`RenderNode`](crate::renderer::tree::RenderNode) tree; this trait only sizes a
 /// leaf so the layout system can measure arbitrary sub-views through it.
 pub(crate) trait HydroNativeView: View + Sized + 'static {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize;
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize;
     fn dimensions(
         state: &mut HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn WidgetTheme>,
         _proposal: ProposalSize,
     ) -> ViewDimensions {
-        ViewDimensions::new(Self::intrinsic(state, view, env))
+        ViewDimensions::new(Self::intrinsic(state, view, env, theme))
     }
 }
 
@@ -28,7 +36,12 @@ pub(crate) fn unsupported_system_icon(icon: &SystemIcon) -> ! {
 }
 
 impl HydroNativeView for Native<SystemIcon> {
-    fn intrinsic(_state: &mut HydroState, view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
         unsupported_system_icon(view.as_inner())
     }
 }
@@ -44,7 +57,12 @@ pub(crate) fn unsupported_map() -> ! {
 }
 
 impl HydroNativeView for Native<MapConfig> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
         unsupported_map()
     }
 }
@@ -66,9 +84,10 @@ pub(crate) fn dimensions_for_native<V: HydroNativeView>(
     proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
 ) -> Option<ViewDimensions> {
     view.downcast_ref::<V>()
-        .map(|native| V::dimensions(state, native, env, proposal))
+        .map(|native| V::dimensions(state, native, env, theme, proposal))
 }
 
 macro_rules! hydro_native_view_types {
@@ -129,10 +148,13 @@ pub(crate) fn dimensions_for_known_native_views(
     proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
 ) -> Option<ViewDimensions> {
     macro_rules! try_native_dimensions {
         ($ty:ty) => {
-            if let Some(dimensions) = dimensions_for_native::<$ty>(view, proposal, state, env) {
+            if let Some(dimensions) =
+                dimensions_for_native::<$ty>(view, proposal, state, env, theme)
+            {
                 return Some(dimensions);
             }
         };

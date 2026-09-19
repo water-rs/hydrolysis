@@ -21,17 +21,19 @@ use waterui_form::picker::PickerItem;
 use waterui_form::picker::{PickerConfig, PickerStyle};
 use waterui_text::styled::StyledStr;
 
-#[cfg(feature = "accessibility")]
-use crate::renderer::accessibility_activation_point;
 use crate::renderer::local_interaction_state;
 #[cfg(feature = "accessibility")]
 use crate::widgets::util::widget_disabled;
-use crate::widgets::util::widget_theme;
 use waterui_backend_core::widget::PickerMetrics;
 
 impl HydroNativeView for Native<PickerConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_picker_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_picker_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -50,17 +52,24 @@ impl PickerRenderState {
     }
 }
 
-/// Emits a picker's accessibility tree from its config. Shared by the dispatch
-/// path ([`Native<PickerConfig>::accessibility`]) and the retained `Widget`-node
-/// path so both produce the same a11y tree.
+/// Emits a picker's accessibility tree from its retained state. The rendered
+/// `Widget`-node path passes its [`RenderContext`] and theme (option rows get
+/// bounds); the semantic emission walk passes `None` for both — every action
+/// target is semantic (selection bindings, direct menu activation), so no
+/// geometry or style is needed.
 pub(crate) fn picker_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
-    picker: &PickerConfig,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
+    state: &Rc<RefCell<PickerRenderState>>,
     env: &Environment,
 ) {
     #[cfg(feature = "accessibility")]
     {
+        let owner = state;
+        let state = state.borrow();
+        let picker = &state.config;
+        let menu_open = Rc::clone(&state.menu_open);
         let disabled = renderer.read_signal(&widget_disabled(env));
         let items = renderer.read_signal(&picker.items);
         assert!(
@@ -106,10 +115,16 @@ pub(crate) fn picker_accessibility(
                 } else {
                     node.add_action(AccessibilityAction::Click);
                 }
-                let metrics = widget_theme(env).picker_metrics(PickerStyle::Menu);
-                let row_height = menu_picker_row_height(max_item_text_height, metrics);
-                let popup_rect =
-                    menu_picker_popup_rect(ctx.bounds, row_height, items.len(), metrics);
+                // Option row bounds exist only in the rendered runtime, where
+                // the popup rect is computable from the trigger's bounds and
+                // the theme's picker metrics.
+                let option_geometry = ctx.as_ref().zip(theme).map(|(ctx, theme)| {
+                    let metrics = theme.picker_metrics(PickerStyle::Menu);
+                    let row_height = menu_picker_row_height(max_item_text_height, metrics);
+                    let popup_rect =
+                        menu_picker_popup_rect(ctx.bounds, row_height, items.len(), metrics);
+                    (ctx, row_height, popup_rect)
+                });
                 for (index, item) in items.iter().enumerate() {
                     let mut option = AccessibilityNode::new(
                         renderer
@@ -125,32 +140,116 @@ pub(crate) fn picker_accessibility(
                     } else {
                         option.add_action(AccessibilityAction::Click);
                     }
-                    let option_bounds = transformed_rect(
-                        ctx.hit_transform,
-                        menu_picker_option_rect(popup_rect, row_height, index),
-                    );
-                    if let Some(option_id) = renderer.register_accessibility_child_node_with_key(
-                        i64::from(i32::from(item.tag)),
-                        option,
-                        option_bounds,
-                        env,
+                    let option_target =
                         (!disabled).then(|| AccessibilityActionTarget::PickerSelect {
                             selection: picker.selection.clone(),
                             target: item.tag,
-                        }),
-                    ) {
+                        });
+                    let option_id = match option_geometry {
+                        Some((ctx, row_height, popup_rect)) => {
+                            let option_bounds = transformed_rect(
+                                ctx.hit_transform,
+                                menu_picker_option_rect(popup_rect, row_height, index),
+                            );
+                            renderer.register_accessibility_child_node_with_key(
+                                i64::from(i32::from(item.tag)),
+                                option,
+                                option_bounds,
+                                env,
+                                option_target,
+                            )
+                        }
+                        None => renderer.register_accessibility_child_node_with_key_semantic(
+                            i64::from(i32::from(item.tag)),
+                            option,
+                            env,
+                            option_target,
+                        ),
+                    };
+                    if let Some(option_id) = option_id {
                         node.push_child(option_id);
                     }
                 }
-                let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                let _ = renderer.register_accessibility_node(
-                    node,
-                    bounds,
-                    env,
-                    (!disabled).then(|| AccessibilityActionTarget::PointerPrimaryClick {
-                        point: accessibility_activation_point(bounds),
-                    }),
-                );
+                // Direct activation: `Click` does exactly what the field's
+                // pointer target does — toggle the popup. The rendered runtime
+                // shows the real window under the trigger; the semantic runtime
+                // has no window manager, so it records the open state and
+                // active menu group — placement is presentation detail only.
+                let action_target = (!disabled).then(|| {
+                    let menu_entries: Vec<PickerMenuEntry> = items
+                        .iter()
+                        .zip(option_labels.iter())
+                        .map(|(item, label)| PickerMenuEntry {
+                            label: label.to_string(),
+                            tag: item.tag,
+                        })
+                        .collect();
+                    let selection = picker.selection.clone();
+                    let open = Rc::clone(&menu_open);
+                    let request = ctx.as_ref().zip(theme).map(|(ctx, theme)| {
+                        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                        let metrics = theme.picker_metrics(PickerStyle::Menu);
+                        (
+                            waterui_core::layout::Point::new(bounds.x0 as f32, bounds.y1 as f32),
+                            bounds.width(),
+                            menu_picker_row_height(max_item_text_height, metrics),
+                            metrics,
+                        )
+                    });
+                    AccessibilityActionTarget::Activate {
+                        action: Rc::new(RefCell::new(
+                            move |renderer: &mut crate::renderer::SemanticCore,
+                                  env: &Environment| {
+                                // `Click` toggles the popup — opening or
+                                // dismissing is a handled activation either
+                                // way, and so is a menu with nothing to show.
+                                if open.get() {
+                                    renderer.dismiss_active_popup_menu();
+                                } else {
+                                    match request {
+                                        Some((origin, width, row_height, metrics)) => {
+                                            renderer.show_picker_menu(
+                                                PickerMenuRequest {
+                                                    entries: menu_entries.clone(),
+                                                    selection: selection.clone(),
+                                                    open: Rc::clone(&open),
+                                                    origin,
+                                                    width,
+                                                    row_height,
+                                                    selected,
+                                                },
+                                                metrics,
+                                                env,
+                                            );
+                                        }
+                                        None => {
+                                            renderer.activate_picker_menu(
+                                                menu_entries.clone(),
+                                                selection.clone(),
+                                                &open,
+                                                env,
+                                            );
+                                        }
+                                    }
+                                }
+                                true
+                            },
+                        )),
+                    }
+                });
+                let trigger_id = match ctx {
+                    Some(ctx) => {
+                        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                        renderer.register_accessibility_node(node, bounds, env, action_target)
+                    }
+                    None => renderer.register_accessibility_node_semantic(node, env, action_target),
+                };
+                if let Some(trigger_id) = trigger_id {
+                    renderer.register_accessibility_focus_link(
+                        &crate::renderer::InteractionKey::for_rc(owner, 0),
+                        trigger_id,
+                    );
+                }
             }
             PickerStyle::Radio | PickerStyle::Segmented => {
                 let mut group = AccessibilityNode::new(
@@ -161,11 +260,13 @@ pub(crate) fn picker_accessibility(
                 if let Some(label) = group_label {
                     group.set_label(label);
                 }
-                let group_bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-                let metrics = widget_theme(env).picker_metrics(picker.style);
-                let mut row_y = ctx.bounds.y0 + metrics.vertical_inset;
+                let geometry = ctx
+                    .as_ref()
+                    .zip(theme)
+                    .map(|(ctx, theme)| (ctx, theme.picker_metrics(picker.style)));
                 let selected = renderer.read_signal(&picker.selection);
-                let segment_width = ctx.bounds.width() / items.len() as f64;
+                let mut row_y =
+                    geometry.map(|(ctx, metrics)| ctx.bounds.y0 + metrics.vertical_inset);
                 for (index, item) in items.iter().enumerate() {
                     let label = renderer
                         .read_resolved_text_styled(&item.content, env)
@@ -176,27 +277,33 @@ pub(crate) fn picker_accessibility(
                         StyledStr::plain(label.clone()),
                         env,
                     );
-                    let row_rect = if picker.style == PickerStyle::Segmented {
-                        let x0 = ctx.bounds.x0 + segment_width * index as f64;
-                        vello::kurbo::Rect::new(
-                            x0,
-                            ctx.bounds.y0,
-                            x0 + segment_width,
-                            ctx.bounds.y1,
-                        )
-                    } else {
-                        let row_height =
-                            f64::from(label_size.height).max(metrics.radio_indicator_size);
-                        let rect = vello::kurbo::Rect::new(
-                            ctx.bounds.x0,
-                            row_y,
-                            ctx.bounds.x1,
-                            (row_y + row_height).min(ctx.bounds.y1),
-                        );
-                        row_y = rect.y1 + metrics.radio_row_spacing;
-                        rect
-                    };
-                    if row_rect.height() <= 0.0 {
+                    let row_rect = geometry.map(|(ctx, metrics)| {
+                        if picker.style == PickerStyle::Segmented {
+                            let segment_width = ctx.bounds.width() / items.len() as f64;
+                            let x0 = ctx.bounds.x0 + segment_width * index as f64;
+                            vello::kurbo::Rect::new(
+                                x0,
+                                ctx.bounds.y0,
+                                x0 + segment_width,
+                                ctx.bounds.y1,
+                            )
+                        } else {
+                            let y = row_y.unwrap_or(ctx.bounds.y0);
+                            let row_height =
+                                f64::from(label_size.height).max(metrics.radio_indicator_size);
+                            let rect = vello::kurbo::Rect::new(
+                                ctx.bounds.x0,
+                                y,
+                                ctx.bounds.x1,
+                                (y + row_height).min(ctx.bounds.y1),
+                            );
+                            row_y = Some(rect.y1 + metrics.radio_row_spacing);
+                            rect
+                        }
+                    });
+                    if let Some(rect) = row_rect
+                        && rect.height() <= 0.0
+                    {
                         break;
                     }
                     let mut option = AccessibilityNode::new(
@@ -213,28 +320,56 @@ pub(crate) fn picker_accessibility(
                     } else {
                         option.add_action(AccessibilityAction::Click);
                     }
-                    let row_bounds = transformed_rect(ctx.hit_transform, row_rect);
-                    if let Some(child_id) = renderer.register_accessibility_child_node_with_key(
-                        i64::from(i32::from(item.tag)),
-                        option,
-                        row_bounds,
-                        env,
+                    let option_target =
                         (!disabled).then(|| AccessibilityActionTarget::PickerSelect {
                             selection: picker.selection.clone(),
                             target: item.tag,
-                        }),
-                    ) {
+                        });
+                    let child_id = match row_rect {
+                        Some(row_rect) => {
+                            let ctx = ctx.expect("rendered picker emits option bounds");
+                            let row_bounds = transformed_rect(ctx.hit_transform, row_rect);
+                            renderer.register_accessibility_child_node_with_key(
+                                i64::from(i32::from(item.tag)),
+                                option,
+                                row_bounds,
+                                env,
+                                option_target,
+                            )
+                        }
+                        None => renderer.register_accessibility_child_node_with_key_semantic(
+                            i64::from(i32::from(item.tag)),
+                            option,
+                            env,
+                            option_target,
+                        ),
+                    };
+                    if let Some(child_id) = child_id {
                         group.push_child(child_id);
+                        let discriminator = i32::from(item.tag) as u32 as usize;
+                        renderer.register_accessibility_focus_link(
+                            &crate::renderer::InteractionKey::for_rc(owner, discriminator),
+                            child_id,
+                        );
                     }
                 }
-                let _ = renderer.register_accessibility_node(group, group_bounds, env, None);
+                match ctx {
+                    Some(ctx) => {
+                        let group_bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                        let _ =
+                            renderer.register_accessibility_node(group, group_bounds, env, None);
+                    }
+                    None => {
+                        let _ = renderer.register_accessibility_node_semantic(group, env, None);
+                    }
+                }
             }
             _ => panic!("hydrolysis PickerStyle variant is not implemented"),
         }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, picker, env);
+        let _ = (renderer, ctx, theme, state, env);
     }
 }
 
@@ -245,8 +380,9 @@ pub(crate) fn measure_picker_node(
     _proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    ViewDimensions::new(measure_picker_intrinsic(&state.config, hydro, env))
+    ViewDimensions::new(measure_picker_intrinsic(&state.config, hydro, env, theme))
 }
 
 /// Renders a retained picker leaf every flush: emits a11y (unless hidden) then the
@@ -260,8 +396,15 @@ pub(crate) fn render_picker_node(
         .get::<waterui::accessibility::AccessibilityHidden>()
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
+        let theme = ctx.theme();
         let render_ctx = ctx.render_context();
-        picker_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        picker_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            Some(&theme),
+            state,
+            env,
+        );
     }
     render_picker_parts(ctx, state, env);
 }
@@ -336,7 +479,7 @@ pub(crate) fn render_menu_picker(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(owner, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.picker_metrics(PickerStyle::Menu);
     let selected = ctx.renderer_mut().read_signal(&selection);
     // Register this node-owned open handle so an outside click can dismiss it; the
@@ -410,6 +553,7 @@ pub(crate) fn render_menu_picker(
                             row_height,
                             selected,
                         },
+                        metrics,
                         env,
                     )
                 }
@@ -443,7 +587,7 @@ pub(crate) fn render_radio_picker(
     items: Vec<PickerItem<Id>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.picker_metrics(PickerStyle::Radio);
     let radio_motion = theme.radio_selection_motion();
     let selection_identity = selection.identity();
@@ -543,7 +687,7 @@ pub(crate) fn render_segmented_picker(
     items: Vec<PickerItem<Id>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.picker_metrics(PickerStyle::Segmented);
     let selected = ctx.renderer_mut().read_signal(&selection);
     let bounds = ctx.bounds;
@@ -627,3 +771,14 @@ fn segmented_label_rect(
     vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
 }
 use crate::animation::AnimationKey;
+
+/// Emits a retained picker's accessibility tree for the semantic walk — the
+/// same nodes `picker_accessibility` registers, with no bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_picker_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<PickerRenderState>>,
+    env: &Environment,
+) {
+    picker_accessibility(renderer, None, None, state, env);
+}

@@ -20,7 +20,7 @@ use waterui_core::id::SelfId;
 use waterui_layout::scroll::scroll;
 use waterui_layout::stack::{VStack, vstack};
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, PointerButton, PointerKind, TouchPhase};
 
@@ -42,7 +42,13 @@ fn labeled_rows() -> AnyView {
 fn runtime() -> HeadlessRuntime {
     let builder = AnyViewBuilder::<AnyView>::new(labeled_rows);
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT)
+    HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    )
 }
 
 fn scroll_y(result: &crate::HeadlessPumpResult) -> f64 {
@@ -138,7 +144,13 @@ fn pan_over_lazy_content_materializes_entering_rows() {
         })))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -297,8 +309,13 @@ fn inset_lazy_stack_materializes_the_visible_rows_after_pan() {
             .spacing(0.0),
         ))
     });
-    let mut runtime =
-        HeadlessRuntime::new_for_tests(test_environment(), builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
     runtime.push_input_event(InputEvent::TrackpadPan {

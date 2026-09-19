@@ -24,7 +24,9 @@ impl HydrolysisRenderer {
     pub(crate) fn scene_is_empty(&self) -> bool {
         !scene_has_content(&self.scene)
     }
+}
 
+impl SemanticCore {
     pub(super) fn resolve_animated_scalar_with_discriminator<S>(
         &mut self,
         signal: &S,

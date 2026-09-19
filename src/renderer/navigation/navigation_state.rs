@@ -7,7 +7,7 @@ use waterui::navigation::{
 use waterui_backend_core::widget::NavigationMotion;
 use waterui_core::id::Id;
 
-const ROOT_NAVIGATION_IDENTITY: u64 = 0;
+pub(crate) const ROOT_NAVIGATION_IDENTITY: u64 = 0;
 
 #[derive(Clone)]
 pub(crate) struct NavigationMatchedElement {
@@ -470,7 +470,7 @@ fn put_destination_state(
     panic!("Hydrolysis navigation destination identity {identity} was lost during its callback");
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn install_navigation_root_state(
         &mut self,
         slot_key: &NavigationKey,
@@ -520,70 +520,6 @@ impl HydrolysisRenderer {
         slot.root_is_active = true;
     }
 
-    pub(crate) fn begin_navigation_scene_capture(&mut self) {
-        self.navigation_captures
-            .push(NavigationSceneCapture::default());
-    }
-
-    pub(crate) fn finish_navigation_scene_capture(
-        &mut self,
-        scene: vello::Scene,
-    ) -> NavigationCapturedScene {
-        let capture = self
-            .navigation_captures
-            .pop()
-            .expect("navigation scene capture must be active");
-        assert!(
-            !capture.capturing_element,
-            "navigation element capture must finish before its page capture"
-        );
-        NavigationCapturedScene {
-            scene,
-            sources: capture.sources,
-            destinations: capture.destinations,
-        }
-    }
-
-    pub(crate) fn begin_navigation_element_capture(&mut self) -> bool {
-        let Some(capture) = self.navigation_captures.last_mut() else {
-            return false;
-        };
-        assert!(
-            !capture.capturing_element,
-            "navigation transition metadata cannot be nested"
-        );
-        capture.capturing_element = true;
-        true
-    }
-
-    pub(crate) fn finish_navigation_element_capture(
-        &mut self,
-        source: bool,
-        id: Id,
-        bounds: vello::kurbo::Rect,
-        scene: vello::Scene,
-    ) {
-        let capture = self
-            .navigation_captures
-            .last_mut()
-            .expect("navigation element capture requires an active page capture");
-        assert!(
-            capture.capturing_element,
-            "navigation element capture was not started"
-        );
-        capture.capturing_element = false;
-        let elements = if source {
-            &mut capture.sources
-        } else {
-            &mut capture.destinations
-        };
-        let previous = elements.insert(id, NavigationMatchedElement { bounds, scene });
-        assert!(
-            previous.is_none(),
-            "navigation transition id {id:?} was declared more than once in one page"
-        );
-    }
-
     pub(crate) fn bind_navigation_entries(&mut self, key: &NavigationKey) -> NavigationEntries {
         self.navigation.active.insert(key.address());
         let slot = self
@@ -628,6 +564,96 @@ impl HydrolysisRenderer {
         let allowed = state.attempt_pop(env);
         put_destination_state(slot, identity, state);
         allowed
+    }
+
+    /// Applies one batch of pending navigation events — the record a
+    /// push/pop/replace left behind when it mutated `entries` — folding the
+    /// removals into `pending_removed`, marking the transaction pending, and
+    /// firing `disappeared` on the destination that yielded the active
+    /// position.
+    ///
+    /// This is the lifecycle point both pipelines share: the state change
+    /// already happened on the retained tree, so the rendered walk and the
+    /// semantic emit each call it once. The rendered path then animates the
+    /// transition before [`Self::complete_navigation_transaction`] fires
+    /// `appeared`/`popped`; the semantic emit completes it in place — there
+    /// is no scene to animate.
+    ///
+    /// `active_identity` is the identity of the entry the mutated `entries`
+    /// stack now shows; the batch's final `current_identity` is asserted
+    /// against it. Returns the previous active identity and stack depth when
+    /// a batch was applied — the rendered walk uses them to animate from the
+    /// departed scene.
+    pub(crate) fn apply_navigation_events(
+        &mut self,
+        slot_key: &NavigationKey,
+        active_identity: u64,
+        env: &Environment,
+    ) -> Option<(u64, usize)> {
+        let events = {
+            let slot = self
+                .navigation
+                .slots
+                .get_mut(slot_key)
+                .expect("Hydrolysis navigation slot missing");
+            slot.events.borrow_mut().drain(..).collect::<Vec<_>>()
+        };
+        if events.is_empty() {
+            return None;
+        }
+        for pair in events.windows(2) {
+            assert_eq!(
+                pair[0].current_identity, pair[1].previous_identity,
+                "Hydrolysis navigation events must form one atomic transaction chain"
+            );
+        }
+        let final_identity = events
+            .last()
+            .expect("non-empty navigation event batch must have a last event")
+            .current_identity;
+        assert_eq!(
+            final_identity, active_identity,
+            "Hydrolysis navigation event result must match retained stack entries"
+        );
+        let final_transaction_id = events
+            .last()
+            .expect("non-empty navigation event batch must have a last event")
+            .transaction_id;
+        let (previous_identity, previous_depth) = {
+            let slot = self
+                .navigation
+                .slots
+                .get_mut(slot_key)
+                .expect("Hydrolysis navigation slot missing");
+            assert_eq!(
+                events
+                    .first()
+                    .expect("non-empty navigation event batch must have a first event")
+                    .previous_identity,
+                slot.active_identity,
+                "Hydrolysis navigation event must start from the rendered destination"
+            );
+            if let Some(previous_transaction_id) = slot.pending_transaction_id.take() {
+                let _ = slot
+                    .controller
+                    .transition_cancelled(previous_transaction_id);
+            }
+            let previous_identity = slot.active_identity;
+            let previous_depth = slot.last_depth;
+            for event in events {
+                slot.pending_removed.extend(event.removed);
+            }
+            slot.transition = None;
+            slot.interactive_pop = None;
+            slot.pending_transaction_id = Some(final_transaction_id);
+            slot.pending_appearance = previous_identity != final_identity;
+            slot.active_identity = final_identity;
+            (previous_identity, previous_depth)
+        };
+        if previous_identity != active_identity {
+            self.navigation_destination_disappeared(slot_key, previous_identity, env);
+        }
+        Some((previous_identity, previous_depth))
     }
 
     pub(crate) fn navigation_destination_disappeared(
@@ -699,6 +725,72 @@ impl HydrolysisRenderer {
         if let Some(transaction_id) = transaction_id {
             let _ = controller.transition_completed(transaction_id);
         }
+    }
+}
+
+impl HydrolysisRenderer {
+    pub(crate) fn begin_navigation_scene_capture(&mut self) {
+        self.navigation_captures
+            .push(NavigationSceneCapture::default());
+    }
+
+    pub(crate) fn finish_navigation_scene_capture(
+        &mut self,
+        scene: vello::Scene,
+    ) -> NavigationCapturedScene {
+        let capture = self
+            .navigation_captures
+            .pop()
+            .expect("navigation scene capture must be active");
+        assert!(
+            !capture.capturing_element,
+            "navigation element capture must finish before its page capture"
+        );
+        NavigationCapturedScene {
+            scene,
+            sources: capture.sources,
+            destinations: capture.destinations,
+        }
+    }
+
+    pub(crate) fn begin_navigation_element_capture(&mut self) -> bool {
+        let Some(capture) = self.navigation_captures.last_mut() else {
+            return false;
+        };
+        assert!(
+            !capture.capturing_element,
+            "navigation transition metadata cannot be nested"
+        );
+        capture.capturing_element = true;
+        true
+    }
+
+    pub(crate) fn finish_navigation_element_capture(
+        &mut self,
+        source: bool,
+        id: Id,
+        bounds: vello::kurbo::Rect,
+        scene: vello::Scene,
+    ) {
+        let capture = self
+            .navigation_captures
+            .last_mut()
+            .expect("navigation element capture requires an active page capture");
+        assert!(
+            capture.capturing_element,
+            "navigation element capture was not started"
+        );
+        capture.capturing_element = false;
+        let elements = if source {
+            &mut capture.sources
+        } else {
+            &mut capture.destinations
+        };
+        let previous = elements.insert(id, NavigationMatchedElement { bounds, scene });
+        assert!(
+            previous.is_none(),
+            "navigation transition id {id:?} was declared more than once in one page"
+        );
     }
 }
 

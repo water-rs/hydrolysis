@@ -13,7 +13,6 @@ use crate::renderer::{
     WidgetRenderContext, measure_transient_view_intrinsic, measure_view_dimensions_with_proposal,
     normalize_view_for_render,
 };
-use crate::widgets::widget_theme;
 #[cfg(feature = "accessibility")]
 use accesskit::{Node as AccessibilityNode, Role as AccessibilityNodeRole};
 
@@ -40,7 +39,7 @@ impl BadgeRenderState {
     /// HydroState`, no renderer, so it must be built before then).
     pub(crate) fn prebuild_content(
         &mut self,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut crate::renderer::SemanticCore,
         env: &Environment,
     ) {
         self.content.ensure_built(renderer, env);
@@ -51,31 +50,37 @@ fn badge_content_size(
     state: &mut HydroState,
     badge: &Native<BadgeConfig>,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let content = normalize_view_for_render(badge.as_inner().content.build(), env);
-    measure_transient_view_intrinsic(&content, state, env)
+    measure_transient_view_intrinsic(&content, state, env, theme)
 }
 
-fn badge_large_label(value: i32, env: &Environment) -> StyledStr {
-    let theme = widget_theme(env);
+fn badge_large_label(value: i32, theme: &Rc<dyn crate::engine::WidgetTheme>) -> StyledStr {
     StyledStr::plain(value.to_string())
         .font(theme.badge_label_font())
         .foreground(theme.badge_label_color())
 }
 
 impl HydroNativeView for Native<BadgeConfig> {
-    fn intrinsic(state: &mut HydroState, badge: &Self, env: &Environment) -> LayoutSize {
-        badge_content_size(state, badge, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        badge: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        badge_content_size(state, badge, env, theme)
     }
 
     fn dimensions(
         state: &mut HydroState,
         badge: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         let content = normalize_view_for_render(badge.as_inner().content.build(), env);
-        measure_view_dimensions_with_proposal(&content, proposal, state, env)
+        measure_view_dimensions_with_proposal(&content, proposal, state, env, theme)
     }
 }
 
@@ -86,8 +91,9 @@ pub(crate) fn measure_badge_node(
     _proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    ViewDimensions::new(state.content.measure_built(hydro, env))
+    ViewDimensions::new(state.content.measure_built(hydro, env, theme))
 }
 
 /// Renders a retained badge leaf every flush: flushes the content sub-view (whose
@@ -119,7 +125,7 @@ pub(crate) fn render_badge_parts(
         );
     }
 
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.badge_metrics();
     let value = {
         let signal = state.borrow().value.clone();
@@ -131,7 +137,7 @@ pub(crate) fn render_badge_parts(
     // its bottom edge overlaps the top edge by `offset_y`, matching
     // `BadgedBox` in Compose.
     let large = (value != 0).then(|| {
-        let label = badge_large_label(value, env);
+        let label = badge_large_label(value, &theme);
         let text_size = HydrolysisRenderer::measure_text_dimensions(
             ctx.state_mut(),
             label.clone(),
@@ -214,4 +220,27 @@ pub(crate) fn render_badge_parts(
         HorizontalAlignment::Center,
         env,
     );
+}
+
+/// Emits a retained badge's accessibility nodes for the semantic walk: the
+/// wrapped content's subtree (unsuppressed in the rendered path), then the
+/// count indicator's `Label` node — a vector-drawn badge value is otherwise
+/// invisible to assistive technology.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_badge_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<BadgeRenderState>>,
+    env: &Environment,
+) {
+    let mut state = state.borrow_mut();
+    state.content.emit_accessibility(renderer, env);
+    let value = {
+        let signal = state.value.clone();
+        renderer.read_signal(&signal)
+    };
+    if value != 0 {
+        let mut node = AccessibilityNode::new(AccessibilityNodeRole::Label);
+        node.set_label(value.to_string());
+        let _ = renderer.register_accessibility_node_semantic(node, env, None);
+    }
 }

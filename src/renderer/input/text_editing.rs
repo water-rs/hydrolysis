@@ -784,7 +784,7 @@ fn refreshed_target_selection(target: &TextInputTarget) -> parley::Selection {
     selection_for_target_layout(&target.model, &target.layout, &slot)
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn set_text_caret_motion(&mut self, motion: TextCaretMotion) {
         self.text_editing.text_caret_motion = Some(motion);
     }
@@ -796,7 +796,15 @@ impl HydrolysisRenderer {
     }
 
     pub(crate) fn reset_text_caret_animation(&mut self, now: Instant) {
-        let motion = self.text_caret_motion();
+        // A semantic core never installs a caret motion — the blink is
+        // presentation — so focusing a text field there clears the animation
+        // state instead of scheduling frames. `advance_text_caret_animation`
+        // and `text_caret_opacity` keep their strict contract: they only run
+        // on the rendered pump.
+        let Some(motion) = self.text_editing.text_caret_motion else {
+            self.clear_text_caret_animation();
+            return;
+        };
         self.text_editing.text_caret_fade_started_at = Some(now);
         self.text_editing.text_caret_next_frame_at = Some(
             now.checked_add(motion.frame_interval)
@@ -808,16 +816,18 @@ impl HydrolysisRenderer {
         self.text_editing.text_caret_fade_started_at = None;
         self.text_editing.text_caret_next_frame_at = None;
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn prepare_transient_text_input_overlay(
         &mut self,
-        env: &Environment,
+        _env: &Environment,
         transform: vello::kurbo::Affine,
     ) {
         let focused = self.text_editing.focused_index();
         let menu_target = self.active_text_context_menu_target();
         let mut scene = vello::Scene::new();
-        let theme = widget_theme(env);
+        let theme = self.theme();
         {
             let mut draw = VelloDrawContext::with_root_transform(&mut scene, transform);
             for (index, target) in self.text_editing.text_input_targets.iter().enumerate() {
@@ -857,7 +867,9 @@ impl HydrolysisRenderer {
         }
         self.transient_scene = Some(scene);
     }
+}
 
+impl SemanticCore {
     pub(crate) fn advance_text_caret_animation(&mut self, now: Instant) -> bool {
         if !self.text_editing.has_focus() {
             return false;
@@ -925,10 +937,91 @@ impl HydrolysisRenderer {
     /// Move focus to the text input with this stable identity, or clear it with
     /// `None`. The target need not be emitted this frame; focus simply resolves
     /// to nothing until it is.
+    /// Wires a `.focused(binding)` modifier to the text-input target registered
+    /// since `target_start`: writes the binding onto that target, then applies
+    /// the binding's value to the focused-input key. Shared by the rendered
+    /// flush and the semantic accessibility walk.
+    pub(crate) fn wire_focused_target(
+        &mut self,
+        value: &waterui::component::focus::Focused,
+        should_focus: bool,
+        target_start: usize,
+    ) {
+        let end = self.text_editing.text_input_targets.len();
+        let focus_target_count = end - target_start;
+        assert!(
+            focus_target_count == 1,
+            "hydrolysis .focused() requires exactly one TextField or SecureField in the wrapped subtree, found {focus_target_count}"
+        );
+        let target = self
+            .text_editing
+            .text_input_targets
+            .get_mut(target_start)
+            .expect("hydrolysis focused metadata missing registered text input target");
+        assert!(
+            target.focus_binding.is_none(),
+            "hydrolysis does not allow multiple .focused() modifiers to target the same control"
+        );
+        target.focus_binding = Some(value.0.clone());
+        let target_key = target.interaction_key.clone();
+
+        if should_focus {
+            self.set_focused_text_input_key(Some(target_key));
+        } else if self.text_editing.is_focused(&target_key) {
+            self.set_focused_text_input_key(None);
+        }
+    }
+
     pub(crate) fn set_focused_text_input_key(&mut self, focused: Option<InteractionKey>) -> bool {
         let previous = self.text_editing.focused_key();
+        let mut changed = false;
+        match focused.as_ref() {
+            // A field taking UI focus takes the semantic focus with it —
+            // the tree reports focus on the field's node.
+            Some(key) if previous.as_ref() != Some(key) => {
+                #[cfg(feature = "accessibility")]
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    #[cfg(feature = "accessibility")]
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            // The same field re-asserted: repair only a stale link — keyboard
+            // focus still claims the key while its node went un-emitted when
+            // the link was made. Semantic focus sitting on another node is a
+            // legitimate move, not staleness.
+            #[cfg(feature = "accessibility")]
+            Some(key)
+                if self.hit_test.keyboard_focus.as_ref() == Some(key)
+                    && self
+                        .focus_node_for_key(key)
+                        .is_some_and(|node| self.accessibility.focus != node) =>
+            {
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            Some(_) => {}
+            // Clearing UI focus drops the semantic focus only when the tree
+            // was resting on the cleared field — focus on a non-text node
+            // is independent of the text caret.
+            None if previous.is_some() && self.hit_test.keyboard_focus == previous => {
+                changed |= self.set_keyboard_focus_impl(
+                    None,
+                    #[cfg(feature = "accessibility")]
+                    None,
+                    false,
+                );
+            }
+            None => {}
+        }
         if previous == focused {
-            return false;
+            return changed;
         }
         let focus_binding = |key: Option<&InteractionKey>| {
             key.and_then(|key| self.text_editing.index_of(key))
@@ -985,7 +1078,9 @@ impl HydrolysisRenderer {
         };
         self.text_editing.index_of(key)
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn render_active_text_context_menu_overlay(
         &mut self,
         env: &Environment,
@@ -997,7 +1092,7 @@ impl HydrolysisRenderer {
             return;
         };
 
-        let theme = widget_theme(env);
+        let theme = self.theme();
         let metrics = theme.text_context_menu_metrics();
         {
             let mut draw = VelloDrawContext::with_root_transform(&mut self.scene, transform);
@@ -1066,7 +1161,9 @@ impl HydrolysisRenderer {
             }
         }
     }
+}
 
+impl SemanticCore {
     pub(crate) fn handle_text_context_menu_overlay_pointer_down(
         &mut self,
         point: vello::kurbo::Point,
@@ -1449,7 +1546,9 @@ impl HydrolysisRenderer {
         }
         entries
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn show_text_context_menu(
         &mut self,
         index: usize,
@@ -1466,7 +1565,7 @@ impl HydrolysisRenderer {
             return false;
         };
         let target_key = target.interaction_key.clone();
-        let entries = Self::build_text_context_menu_entries(&target, env);
+        let entries = SemanticCore::build_text_context_menu_entries(&target, env);
         if entries.is_empty() {
             self.dismiss_active_text_context_menu();
             return false;
@@ -1479,7 +1578,7 @@ impl HydrolysisRenderer {
             .unwrap_or(HydrolysisTextContextMenuMode::NativeWindow);
 
         if mode == HydrolysisTextContextMenuMode::Overlay {
-            let metrics = widget_theme(env).text_context_menu_metrics();
+            let metrics = self.theme().text_context_menu_metrics();
             let bounds =
                 text_context_menu_overlay_bounds(point, &entries, self.window_bounds, metrics);
             let mut rows = Vec::with_capacity(entries.len());
@@ -1507,7 +1606,7 @@ impl HydrolysisRenderer {
         }
 
         let menu_state = nami::Binding::container(WindowState::Normal);
-        let metrics = widget_theme(env).text_context_menu_metrics();
+        let metrics = self.theme().text_context_menu_metrics();
         let (width, height) = text_context_menu_size(&entries, metrics);
         let origin = env
             .get::<HydrolysisWindowOrigin>()
@@ -1572,7 +1671,9 @@ impl HydrolysisRenderer {
         });
         true
     }
+}
 
+impl SemanticCore {
     pub fn handle_text_input(&mut self, text: &str) -> bool {
         let preedit_cleared = self.text_editing.ime_preedit.take().is_some();
         if text.is_empty() {

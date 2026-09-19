@@ -249,7 +249,6 @@ pub struct FrameProfile {
 }
 
 impl FrameProfile {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn with_total(mut self, total: Duration) -> Self {
         self.total = total;
         self
@@ -518,7 +517,7 @@ pub(super) struct ScenePumpOutcome {
     pub(super) phases: FramePhases,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "winit")))]
 pub(super) fn pump_window_semantics<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
@@ -1210,17 +1209,16 @@ where
                 state: KeyState::Pressed,
                 modifiers,
             } => {
+                let key_env = input_env(runtime, env);
                 let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
                     pressed: true,
                     logical: &logical_key,
                     code: physical_code,
                     repeat,
                     modifiers,
-                }) || runtime.renderer.handle_key_with_env(
-                    &key,
-                    modifiers,
-                    &input_env(runtime, env),
-                );
+                }) || runtime
+                    .renderer
+                    .handle_key_with_env(&key, modifiers, &key_env);
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "key_pressed",
@@ -1276,15 +1274,14 @@ where
                 state: KeyState::Released,
                 modifiers,
             } => {
+                let key_env = input_env(runtime, env);
                 let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
                     pressed: false,
                     logical: &logical_key,
                     code: physical_code,
                     repeat,
                     modifiers,
-                }) || runtime
-                    .renderer
-                    .handle_key_release_with_env(&key, &input_env(runtime, env));
+                }) || runtime.renderer.handle_key_release_with_env(&key, &key_env);
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::ModifiersChanged(modifiers) => {

@@ -1,5 +1,4 @@
 use super::*;
-use crate::widgets::util::widget_theme;
 use nami::{Computed, Signal as _};
 use waterui::drag_drop::DragData;
 use waterui_backend_core::widget::{
@@ -157,12 +156,26 @@ pub(crate) struct HoverSync {
 }
 
 pub(crate) type PointerAction =
-    Rc<RefCell<dyn FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool>>;
+    Rc<RefCell<dyn FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool>>;
 pub(crate) type KeyboardStepAction = Rc<RefCell<dyn FnMut(bool) -> bool>>;
 pub(crate) type HoverAction = Rc<RefCell<dyn FnMut(&Environment) -> bool>>;
 pub(crate) type HoverMoveAction = Rc<RefCell<dyn FnMut(vello::kurbo::Point, &Environment) -> bool>>;
 pub(crate) type ScrollAction = Rc<RefCell<dyn FnMut(f32, f32, bool) -> bool>>;
 pub(crate) type TrackpadPanAction = Rc<RefCell<dyn FnMut(f32, f32, TouchPhase) -> bool>>;
+
+/// How Enter/Space activates a keyboard-focused control — a per-runtime
+/// contract, not a feature one.
+#[cfg(feature = "accessibility")]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum KeyboardActivation {
+    /// Press on key-down and activate on key-up — the rendered contract, with
+    /// the pressed affordance held between the two.
+    #[default]
+    PressRelease,
+    /// Dispatch `Click` on key-down — the semantic runtime's contract: with no
+    /// presentation there is no pressed affordance to hold.
+    Semantic,
+}
 
 #[derive(Default)]
 pub(crate) struct HitTestState {
@@ -185,6 +198,11 @@ pub(crate) struct HitTestState {
     pub(crate) keyboard_focus_binding: Option<Binding<bool>>,
     pub(crate) keyboard_focus_visible: bool,
     pub(crate) active_keyboard_target: Option<PointerTarget>,
+    /// Keyboard activation semantics for this runtime — see
+    /// [`KeyboardActivation`]. Only the semantic runtime switches it from the
+    /// rendered default.
+    #[cfg(feature = "accessibility")]
+    pub(crate) keyboard_activation: KeyboardActivation,
     pub(crate) modal_interaction: Option<ModalInteraction>,
     pub(crate) active_pointer_drag_target: Option<PointerAction>,
     pub(crate) active_pointer_drag_signature: Option<(usize, usize)>,
@@ -374,12 +392,13 @@ impl HitTestState {
             .enumerate()
             .filter(|(_, target)| target.bounds.contains(point))
             .max_by(|(left_index, left), (right_index, right)| {
-                HydrolysisRenderer::target_hit_priority(left.key.depth, left.key.order, *left_index)
-                    .cmp(&HydrolysisRenderer::target_hit_priority(
+                SemanticCore::target_hit_priority(left.key.depth, left.key.order, *left_index).cmp(
+                    &SemanticCore::target_hit_priority(
                         right.key.depth,
                         right.key.order,
                         *right_index,
-                    ))
+                    ),
+                )
             })
             .map(|(index, _)| index)
     }
@@ -392,7 +411,7 @@ impl HitTestState {
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     fn call_drop_action(
         action: &Rc<RefCell<BoxedAction<()>>>,
         captured_env: &Environment,
@@ -553,7 +572,9 @@ impl HydrolysisRenderer {
             self.clear_scrollbar_drag();
         }
     }
+}
 
+impl HydrolysisRenderer {
     pub fn handle_pointer_down(
         &mut self,
         x: f32,
@@ -644,18 +665,18 @@ impl HydrolysisRenderer {
         pointer_indices.sort_unstable_by(|left, right| {
             let left_target = &self.hit_test.pointer_targets[*left];
             let right_target = &self.hit_test.pointer_targets[*right];
-            Self::target_hit_priority(right_target.depth, right_target.order, *right).cmp(
-                &Self::target_hit_priority(left_target.depth, left_target.order, *left),
+            SemanticCore::target_hit_priority(right_target.depth, right_target.order, *right).cmp(
+                &SemanticCore::target_hit_priority(left_target.depth, left_target.order, *left),
             )
         });
         let focused = self.topmost_text_input_index_at_point(point);
         let top_pointer_priority = pointer_indices.first().map(|index| {
             let target = &self.hit_test.pointer_targets[*index];
-            Self::target_hit_priority(target.depth, target.order, *index)
+            SemanticCore::target_hit_priority(target.depth, target.order, *index)
         });
         let focused_priority = focused.map(|index| {
             let target = &self.text_editing.text_input_targets[index];
-            Self::target_hit_priority(target.depth, target.order, index)
+            SemanticCore::target_hit_priority(target.depth, target.order, index)
         });
         if let Some((target, local_position)) =
             self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
@@ -742,7 +763,7 @@ impl HydrolysisRenderer {
                         let keep_selection = {
                             let target = &self.text_editing.text_input_targets[index];
                             let selection_index =
-                                Self::text_selection_index_from_point(target, point);
+                                SemanticCore::text_selection_index_from_point(target, point);
                             let slot = target.selection.borrow();
                             selection_range_contains_index(&target.model, &slot, selection_index)
                         };
@@ -768,9 +789,11 @@ impl HydrolysisRenderer {
                     if self.set_focused_text_input(focused) {
                         refresh_requested = true;
                     }
+                    let metrics = self.theme().text_context_menu_metrics();
                     let changed = self.show_popup_menu_nodes(
                         items,
                         LayoutPoint::new(point.x as f32, point.y as f32),
+                        metrics,
                         env,
                     );
                     return refresh_requested || visual_changed || changed;
@@ -1075,19 +1098,161 @@ impl HydrolysisRenderer {
         );
         changed
     }
+}
+
+/// One stop in keyboard-focus traversal — the semantic node plus the
+/// interaction identities it resolves to. `key` is `None` for a focusable
+/// node that never registered a pointer target, which only happens when the
+/// accessibility feature is off or the widget is pointer-inert.
+struct KeyboardFocusCandidate {
+    key: Option<InteractionKey>,
+    #[cfg(feature = "accessibility")]
+    node: AccessibilityNodeId,
+    text_input: Option<usize>,
+    /// Emission order — only consulted when the candidate list itself is not
+    /// already in tree order (the pointer/text-input path).
+    #[cfg(not(feature = "accessibility"))]
+    order: usize,
+}
+
+impl SemanticCore {
+    /// The accessibility node `key` emitted this frame, when the widget
+    /// stamped a focus link or owns a text-input target.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn focus_node_for_key(&self, key: &InteractionKey) -> Option<AccessibilityNodeId> {
+        self.accessibility
+            .interaction_nodes
+            .get(key)
+            .copied()
+            .or_else(|| {
+                self.text_editing
+                    .text_input_targets
+                    .iter()
+                    .find(|target| &target.interaction_key == key)
+                    .and_then(|target| target.accessibility_node_id)
+            })
+    }
+
+    /// The interaction identity behind `node` — the press slot or text-input
+    /// target the widget linked its emitted node to.
+    #[cfg(feature = "accessibility")]
+    fn focus_key_for_node(&self, node: AccessibilityNodeId) -> Option<InteractionKey> {
+        self.accessibility
+            .interaction_nodes
+            .iter()
+            .find(|(_, linked)| **linked == node)
+            .map(|(key, _)| key.clone())
+            .or_else(|| {
+                self.text_editing
+                    .text_input_targets
+                    .iter()
+                    .find(|target| target.accessibility_node_id == Some(node))
+                    .map(|target| target.interaction_key.clone())
+            })
+    }
+
+    /// Moves keyboard focus to `node` — the semantic-tree identity every
+    /// focus path converges on. The pointer machinery's `InteractionKey` is
+    /// resolved from it where the widget linked one, so a focusable node
+    /// needs no pointer target to take keyboard focus.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn set_keyboard_focus_node(
+        &mut self,
+        node: Option<AccessibilityNodeId>,
+        visible: bool,
+    ) -> bool {
+        let key = node.and_then(|node| self.focus_key_for_node(node));
+        let text_input = node.and_then(|node| {
+            self.text_editing
+                .text_input_targets
+                .iter()
+                .position(|target| target.accessibility_node_id == Some(node))
+        });
+        let mut changed = self.set_keyboard_focus_impl(key, node, visible);
+        // Text focus is sticky: it follows the semantic focus only onto a
+        // text-input node — focusing a button leaves the caret where it is.
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
+        changed
+    }
+
+    /// The currently focused semantic node — `None` while window-level focus
+    /// rests on the tree root.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn keyboard_focus_node(&self) -> Option<AccessibilityNodeId> {
+        (self.accessibility.focus != ACCESSIBILITY_ROOT_NODE_ID).then_some(self.accessibility.focus)
+    }
+
+    /// Enter/Space on a focused control dispatches `Click` on key-down — the
+    /// semantic runtime's keyboard contract. Rendered runtimes keep the
+    /// [`KeyboardActivation::PressRelease`] default.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn use_semantic_keyboard_activation(&mut self) {
+        self.hit_test.keyboard_activation = KeyboardActivation::Semantic;
+    }
 
     pub(crate) fn set_keyboard_focus(
         &mut self,
         focus: Option<InteractionKey>,
         visible: bool,
     ) -> bool {
+        #[cfg(feature = "accessibility")]
+        let node = focus.as_ref().and_then(|key| self.focus_node_for_key(key));
+        let text_input = focus.as_ref().and_then(|key| {
+            self.text_editing
+                .text_input_targets
+                .iter()
+                .position(|target| &target.interaction_key == key)
+        });
+        let mut changed = self.set_keyboard_focus_impl(
+            focus,
+            #[cfg(feature = "accessibility")]
+            node,
+            visible,
+        );
+        // Text focus is sticky: it moves only when the key belongs to a
+        // text-input target — clearing or re-targeting keyboard focus does
+        // not drop the caret.
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
+        changed
+    }
+
+    pub(crate) fn set_keyboard_focus_impl(
+        &mut self,
+        focus: Option<InteractionKey>,
+        #[cfg(feature = "accessibility")] node: Option<AccessibilityNodeId>,
+        visible: bool,
+    ) -> bool {
         let visible = focus.is_some() && visible;
-        if self.hit_test.keyboard_focus == focus && self.hit_test.keyboard_focus_visible == visible
+        #[cfg(feature = "accessibility")]
+        let node_changed = self.accessibility.focus != node.unwrap_or(ACCESSIBILITY_ROOT_NODE_ID);
+        #[cfg(not(feature = "accessibility"))]
+        let node_changed = false;
+        if self.hit_test.keyboard_focus == focus
+            && self.hit_test.keyboard_focus_visible == visible
+            && !node_changed
         {
             return false;
         }
-        if self.hit_test.keyboard_focus != focus {
-            if let Some(binding) = self.hit_test.keyboard_focus_binding.take() {
+        if self.hit_test.keyboard_focus != focus || node_changed {
+            // A `.focused` lens on the field still holding the caret is owned
+            // by the text machinery: semantic focus moving to a non-text node
+            // leaves UI focus — and the binding — on the field. Only a
+            // transition that actually moves the caret (a new text target) or
+            // ends text focus lets this write stand.
+            let caret_keeps_binding = self.hit_test.keyboard_focus.is_some()
+                && self.hit_test.keyboard_focus == self.text_editing.focused_key()
+                && !self
+                    .text_editing
+                    .text_input_targets
+                    .iter()
+                    .any(|target| Some(&target.interaction_key) == focus.as_ref());
+            if let Some(binding) = self.hit_test.keyboard_focus_binding.take()
+                && !caret_keeps_binding
+            {
                 binding.set(false);
             }
             self.hit_test.keyboard_focus = focus;
@@ -1103,6 +1268,18 @@ impl HydrolysisRenderer {
                         .is_some_and(|focused| &slot.key == focused)
                 })
                 .and_then(|slot| slot.focus_binding.clone());
+            #[cfg(feature = "accessibility")]
+            {
+                if self.hit_test.keyboard_focus_binding.is_none() {
+                    self.hit_test.keyboard_focus_binding = node.and_then(|node| {
+                        self.accessibility
+                            .focus_bindings
+                            .get(&node)
+                            .map(|binding| binding.focused().clone())
+                    });
+                }
+                self.accessibility.focus = node.unwrap_or(ACCESSIBILITY_ROOT_NODE_ID);
+            }
             if let Some(binding) = self.hit_test.keyboard_focus_binding.as_ref() {
                 binding.set(true);
             }
@@ -1112,7 +1289,75 @@ impl HydrolysisRenderer {
         true
     }
 
-    fn keyboard_focus_candidates(&self) -> Vec<(InteractionKey, Option<usize>, usize)> {
+    /// The traversal order is the semantic order of the emitted tree: the
+    /// nodes that advertise `Focus`, in emission order. The rendered runtime
+    /// emits the same tree, so both runtimes share this single source — the
+    /// pointer-target list plays no part in it.
+    #[cfg(feature = "accessibility")]
+    fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
+        let modal_active = self.hit_test.modal_interaction.is_some()
+            || self
+                .hit_test
+                .pointer_targets
+                .iter()
+                .any(|target| target.modal)
+            || self
+                .text_editing
+                .text_input_targets
+                .iter()
+                .any(|target| target.modal);
+        self.accessibility
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.supports_action(AccessibilityAction::Focus))
+            .filter_map(|(node_id, _)| {
+                let node_id = *node_id;
+                let text_input = self
+                    .text_editing
+                    .text_input_targets
+                    .iter()
+                    .position(|target| target.accessibility_node_id == Some(node_id));
+                let key = self.focus_key_for_node(node_id);
+                // A widget may bind its interaction identity out of keyboard
+                // focus while still advertising `Focus` to assistive clients —
+                // the pointer opt-out wins for keyboard traversal.
+                if key.as_ref().is_some_and(|key| {
+                    self.hit_test.pointer_targets.iter().any(|target| {
+                        !target.keyboard_focusable
+                            && target
+                                .press_slot
+                                .as_ref()
+                                .is_some_and(|slot| &slot.key == key)
+                    })
+                }) {
+                    return None;
+                }
+                if modal_active {
+                    let modal = key.as_ref().is_some_and(|key| {
+                        self.hit_test.pointer_targets.iter().any(|target| {
+                            target.modal
+                                && target
+                                    .press_slot
+                                    .as_ref()
+                                    .is_some_and(|slot| &slot.key == key)
+                        })
+                    }) || text_input
+                        .is_some_and(|index| self.text_editing.text_input_targets[index].modal);
+                    if !modal {
+                        return None;
+                    }
+                }
+                Some(KeyboardFocusCandidate {
+                    key,
+                    node: node_id,
+                    text_input,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(not(feature = "accessibility"))]
+    fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
         let modal_active = self
             .hit_test
             .pointer_targets
@@ -1123,43 +1368,65 @@ impl HydrolysisRenderer {
                 .text_input_targets
                 .iter()
                 .any(|target| target.modal);
-        let mut candidates = Vec::new();
+        let mut candidates = Vec::<KeyboardFocusCandidate>::new();
         for target in &self.hit_test.pointer_targets {
             let Some(slot) = target.press_slot.as_ref() else {
                 continue;
             };
             if (modal_active && !target.modal)
                 || !target.keyboard_focusable
-                || candidates.iter().any(|(key, _, _)| key == &slot.key)
+                || candidates
+                    .iter()
+                    .any(|candidate| candidate.key.as_ref() == Some(&slot.key))
             {
                 continue;
             }
-            candidates.push((slot.key.clone(), None, target.order));
+            candidates.push(KeyboardFocusCandidate {
+                key: Some(slot.key.clone()),
+                text_input: None,
+                order: target.order,
+            });
         }
         for (index, target) in self.text_editing.text_input_targets.iter().enumerate() {
             if (modal_active && !target.modal)
                 || candidates
                     .iter()
-                    .any(|(key, _, _)| key == &target.interaction_key)
+                    .any(|candidate| candidate.key.as_ref() == Some(&target.interaction_key))
             {
                 continue;
             }
-            candidates.push((target.interaction_key.clone(), Some(index), target.order));
+            candidates.push(KeyboardFocusCandidate {
+                key: Some(target.interaction_key.clone()),
+                text_input: Some(index),
+                order: target.order,
+            });
         }
-        candidates.sort_unstable_by_key(|(_, _, order)| *order);
+        candidates.sort_unstable_by_key(|candidate| candidate.order);
         candidates
     }
 
     fn move_keyboard_focus(&mut self, reverse: bool) -> bool {
         let candidates = self.keyboard_focus_candidates();
         if candidates.is_empty() {
-            return self.set_keyboard_focus(None, false);
+            #[cfg(feature = "accessibility")]
+            {
+                return self.set_keyboard_focus_node(None, false);
+            }
+            #[cfg(not(feature = "accessibility"))]
+            {
+                return self.set_keyboard_focus(None, false);
+            }
         }
-        let current = self
-            .hit_test
-            .keyboard_focus
-            .as_ref()
-            .and_then(|focused| candidates.iter().position(|(key, _, _)| key == focused));
+        #[cfg(feature = "accessibility")]
+        let current = candidates
+            .iter()
+            .position(|candidate| Some(candidate.node) == self.keyboard_focus_node());
+        #[cfg(not(feature = "accessibility"))]
+        let current = self.hit_test.keyboard_focus.as_ref().and_then(|focused| {
+            candidates
+                .iter()
+                .position(|candidate| candidate.key.as_ref() == Some(focused))
+        });
         let next = if reverse {
             current.map_or(candidates.len() - 1, |index| {
                 index.checked_sub(1).unwrap_or(candidates.len() - 1)
@@ -1167,9 +1434,19 @@ impl HydrolysisRenderer {
         } else {
             current.map_or(0, |index| (index + 1) % candidates.len())
         };
-        let (key, text_input, _) = &candidates[next];
-        let mut changed = self.set_keyboard_focus(Some(key.clone()), true);
-        changed |= self.set_focused_text_input(*text_input);
+        let candidate = &candidates[next];
+        let text_input = candidate.text_input;
+        #[cfg(feature = "accessibility")]
+        let changed =
+            self.set_keyboard_focus_impl(candidate.key.clone(), Some(candidate.node), true);
+        #[cfg(not(feature = "accessibility"))]
+        let changed = self.set_keyboard_focus(candidate.key.clone(), true);
+        // Text focus follows traversal onto a field, but a non-text
+        // candidate leaves the caret where it is.
+        let mut changed = changed;
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
         changed
     }
 
@@ -1186,19 +1463,29 @@ impl HydrolysisRenderer {
             modal.handle_escape(env);
             return true;
         }
-        if matches!(key, KeyCode::Named(value) if value == "Escape")
-            && let Some(focused) = self.hit_test.keyboard_focus.as_ref()
-            && let Some(action) = self
-                .hit_test
-                .pointer_targets
-                .iter()
-                .rev()
-                .filter_map(|target| target.press_slot.as_ref())
-                .find(|slot| &slot.key == focused)
-                .and_then(|slot| slot.escape_action.clone())
-        {
-            action.call(env);
-            return true;
+        if matches!(key, KeyCode::Named(value) if value == "Escape") {
+            #[cfg(feature = "accessibility")]
+            if let Some(action) = self
+                .keyboard_focus_node()
+                .and_then(|node| self.accessibility.focus_bindings.get(&node))
+                .and_then(|binding| binding.escape_action_handle().cloned())
+            {
+                action.call(env);
+                return true;
+            }
+            if let Some(focused) = self.hit_test.keyboard_focus.as_ref()
+                && let Some(action) = self
+                    .hit_test
+                    .pointer_targets
+                    .iter()
+                    .rev()
+                    .filter_map(|target| target.press_slot.as_ref())
+                    .find(|slot| &slot.key == focused)
+                    .and_then(|slot| slot.escape_action.clone())
+            {
+                action.call(env);
+                return true;
+            }
         }
         if matches!(key, KeyCode::Named(value) if value == "Tab")
             && !(modifiers.control || modifiers.alt || modifiers.super_key)
@@ -1212,6 +1499,35 @@ impl HydrolysisRenderer {
         let step_backward =
             matches!(key, KeyCode::Named(value) if value == "ArrowLeft" || value == "ArrowDown");
         if step_forward || step_backward {
+            #[cfg(feature = "accessibility")]
+            {
+                if let Some(node) = self.keyboard_focus_node() {
+                    let step_action = if step_forward {
+                        AccessibilityAction::Increment
+                    } else {
+                        AccessibilityAction::Decrement
+                    };
+                    if self
+                        .accessibility
+                        .nodes
+                        .iter()
+                        .any(|(id, emitted)| *id == node && emitted.supports_action(step_action))
+                    {
+                        return self.handle_accessibility_action(
+                            AccessibilityActionRequest {
+                                action: step_action,
+                                target_node: node,
+                                target_tree: AccessibilityTreeId::ROOT,
+                                data: None,
+                            },
+                            env,
+                        );
+                    }
+                }
+            }
+            // A widget may bind a keyboard-step affordance without advertising
+            // the matching semantic actions — the pointer-bound fallback
+            // covers it.
             let modal_active = self.hit_test.modal_interaction.is_some();
             let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
                 return false;
@@ -1239,6 +1555,31 @@ impl HydrolysisRenderer {
             return true;
         }
         if !activates || modifiers.control || modifiers.alt || modifiers.super_key {
+            return false;
+        }
+        #[cfg(feature = "accessibility")]
+        if self.hit_test.keyboard_activation == KeyboardActivation::Semantic {
+            let Some(node) = self.keyboard_focus_node() else {
+                return false;
+            };
+            if self.focused_text_input_accessibility_node() != Some(node)
+                && self.accessibility.nodes.iter().any(|(id, emitted)| {
+                    *id == node && emitted.supports_action(AccessibilityAction::Click)
+                })
+            {
+                return self.handle_accessibility_action(
+                    AccessibilityActionRequest {
+                        action: AccessibilityAction::Click,
+                        target_node: node,
+                        target_tree: AccessibilityTreeId::ROOT,
+                        data: None,
+                    },
+                    env,
+                );
+            }
+            // A focused node that does not advertise `Click` is not
+            // activatable — the pointer-press fallback would fire an action
+            // the semantics say does not exist.
             return false;
         }
         let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
@@ -1283,7 +1624,6 @@ impl HydrolysisRenderer {
             self.request_redraw();
         }
         self.hit_test.active_keyboard_target = Some(target);
-        let _ = env;
         true
     }
 
@@ -1309,7 +1649,9 @@ impl HydrolysisRenderer {
         }
         true
     }
+}
 
+impl HydrolysisRenderer {
     pub fn handle_pointer_cancel(&mut self, env: &Environment) -> bool {
         let Some((pointer_id, pointer_kind)) = self.hit_test.active_pointer else {
             return false;
@@ -1347,17 +1689,20 @@ impl HydrolysisRenderer {
             self.request_redraw();
         }
         refresh_requested |= press_clear.chrome_changed;
+        let frame_instant = self.core.frame_instant;
         let gesture_changed = self
+            .core
             .gesture_engine
-            .handle_pointer_cancel(self.frame_instant(), env);
+            .handle_pointer_cancel(frame_instant, env);
         refresh_requested |= gesture_changed;
         let mut hover_visual_changed = false;
-        for target in &mut self.hit_test.hover_targets {
-            let hovering = self.hit_test.interaction.hovering(&target.slot);
+        let hit_test = &mut self.core.hit_test;
+        for target in &mut hit_test.hover_targets {
+            let hovering = hit_test.interaction.hovering(&target.slot);
             if !hovering {
                 continue;
             }
-            self.hit_test.interaction.set_hovering(&target.slot, false);
+            hit_test.interaction.set_hovering(&target.slot, false);
             if let Some(handles) = &target.handles {
                 handles.set_hovering(false, at);
                 hover_visual_changed = true;
@@ -1434,10 +1779,12 @@ impl HydrolysisRenderer {
         }
         self.handle_scroll(x, y, dx, dy, false)
     }
+}
 
+impl SemanticCore {
     pub(crate) fn register_pointer_target<F>(&mut self, bounds: vello::kurbo::Rect, action: F)
     where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_pointer_target_action(
             bounds,
@@ -1450,7 +1797,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn register_pointer_drag_target<F>(&mut self, bounds: vello::kurbo::Rect, action: F)
     where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_pointer_target_action(
             bounds,
@@ -1523,7 +1870,7 @@ impl HydrolysisRenderer {
         bounds: vello::kurbo::Rect,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1574,7 +1921,7 @@ impl HydrolysisRenderer {
             true,
             None,
             Rc::new(RefCell::new(
-                move |renderer: &mut HydrolysisRenderer,
+                move |renderer: &mut SemanticCore,
                       point: vello::kurbo::Point,
                       env: &Environment| {
                     renderer.begin_or_update_drag(data.get(), point, env)
@@ -1610,7 +1957,9 @@ impl HydrolysisRenderer {
             on_exit: handles.on_exit.clone(),
         });
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn bind_interaction_target(
         &mut self,
         key: InteractionKey,
@@ -1692,9 +2041,9 @@ impl HydrolysisRenderer {
             // the control was disabled does not resurface on re-enable.
             self.hit_test.interaction.set_hovering(&hover_slot, false);
         }
-        let motion = widget_theme(env).interaction_motion();
+        let motion = self.theme().interaction_motion();
         let now = self.frame_instant();
-        let (state, mut press_slot, handles) = self.hit_test.interaction.bind_widget_state(
+        let (state, mut press_slot, handles) = self.core.hit_test.interaction.bind_widget_state(
             &key,
             WidgetInteractionInput {
                 bounds,
@@ -1703,7 +2052,7 @@ impl HydrolysisRenderer {
                 disabled,
             },
             &motion,
-            &mut self.animation_controller,
+            &mut self.core.animation_controller,
             now,
         );
         if let Some(modal) = env
@@ -1738,14 +2087,16 @@ impl HydrolysisRenderer {
         }
         (state, press_slot, handles)
     }
+}
 
+impl SemanticCore {
     pub(crate) fn register_interactive_pointer_target<F>(
         &mut self,
         bounds: vello::kurbo::Rect,
         press_slot: PressSlot,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         self.register_interactive_pointer_target_with_keyboard(bounds, press_slot, true, action);
     }
@@ -1757,7 +2108,7 @@ impl HydrolysisRenderer {
         keyboard_focusable: bool,
         action: F,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1786,7 +2137,7 @@ impl HydrolysisRenderer {
         action: F,
         keyboard_step: K,
     ) where
-        F: 'static + FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool,
+        F: 'static + FnMut(&mut SemanticCore, vello::kurbo::Point, &Environment) -> bool,
         K: 'static + FnMut(bool) -> bool,
     {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {

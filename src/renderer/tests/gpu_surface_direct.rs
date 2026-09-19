@@ -28,7 +28,7 @@ use waterui_core::handler::AnyViewBuilder;
 use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView};
 use waterui_layout::frame::Frame;
 
-use super::pumped_test_environment;
+use super::{MinimalTestTheme, pumped_test_environment};
 use crate::HeadlessRuntime;
 
 const WINDOW_WIDTH: u32 = 160;
@@ -163,6 +163,7 @@ fn runtime_with(
         builder,
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
     )
     .with_scale_factor(scale_factor)
 }

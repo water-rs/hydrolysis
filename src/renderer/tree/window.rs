@@ -11,7 +11,7 @@ impl RenderNode {
     /// when so, which lets a size-changing swap reflow its ancestors without
     /// resetting the scene and re-dispatching, which is visible as a flash.
     /// Walks the whole tree.
-    pub(crate) fn patch(&mut self, renderer: &mut HydrolysisRenderer) -> bool {
+    pub(crate) fn patch(&mut self, renderer: &mut SemanticCore) -> bool {
         // No environment is threaded through: a rebuild uses the node's own captured
         // environment (`Dynamic`/`Collection`/`Env` carry it), so the walk only needs
         // the renderer.
@@ -131,6 +131,97 @@ impl RenderNode {
     }
 }
 
+impl SemanticCore {
+    /// The emit-pass equivalent of `HydrolysisRenderer::reset_scene`: clears
+    /// every pure-emission registry the accessibility walk re-pushes — input
+    /// targets, gesture targets, text-input targets and the accessibility
+    /// builder's node/action state — so each walk re-registers exactly what is
+    /// live. Callers then roll the frame boundaries the walk's signal reads
+    /// and retained-state bindings live under.
+    fn begin_semantic_emit_frame(&mut self) {
+        self.lifecycle.begin_rebuild_frame();
+        self.hit_test.begin_rebuild_frame();
+        self.hit_test.reset_scene();
+        self.gesture_engine.clear_targets();
+        self.text_editing.text_input_targets.clear();
+        self.lazy.begin_rebuild_frame();
+        self.navigation.begin_rebuild_frame();
+        #[cfg(feature = "accessibility")]
+        self.accessibility.begin_rebuild_frame();
+    }
+
+    /// The emit-pass equivalent of the non-scene half of
+    /// `HydrolysisRenderer::finish_rebuild_frame`: Retain watcher rollover, the
+    /// measurement-cache and animation-slot prunes, focus validation, and the
+    /// accessibility tree's publication. `signals.finish_rebuild` stays with
+    /// the caller — only a build entered one.
+    fn finish_semantic_emit_frame(&mut self, live_dynamics: &FxHashSet<usize>) {
+        self.lifecycle.finish_rebuild_frame();
+        self.prune_dynamic_measurements(live_dynamics);
+        self.validate_focused_text_input_after_flush();
+        self.animation_controller
+            .finish_rebuild_frame_with_inactive_slot_retention(false);
+        self.hit_test
+            .finish_rebuild_frame(&self.text_editing.text_input_targets);
+        self.navigation.finish_rebuild_frame();
+        #[cfg(feature = "accessibility")]
+        self.finalize_accessibility_tree_update();
+    }
+
+    /// Build the retained window tree from `content` and emit its
+    /// accessibility tree — the semantic analogue of
+    /// [`HydrolysisRenderer::capture_window_tree`]: dispatch and emission only,
+    /// with no layout, no encode and no theme.
+    ///
+    /// Like the rendered path, a call made with a tree already built applies
+    /// the pending patch and re-emits instead of re-dispatching.
+    pub(crate) fn capture_window_semantics(&mut self, content: AnyView, env: &Environment) {
+        if self.render_tree.is_some() {
+            assert!(
+                self.flush_window_semantics(env),
+                "hydrolysis renderer: retained window tree vanished during semantics capture"
+            );
+            return;
+        }
+        self.signals.begin_rebuild();
+        self.begin_semantic_emit_frame();
+        self.render_depth = 0;
+        let tree = RenderNode::build(content, env, self);
+        let live_dynamics = tree.collect_dynamic_identities();
+        #[cfg(feature = "accessibility")]
+        tree.emit_accessibility(self, env);
+        self.render_tree = Some(tree);
+        self.finish_semantic_emit_frame(&live_dynamics);
+        self.signals.finish_rebuild();
+    }
+
+    /// Apply pending structural changes and re-emit the retained tree's
+    /// accessibility tree without laying out or encoding — the semantic
+    /// analogue of [`HydrolysisRenderer::flush_window_tree`]. Returns `false`
+    /// if no tree is built.
+    ///
+    /// A `Dynamic` can reconnect (its initial update is gated on the rebuild
+    /// generation), so patching is the only structural path here: a rebuild
+    /// request would be a programmer error — re-dispatching `body()` is the
+    /// one-time build's job.
+    pub(crate) fn flush_window_semantics(&mut self, _env: &Environment) -> bool {
+        let Some(mut tree) = self.render_tree.take() else {
+            return false;
+        };
+        self.begin_semantic_emit_frame();
+        let structural_change = self.take_subview_structural_change() | tree.patch(self);
+        if structural_change {
+            self.animation_controller.begin_rebuild_frame();
+        }
+        #[cfg(feature = "accessibility")]
+        tree.emit_accessibility(self, _env);
+        let live_dynamics = tree.collect_dynamic_identities();
+        self.render_tree = Some(tree);
+        self.finish_semantic_emit_frame(&live_dynamics);
+        true
+    }
+}
+
 impl HydrolysisRenderer {
     /// Build the retained tree before its first sized frame. Embedded GPU hosts
     /// use this during async setup so every statically reachable `GpuSurface`
@@ -175,6 +266,7 @@ impl HydrolysisRenderer {
         // frame, so scene/layer flushing is handled by the caller.
         if let Some(mut tree) = self.render_tree.take() {
             tree.patch(self);
+            tree.prepare_for_measure(self);
             tree.layout(self, env, proposal, size);
             tree.flush(self, ctx, env);
             self.flush_subtree_captures(0);
@@ -183,6 +275,7 @@ impl HydrolysisRenderer {
         }
         self.render_depth = 0;
         let mut node = RenderNode::build(content, env, self);
+        node.prepare_for_measure(self);
         node.layout(self, env, proposal, size);
         node.flush(self, ctx, env);
         self.flush_subtree_captures(0);
@@ -227,6 +320,7 @@ impl HydrolysisRenderer {
         // scene encoded right after it.
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
         let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        tree.prepare_for_measure(self);
         tree.layout(self, env, proposal, size);
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         tree.flush(self, ctx, env);
@@ -238,13 +332,15 @@ impl HydrolysisRenderer {
         // for a single frame.
         self.render_active_text_context_menu_overlay(env, transform);
         self.flush_vello_scene_layer();
-        self.hit_test
-            .finish_rebuild_frame(&self.text_editing.text_input_targets);
-        self.navigation.finish_rebuild_frame();
+        self.core
+            .hit_test
+            .finish_rebuild_frame(&self.core.text_editing.text_input_targets);
+        self.core.navigation.finish_rebuild_frame();
         if structural_change {
             // The flush re-bound every live animation. Drop slots and cached
             // Dynamic measurements belonging to subtrees removed by the patch.
-            self.animation_controller
+            self.core
+                .animation_controller
                 .finish_rebuild_frame_with_inactive_slot_retention(false);
             self.prune_dynamic_measurements(&tree.collect_dynamic_identities());
         }
@@ -287,13 +383,16 @@ impl HydrolysisRenderer {
         tree: &RenderNode,
         env: &Environment,
     ) -> ContentSizeLimits {
-        let min_box = tree.measure(&mut self.state, env, ProposalSize::ZERO).size;
+        let theme = self.theme();
+        let min_box = tree
+            .measure(&mut self.state, env, &theme, ProposalSize::ZERO)
+            .size;
         let minimum = Size::new(
             validated_minimum_axis(min_box.width, "width"),
             validated_minimum_axis(min_box.height, "height"),
         );
         let max_box = tree
-            .measure(&mut self.state, env, ProposalSize::INFINITY)
+            .measure(&mut self.state, env, &theme, ProposalSize::INFINITY)
             .size;
         let maximum = content_maximum_size(max_box.width, max_box.height).map(|size| {
             // A finite maximum may legitimately fall below the coupled minimum:

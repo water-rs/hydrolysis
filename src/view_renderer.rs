@@ -12,6 +12,7 @@ use crate::renderer::HydrolysisRenderer;
 /// `ViewRenderer` implementation backed by Hydrolysis offscreen rendering.
 pub struct HydrolysisViewRenderer {
     surface: Rc<RefCell<Option<OffscreenSurface>>>,
+    theme: Rc<dyn crate::engine::WidgetTheme>,
     configure_environment: Rc<dyn Fn(&mut Environment)>,
 }
 
@@ -24,25 +25,24 @@ impl core::fmt::Debug for HydrolysisViewRenderer {
 
 impl HydrolysisViewRenderer {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(theme: Rc<dyn crate::engine::WidgetTheme>) -> Self {
         Self {
             surface: Rc::new(RefCell::new(None)),
+            theme,
             configure_environment: Rc::new(|_env| {}),
         }
     }
 
     #[must_use]
-    pub fn with_environment(configure_environment: impl Fn(&mut Environment) + 'static) -> Self {
+    pub fn with_environment(
+        theme: Rc<dyn crate::engine::WidgetTheme>,
+        configure_environment: impl Fn(&mut Environment) + 'static,
+    ) -> Self {
         Self {
             surface: Rc::new(RefCell::new(None)),
+            theme,
             configure_environment: Rc::new(configure_environment),
         }
-    }
-}
-
-impl Default for HydrolysisViewRenderer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -79,7 +79,8 @@ impl CustomViewRenderer for HydrolysisViewRenderer {
                 let device = surface.device();
                 let queue = surface.queue();
                 let device_loss = surface.device_loss().clone();
-                let mut renderer = HydrolysisRenderer::new(surface.adapter(), device);
+                let mut renderer =
+                    HydrolysisRenderer::new(surface.adapter(), device, Rc::clone(&self.theme));
                 renderer.set_frame_resources(surface.adapter(), device, queue, &device_loss);
                 renderer.reset_scene();
                 renderer.begin_rebuild_frame();

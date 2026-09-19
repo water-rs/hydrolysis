@@ -40,7 +40,7 @@ impl RenderNode {
                 // has no surrounding widget to watch it, so the node must do so itself.)
                 let styled = renderer.read_signal(&text.content);
                 let alignment = renderer.read_signal(&text.alignment);
-                text.emit_accessibility(renderer, ctx, &styled, env);
+                text.emit_accessibility(renderer, Some(ctx), &styled, env);
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 let (state, scene) = renderer.state_and_scene_mut();
@@ -273,7 +273,7 @@ impl RenderNode {
                 let content_label = node.content.borrow().accessibility_label();
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, ctx, env, content_label);
+                emit_graphics_image_accessibility(renderer, Some(ctx), env, content_label);
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 let mut scene = vello::Scene::new();
@@ -302,7 +302,7 @@ impl RenderNode {
             RenderNode::GpuSurface(node) => {
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, ctx, env, None);
+                emit_graphics_image_accessibility(renderer, Some(ctx), env, None);
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 node.flush(renderer, ctx);
@@ -310,7 +310,7 @@ impl RenderNode {
             RenderNode::ViewEffect(node) => node.flush(renderer, ctx),
             RenderNode::AppliedFilter(node) => node.flush(renderer, ctx),
             RenderNode::Scroll(node) => {
-                let Some(handle) = node.handle.clone() else {
+                let Some(handle) = node.handle.borrow().clone() else {
                     return;
                 };
                 let metrics = handle.metrics();
@@ -353,7 +353,7 @@ impl RenderNode {
                         crate::widgets::scroll::register_scroll_accessibility_node(
                             renderer,
                             &node.env,
-                            transformed_rect(ctx.hit_transform, viewport_rect),
+                            Some(transformed_rect(ctx.hit_transform, viewport_rect)),
                             &handle,
                             metrics,
                             node.axis,
@@ -406,6 +406,151 @@ impl RenderNode {
                 renderer.render_depth = 0;
                 Rc::clone(&node.behavior).render(renderer, ctx, &node.env);
                 #[cfg(feature = "accessibility")]
+                renderer.pop_accessibility_owner();
+            }
+        }
+    }
+}
+
+impl RenderNode {
+    /// Emits this subtree's accessibility nodes for the semantic walk — the
+    /// same tree `flush` produces under a `RenderContext`, with no bounds, no
+    /// scene writes, no layers, and no pointer/hit targets. This is the
+    /// semantic runtime's pump: it walks the retained tree exactly as a flush
+    /// does so the emitted structure cannot drift from what a frame would
+    /// produce, and every registration goes through the no-bounds semantic
+    /// path.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn emit_accessibility(&self, renderer: &mut SemanticCore, env: &Environment) {
+        match self {
+            // A color fill carries no semantics.
+            RenderNode::Color(_) => {}
+            RenderNode::Text(text) => {
+                renderer.push_accessibility_owner(&text.accessibility_identity);
+                let styled = renderer.read_signal(&text.content);
+                text.emit_accessibility(renderer, None, &styled, env);
+                renderer.pop_accessibility_owner();
+            }
+            RenderNode::Container(container) => {
+                renderer.push_accessibility_owner(&container.accessibility_identity);
+                let container_scope = container
+                    .accessibility_child_env
+                    .as_ref()
+                    .map(|_| renderer.begin_accessibility_container_semantic(env));
+                let child_env = container.accessibility_child_env.as_ref().unwrap_or(env);
+                renderer.pop_accessibility_owner();
+                for child in &container.children {
+                    child.emit_accessibility(renderer, child_env);
+                }
+                if let Some(container_scope) = container_scope {
+                    renderer.push_accessibility_owner(&container.accessibility_identity);
+                    renderer.end_accessibility_container(container_scope);
+                    renderer.pop_accessibility_owner();
+                }
+            }
+            // Transforms are presentation: the semantic tree keeps the child.
+            RenderNode::Opacity(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Scale(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Rotation(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Offset(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Dynamic(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Retain(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Env(node) => node.child.emit_accessibility(renderer, &node.env),
+            RenderNode::Wrapper(node) => {
+                renderer.push_accessibility_owner(&node.accessibility_identity);
+                let child_env = &node.env;
+                match &node.effect {
+                    WrapperEffect::GestureObserver(effect) => {
+                        HydrolysisRenderer::emit_gesture_observer_accessibility(
+                            renderer, child_env, effect,
+                        );
+                        if child_env
+                            .get::<AccessibilityChildren>()
+                            .is_some_and(AccessibilityChildren::excludes_descendants)
+                        {
+                            renderer.push_accessibility_suppression();
+                            node.child.emit_accessibility(renderer, child_env);
+                            renderer.pop_accessibility_suppression();
+                        } else {
+                            node.child.emit_accessibility(renderer, child_env);
+                        }
+                    }
+                    WrapperEffect::Focused(value) => {
+                        HydrolysisRenderer::apply_focused_semantic(renderer, value, |r| {
+                            node.child.emit_accessibility(r, child_env);
+                        });
+                    }
+                    WrapperEffect::LifeCycle(effect) => {
+                        // The semantic pump is this tree's frame: an appear hook
+                        // fires on the first walk exactly as on the first flush.
+                        node.child.emit_accessibility(renderer, child_env);
+                        if let Some(hook) = effect.appear.take() {
+                            hook.call();
+                        }
+                    }
+                    _ => node.child.emit_accessibility(renderer, child_env),
+                }
+                renderer.pop_accessibility_owner();
+            }
+            RenderNode::SceneView(node) => {
+                let content_label = node.content.borrow().accessibility_label();
+                renderer.push_accessibility_owner(&node.accessibility_identity);
+                emit_graphics_image_accessibility(renderer, None, env, content_label);
+                renderer.pop_accessibility_owner();
+            }
+            RenderNode::GpuSurface(node) => {
+                renderer.push_accessibility_owner(&node.accessibility_identity);
+                emit_graphics_image_accessibility(renderer, None, env, None);
+                renderer.pop_accessibility_owner();
+            }
+            RenderNode::ViewEffect(node) => {
+                node.child.borrow().emit_accessibility(renderer, &node.env);
+            }
+            RenderNode::AppliedFilter(node) => {
+                node.child.emit_accessibility(renderer, &node.env);
+            }
+            RenderNode::Scroll(node) => {
+                // The semantic scroll domain is unbounded — there is no layout
+                // to measure content against — so scroll actions move the
+                // bound offset freely and `scroll_y_max` reports infinity.
+                let handle = {
+                    let mut slot = node.handle.borrow_mut();
+                    let handle = if let Some(handle) = slot.as_mut() {
+                        handle.rebind(node.axis, 0.0, 0.0, f64::INFINITY, f64::INFINITY)
+                    } else {
+                        ScrollHandle::new(node.axis, 0.0, 0.0, f64::INFINITY, f64::INFINITY)
+                    };
+                    *slot = Some(handle.clone());
+                    handle
+                };
+                let metrics = handle.metrics();
+                if let Some(controller) = &node.controller {
+                    let generation = renderer.read_signal(&controller.generation());
+                    if generation != node.applied_scroll_generation.get() {
+                        let target = renderer.read_signal(&controller.target());
+                        let _ = handle.scroll_to(f64::from(target.x), f64::from(target.y));
+                        node.applied_scroll_generation.set(generation);
+                    }
+                }
+                renderer.push_accessibility_owner(&node.accessibility_identity);
+                let scroll_accessibility_node =
+                    crate::widgets::scroll::register_scroll_accessibility_node(
+                        renderer, &node.env, None, &handle, metrics, node.axis,
+                    );
+                renderer.pop_accessibility_owner();
+                if let Some(scroll_accessibility_node) = scroll_accessibility_node {
+                    renderer.push_accessibility_parent(scroll_accessibility_node);
+                }
+                node.child.emit_accessibility(renderer, env);
+                if scroll_accessibility_node.is_some() {
+                    renderer.pop_accessibility_parent();
+                }
+            }
+            RenderNode::LazyStack(node) => node.emit_accessibility(renderer),
+            RenderNode::Collection(node) => node.emit_accessibility(renderer),
+            RenderNode::Widget(node) => {
+                renderer.push_accessibility_owner(&node.accessibility_identity);
+                Rc::clone(&node.behavior).emit_accessibility(renderer, &node.env);
                 renderer.pop_accessibility_owner();
             }
         }

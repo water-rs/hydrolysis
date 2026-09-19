@@ -1,4 +1,5 @@
 use crate::renderer::{HydroNativeView, HydroState, graphics_dimensions_from_proposal};
+use std::rc::Rc;
 use waterui_core::layout::Size as LayoutSize;
 use waterui_core::layout::{ProposalSize, ViewDimensions};
 use waterui_core::{Environment, Native};
@@ -8,7 +9,12 @@ use waterui_graphics::{GpuSurface, ResolvedGradient, SceneView, resolve_scene_pr
 use waterui_shape::{ResolvedMorphShape, ResolvedShape};
 
 impl HydroNativeView for Native<GpuSurface> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -16,6 +22,7 @@ impl HydroNativeView for Native<GpuSurface> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)
@@ -23,7 +30,12 @@ impl HydroNativeView for Native<GpuSurface> {
 }
 
 impl HydroNativeView for Native<SceneView> {
-    fn intrinsic(_state: &mut HydroState, view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         view.as_inner()
             .intrinsic_size()
             .unwrap_or_else(LayoutSize::zero)
@@ -33,6 +45,7 @@ impl HydroNativeView for Native<SceneView> {
         _state: &mut HydroState,
         view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         // Scene content that is naturally a size answers with it wherever the
@@ -45,13 +58,23 @@ impl HydroNativeView for Native<SceneView> {
 }
 
 impl HydroNativeView for Native<ViewEffectErased> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        crate::renderer::measure_view_intrinsic(view.as_inner().content(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        crate::renderer::measure_view_intrinsic(view.as_inner().content(), state, env, theme)
     }
 }
 
 impl HydroNativeView for Native<Color> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -59,6 +82,7 @@ impl HydroNativeView for Native<Color> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)
@@ -66,7 +90,12 @@ impl HydroNativeView for Native<Color> {
 }
 
 impl HydroNativeView for Native<ResolvedColor> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -74,6 +103,7 @@ impl HydroNativeView for Native<ResolvedColor> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)
@@ -81,7 +111,12 @@ impl HydroNativeView for Native<ResolvedColor> {
 }
 
 impl HydroNativeView for Native<ResolvedGradient> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -89,6 +124,7 @@ impl HydroNativeView for Native<ResolvedGradient> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)
@@ -96,7 +132,12 @@ impl HydroNativeView for Native<ResolvedGradient> {
 }
 
 impl HydroNativeView for Native<ResolvedShape> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -104,6 +145,7 @@ impl HydroNativeView for Native<ResolvedShape> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)
@@ -111,7 +153,12 @@ impl HydroNativeView for Native<ResolvedShape> {
 }
 
 impl HydroNativeView for Native<ResolvedMorphShape> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 
@@ -119,6 +166,7 @@ impl HydroNativeView for Native<ResolvedMorphShape> {
         _state: &mut HydroState,
         _view: &Self,
         _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         graphics_dimensions_from_proposal(proposal)

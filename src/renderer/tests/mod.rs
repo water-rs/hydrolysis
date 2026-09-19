@@ -13,12 +13,16 @@ mod gpu_surface_input;
 mod layout_contract;
 mod perf_full_rebuild;
 mod perf_scroll;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod popup_windows;
 mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod semantic_runtime;
 mod shadow;
 mod tree;
-use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii, Vec2};
+use vello::kurbo::{Affine, BezPath, Point, Rect};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
@@ -40,7 +44,6 @@ use waterui_navigation::tab::{Tab, TabsLayout};
 
 use crate::engine::{Brush, DrawContext, WidgetTheme};
 use crate::platform::PlatformWindow as _;
-use crate::widgets::util::widget_theme;
 use waterui_backend_core::widget::{
     BadgeMetrics, ButtonMetrics, DividerMetrics, InputFieldMetrics, InteractionFocusBinding,
     InteractionMotion, ListMetrics, ModalInteraction, NavigationMetrics, NavigationMotion,
@@ -52,10 +55,14 @@ use waterui_core::EasingCurve;
 use waterui_core::handler::SharedAction;
 
 fn test_renderer() -> HydrolysisRenderer {
+    test_renderer_with_theme(MinimalTestTheme::default())
+}
+
+fn test_renderer_with_theme(theme: MinimalTestTheme) -> HydrolysisRenderer {
     let mut platform =
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
-    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device());
+    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme));
     renderer.set_frame_resources(
         surface.adapter(),
         surface.device(),
@@ -63,6 +70,31 @@ fn test_renderer() -> HydrolysisRenderer {
         surface.device_loss(),
     );
     renderer
+}
+
+/// Emits the semantic node a real widget emits for an interaction identity:
+/// it advertises `Focus` (and `Click` when it activates), its action target is
+/// registered, and the interaction key is linked so the pointer machinery —
+/// and keyboard traversal, which reads the semantic tree — resolves the node.
+#[cfg(feature = "accessibility")]
+fn emit_focusable_node(
+    renderer: &mut HydrolysisRenderer,
+    key: &InteractionKey,
+    bounds: Rect,
+    env: &Environment,
+    activation: Option<AccessibilityActivation>,
+) -> AccessibilityNodeId {
+    let mut node = AccessibilityNode::new(AccessibilityNodeRole::Button);
+    node.add_action(AccessibilityAction::Focus);
+    let action_target = activation.map(|action| {
+        node.add_action(AccessibilityAction::Click);
+        AccessibilityActionTarget::Activate { action }
+    });
+    let node_id = renderer
+        .register_accessibility_node(node, bounds, env, action_target)
+        .expect("a focusable node in bounds registers");
+    renderer.register_accessibility_focus_link(key, node_id);
+    node_id
 }
 
 /// Queues `spawn_local` futures for unit tests without running them.
@@ -127,9 +159,7 @@ fn themed_test_environment() -> Environment {
     let mut env = Environment::new();
     crate::testing::install_theme(&mut env);
     crate::localization::install(&mut env);
-    let badge_draws = Rc::new(RefCell::new(Vec::new()));
-    env.insert(BadgeDrawLog(Rc::clone(&badge_draws)));
-    env.insert(Box::new(MinimalTestTheme { badge_draws }) as Box<dyn WidgetTheme>);
+    env.insert(BadgeDrawLog(Rc::new(RefCell::new(Vec::new()))));
     env
 }
 
@@ -378,6 +408,7 @@ fn text_input_target(
 #[test]
 fn measure_layout_dimensions_collects_alignment_keys_from_wrapper_layouts() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let child = normalize_layout_view(
         AnyView::new(().size(20.0, 10.0).horizontal_alignment_guide(
             HorizontalAlignment::Leading,
@@ -396,6 +427,7 @@ fn measure_layout_dimensions_collects_alignment_keys_from_wrapper_layouts() {
         ProposalSize::UNSPECIFIED,
         &mut state,
         &env,
+        &theme,
     );
 
     assert_eq!(
@@ -428,6 +460,7 @@ fn layout_normalization_still_rejects_recursive_component_bodies() {
 #[test]
 fn scale_metadata_is_layout_transparent() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let scale = Binding::f32(1.0);
     let view = normalize_layout_view(
         AnyView::new(
@@ -439,11 +472,11 @@ fn scale_metadata_is_layout_transparent() {
     );
 
     let mut state = HydroState::default();
-    let initial = measure_view_dimensions(&view, &mut state, &env).size;
+    let initial = measure_view_dimensions(&view, &mut state, &env, &theme).size;
 
     scale.set(2.0);
     let mut state = HydroState::default();
-    let scaled = measure_view_dimensions(&view, &mut state, &env).size;
+    let scaled = measure_view_dimensions(&view, &mut state, &env, &theme).size;
 
     assert_eq!(initial, LayoutSize::new(80.0, 120.0));
     assert_eq!(scaled, initial);
@@ -452,6 +485,7 @@ fn scale_metadata_is_layout_transparent() {
 #[test]
 fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let value = Binding::f64(0.5);
     let view = normalize_layout_view(
         AnyView::new(slider("Playback position", &value).hide_label()),
@@ -459,7 +493,7 @@ fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
     );
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let measured = subview.measure(ProposalSize::new(Some(0.0), None));
 
@@ -472,10 +506,11 @@ fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
 #[test]
 fn hydro_subview_preserves_non_stretch_button_intrinsic_under_zero_width_proposal() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let view = normalize_layout_view(AnyView::new(button("Medium (0.7)").action(|| {})), &env);
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let intrinsic = subview.measure(ProposalSize::UNSPECIFIED);
     let constrained = subview.measure(ProposalSize::new(Some(0.0), None));
@@ -489,6 +524,7 @@ fn hydro_subview_preserves_non_stretch_button_intrinsic_under_zero_width_proposa
 #[test]
 fn state_wrapped_button_remains_non_stretch_for_layout() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let expanded = Binding::bool(false);
     let view = normalize_layout_view(
         AnyView::new(
@@ -502,7 +538,7 @@ fn state_wrapped_button_remains_non_stretch_for_layout() {
     );
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let intrinsic = subview.measure(ProposalSize::UNSPECIFIED);
     let proposed = subview.measure(ProposalSize::new(Some(720.0), None));
@@ -800,7 +836,11 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     let env = test_environment();
     let bounds = vello::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
@@ -831,6 +871,7 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
 #[test]
 fn string_views_measure_through_body_recursion() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let mut state = HydroState::default();
     let proposal = ProposalSize::UNSPECIFIED;
 
@@ -839,24 +880,28 @@ fn string_views_measure_through_body_recursion() {
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let borrowed = measure_view_dimensions_with_proposal(
         &AnyView::new("Hydrolysis"),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let owned = measure_view_dimensions_with_proposal(
         &AnyView::new(String::from("Hydrolysis")),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let cow = measure_view_dimensions_with_proposal(
         &AnyView::new(Cow::Borrowed("Hydrolysis")),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
 
     assert_eq!(borrowed.size, raw.size);
@@ -1491,11 +1536,11 @@ fn interaction_state_does_not_migrate_between_semantic_identities() {
     renderer.begin_rebuild_frame();
     let (_, slot, _) =
         renderer.bind_interaction_target(first_key, Rect::new(0.0, 0.0, 80.0, 80.0), &env);
-    renderer.hit_test.interaction.begin_press(
-        &slot,
-        Point::new(20.0, 20.0),
-        renderer.frame_instant(),
-    );
+    let at = renderer.frame_instant();
+    renderer
+        .hit_test
+        .interaction
+        .begin_press(&slot, Point::new(20.0, 20.0), at);
     renderer.finish_rebuild_frame();
 
     renderer.begin_rebuild_frame();
@@ -1520,11 +1565,11 @@ fn began_press_samples_a_visible_press_layer_after_fade_in() {
 
     renderer.begin_rebuild_frame();
     let (_, slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &env);
-    renderer.hit_test.interaction.begin_press(
-        &slot,
-        Point::new(20.0, 20.0),
-        renderer.frame_instant(),
-    );
+    let at = renderer.frame_instant();
+    renderer
+        .hit_test
+        .interaction
+        .begin_press(&slot, Point::new(20.0, 20.0), at);
     renderer.finish_rebuild_frame();
 
     // Advance past the press fade-in (105ms in MinimalTestTheme) and re-bind:
@@ -1651,11 +1696,24 @@ fn keyboard_focus_activates_control_on_key_release() {
     let action_activations = Rc::clone(&activations);
 
     renderer.begin_rebuild_frame();
-    let (_, press_slot, _) = renderer.bind_interaction_target(key, bounds, &env);
+    let (_, press_slot, handles) = renderer.bind_interaction_target(key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, press_slot, move |_, _, _| {
         action_activations.set(action_activations.get() + 1);
         true
     });
+    #[cfg(feature = "accessibility")]
+    let semantic_activations = Rc::new(Cell::new(0));
+    #[cfg(feature = "accessibility")]
+    {
+        let counter = Rc::clone(&semantic_activations);
+        let activation: AccessibilityActivation = Rc::new(RefCell::new(
+            move |_: &mut SemanticCore, _: &Environment| {
+                counter.set(counter.get() + 1);
+                true
+            },
+        ));
+        emit_focusable_node(&mut renderer, &key, bounds, &env, Some(activation));
+    }
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1667,9 +1725,19 @@ fn keyboard_focus_activates_control_on_key_release() {
         Modifiers::default(),
         &env,
     ));
-    assert_eq!(activations.get(), 0);
+    // The rendered contract is the pointer contract: key-down presses and
+    // holds the affordance, and the control activates on key-up.
+    assert_eq!(activations.get(), 0, "key-down must not activate");
+    assert!(handles.pressing(), "key-down holds the pressed affordance");
+    #[cfg(feature = "accessibility")]
+    assert_eq!(
+        semantic_activations.get(),
+        0,
+        "a rendered runtime dispatches no Click"
+    );
     assert!(renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
     assert_eq!(activations.get(), 1);
+    assert!(!handles.pressing(), "key-up releases the affordance");
 }
 
 #[test]
@@ -1683,8 +1751,10 @@ fn interaction_focus_binding_tracks_keyboard_focus() {
     let bounds = Rect::new(0.0, 0.0, 80.0, 80.0);
 
     renderer.begin_rebuild_frame();
-    let (_, press_slot, _) = renderer.bind_interaction_target(key, bounds, &env);
+    let (_, press_slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    emit_focusable_node(&mut renderer, &key, bounds, &env, None);
 
     assert!(!focused.get());
     assert!(renderer.handle_key_with_env(
@@ -1718,11 +1788,16 @@ fn modal_scope_traps_keyboard_focus_and_handles_escape() {
 
     renderer.begin_rebuild_frame();
     let (_, background_press_slot, _) =
-        renderer.bind_interaction_target(background_key, bounds, &env);
+        renderer.bind_interaction_target(background_key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, background_press_slot, |_, _, _| true);
     let (_, modal_press_slot, _) =
         renderer.bind_interaction_target(modal_key.clone(), bounds, &modal_env);
     renderer.register_interactive_pointer_target(bounds, modal_press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    {
+        emit_focusable_node(&mut renderer, &background_key, bounds, &env, None);
+        emit_focusable_node(&mut renderer, &modal_key, bounds, &modal_env, None);
+    }
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1755,6 +1830,8 @@ fn inactive_modal_scope_does_not_trap_keyboard_focus() {
     let (_, press_slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &dialog_env);
     assert!(!press_slot.modal);
     renderer.register_interactive_pointer_target(bounds, press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    emit_focusable_node(&mut renderer, &key, bounds, &dialog_env, None);
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1766,43 +1843,14 @@ fn inactive_modal_scope_does_not_trap_keyboard_focus() {
 }
 
 #[derive(Default)]
-struct NoopDrawContext;
-
-impl DrawContext for NoopDrawContext {
-    fn fill_rect(&mut self, _rect: Rect, _brush: &Brush) {}
-    fn fill_rounded_rect(&mut self, _rect: Rect, _radii: RoundedRectRadii, _brush: &Brush) {}
-    fn stroke_rect(&mut self, _rect: Rect, _brush: &Brush, _width: f64) {}
-    fn stroke_rounded_rect(
-        &mut self,
-        _rect: Rect,
-        _radii: RoundedRectRadii,
-        _brush: &Brush,
-        _width: f64,
-    ) {
-    }
-    fn stroke_line(&mut self, _from: Point, _to: Point, _brush: &Brush, _width: f64) {}
-    fn stroke_circle(&mut self, _center: Point, _radius: f64, _brush: &Brush, _width: f64) {}
-    fn fill_circle(&mut self, _center: Point, _radius: f64, _brush: &Brush) {}
-    fn fill_path(&mut self, _path: &BezPath, _brush: &Brush) {}
-    fn stroke_path(&mut self, _path: &BezPath, _brush: &Brush, _width: f64) {}
-    fn draw_shadow(
-        &mut self,
-        _rect: Rect,
-        _radii: RoundedRectRadii,
-        _offset: Vec2,
-        _blur: f64,
-        _color: vello::peniko::Color,
-    ) {
-    }
-    fn push_layer(&mut self, _alpha: f32, _clip: Option<&Rect>) {}
-    fn pop_layer(&mut self) {}
-    fn push_transform(&mut self, _affine: Affine) {}
-    fn pop_transform(&mut self) {}
+pub(crate) struct MinimalTestTheme {
+    badge_draws: Rc<RefCell<Vec<Rect>>>,
 }
 
-#[derive(Default)]
-struct MinimalTestTheme {
-    badge_draws: Rc<RefCell<Vec<Rect>>>,
+impl crate::Style for MinimalTestTheme {
+    /// The minimal theme installs no tokens of its own — the runtime's
+    /// framework defaults (`install_default_tokens`) are all a test needs.
+    fn install_tokens(&self, _env: &mut Environment) {}
 }
 
 impl WidgetTheme for MinimalTestTheme {
@@ -2246,23 +2294,6 @@ impl WidgetTheme for MinimalTestTheme {
 }
 
 #[test]
-fn widget_theme_can_be_replaced_in_environment() {
-    let env = test_environment();
-
-    let metrics = widget_theme(&env).button_metrics(ButtonStyle::Plain, ButtonSize::default());
-    assert_eq!(metrics.min_width, 123.0);
-    assert_eq!(metrics.min_height, 45.0);
-
-    let mut draw = NoopDrawContext;
-    widget_theme(&env).draw_button_chrome(
-        &mut draw,
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        ButtonStyle::Plain,
-        WidgetInteractionState::NONE,
-    );
-}
-
-#[test]
 fn ime_preedit_commit_and_disable_update_focused_text_target() {
     let mut renderer = test_renderer();
     renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
@@ -2575,7 +2606,7 @@ fn secure_text_context_menu_excludes_copy_and_cut() {
 
     let mut env = test_environment();
     crate::localization::install(&mut env);
-    let entries = HydrolysisRenderer::build_text_context_menu_entries(&target, &env);
+    let entries = SemanticCore::build_text_context_menu_entries(&target, &env);
     let labels = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -2659,10 +2690,11 @@ fn resolved_text_fast_path_matches_the_recursive_measure() {
     for view in [&str_view, &string_view] {
         let mut state = HydroState::default();
         let state_cell = RefCell::new(&mut state);
-        let fast_path = HydroSubview::from_view(view, &state_cell, &env).measure(proposal);
+        let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+        let fast_path = HydroSubview::from_view(view, &state_cell, &env, &theme).measure(proposal);
         let recursive = {
             let mut state = state_cell.borrow_mut();
-            measure_view_dimensions_with_proposal(view, proposal, &mut state, &env)
+            measure_view_dimensions_with_proposal(view, proposal, &mut state, &env, &theme)
         };
 
         assert_eq!(
@@ -2771,7 +2803,8 @@ fn every_view_answers_the_three_point_probe_consistently() {
         let view = normalize_layout_view(view, &env);
         let mut state = HydroState::default();
         let cell = RefCell::new(&mut state);
-        let subview = HydroSubview::from_view(&view, &cell, &env);
+        let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+        let subview = HydroSubview::from_view(&view, &cell, &env, &theme);
 
         let ideal = subview.measure(ProposalSize::UNSPECIFIED).size;
 
@@ -2859,7 +2892,9 @@ fn badge_indicator_anchors_to_the_content_trailing_edge() {
     // fresh renderer.
     let capture = |view: Badge, env: &Environment| {
         log.0.borrow_mut().clear();
-        let mut renderer = test_renderer();
+        let mut renderer = test_renderer_with_theme(MinimalTestTheme {
+            badge_draws: Rc::clone(&log.0),
+        });
         capture_root_window(&mut renderer, view, env, bounds);
         log.0.borrow().clone()
     };

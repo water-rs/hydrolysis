@@ -17,7 +17,7 @@ use waterui_core::handler::AnyViewBuilder;
 use waterui_layout::padding::{EdgeInsets, Padding};
 use waterui_shape::{FixedRoundedRectangle, ShapeExt as _};
 
-use super::pumped_test_environment;
+use super::{MinimalTestTheme, pumped_test_environment};
 use crate::HeadlessRuntime;
 
 const SURFACE_RGB: [u8; 3] = [60, 120, 200];
@@ -60,7 +60,8 @@ fn shadow_corner_follows_caster_radius() {
         waterui_core::AnyView::new(scene())
     });
     let env = pumped_test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 120, 120);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 120, 120, MinimalTestTheme::default());
     let snapshot = runtime
         .pump_at(true, Instant::now())
         .snapshot

@@ -226,7 +226,7 @@ impl EmbeddedInputSink for GpuSurfaceInputSink {
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     /// Registers an embedded input target at a laid-out surface's bounds.
     ///
     /// `transform` maps `local_bounds` into window hit-test space, which is

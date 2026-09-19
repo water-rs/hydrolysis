@@ -80,14 +80,23 @@ impl WebViewRenderState {
         }
     }
 
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         let _ = (renderer, env);
     }
 }
 
 impl HydroNativeView for WebView {
     #[cfg(hydrolysis_macos_system_webview)]
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         let _ = (state, view, env);
         LayoutSize::zero()
     }
@@ -97,6 +106,7 @@ impl HydroNativeView for WebView {
         state: &mut HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         let _ = (state, view, env);
@@ -107,7 +117,12 @@ impl HydroNativeView for WebView {
     }
 
     #[cfg(not(hydrolysis_macos_system_webview))]
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &std::rc::Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         crate::renderer::unsupported_webview()
     }
 }
@@ -120,6 +135,7 @@ pub(crate) fn measure_webview_node(
     proposal: ProposalSize,
     hydro: &mut HydroState,
     _env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let _ = (state, hydro);
     ViewDimensions::new(LayoutSize::new(

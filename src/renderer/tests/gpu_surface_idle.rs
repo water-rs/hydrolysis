@@ -25,7 +25,7 @@ use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView};
 use waterui_layout::frame::Frame;
 use waterui_layout::stack::vstack;
 
-use super::pumped_test_environment;
+use super::{MinimalTestTheme, pumped_test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, PointerKind};
 
@@ -107,6 +107,7 @@ fn runtime_with(
         builder,
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
     )
 }
 

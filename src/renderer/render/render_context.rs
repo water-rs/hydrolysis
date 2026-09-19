@@ -92,6 +92,12 @@ impl<'a> WidgetRenderContext<'a> {
         RenderContext::with_transforms(self.bounds, self.transform, self.hit_transform)
     }
 
+    /// The renderer-owned widget theme, cloned out as an `Rc` so callers can
+    /// hold it without borrowing the context across a `&mut` renderer call.
+    pub(crate) fn theme(&self) -> std::rc::Rc<dyn crate::engine::WidgetTheme> {
+        self.renderer.theme()
+    }
+
     pub(crate) fn child(
         &self,
         transform: vello::kurbo::Affine,

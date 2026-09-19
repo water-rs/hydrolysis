@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(super) fn target_hit_priority(
         depth: usize,
         order: usize,
@@ -100,6 +100,10 @@ impl HydrolysisRenderer {
         })
     }
 
+    /// The focused text input's accessibility node — UI focus is the text
+    /// caret's home, deliberately separate from the semantic tree's focus
+    /// (`accessibility.focus`, reported as `TreeUpdate::focus`): focusing a
+    /// non-text node leaves the caret on the field it belongs to.
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn focused_ui_node(&self) -> Option<AccessibilityNodeId> {

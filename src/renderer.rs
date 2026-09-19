@@ -180,7 +180,7 @@ use crate::platform::{
 #[cfg(feature = "accessibility")]
 use crate::scroll::ScrollHandle;
 use crate::time::Instant;
-use crate::widgets::{inset_rect, widget_theme};
+use crate::widgets::inset_rect;
 
 #[derive(Clone, Copy)]
 pub(crate) struct DynamicRangePreference(pub(crate) bool);
@@ -195,7 +195,7 @@ const MORPH_PROGRESS_ANIMATION_KEY: usize = 0x0100_0007;
 
 #[cfg(feature = "accessibility")]
 pub(crate) use accessibility::{
-    AccessibilityActionTarget, accessibility_activation_point, slider_step_for_range,
+    AccessibilityActionTarget, AccessibilityActivation, slider_step_for_range,
 };
 pub(crate) use input::{
     TextInputModel, TextInputTargetRegistration, TextSelectionSlot, clamp_to_char_boundary,
@@ -208,13 +208,21 @@ pub(crate) struct ContentSizeLimits {
     pub(crate) maximum: Option<LayoutSize>,
 }
 
-/// Core hydrolysis renderer state.
-pub struct HydrolysisRenderer {
+/// The GPU-free dispatch core: everything the retained view tree's build,
+/// patch and accessibility emission need, without a device, a scene, or a
+/// style.
+///
+/// [`HydrolysisRenderer`] owns one and dereferences to it, so rendering code
+/// reaches this state transparently while [`crate::SemanticRuntime`] can hold
+/// just the core and prove by type that build, patch and semantic emission
+/// can never touch the GPU. Methods that only use this state live in
+/// `impl SemanticCore` blocks; methods that also touch rendering state stay
+/// on `HydrolysisRenderer`.
+///
+/// `pub` only because `HydrolysisRenderer` dereferences to it — every member
+/// is crate-internal.
+pub struct SemanticCore {
     state: HydroState,
-    vello_renderer: vello::Renderer,
-    scene: vello::Scene,
-    transient_scene: Option<vello::Scene>,
-    compositor: Compositor,
     hit_test: HitTestState,
     gesture_engine: GestureEngine,
     gesture_group_ids: BTreeMap<usize, usize>,
@@ -222,39 +230,11 @@ pub struct HydrolysisRenderer {
     text_editing: TextEditingState,
     popup_menu: PopupMenuState,
     render_depth: usize,
-    window_bounds: vello::kurbo::Rect,
-    /// The transform the window's root content is flushed under: logical layout
-    /// units onto the target's physical pixel grid. Stored alongside
-    /// [`Self::window_bounds`] because the pair is what says where the viewport
-    /// is in device pixels, which is what
-    /// [`HydrolysisRenderer::push_gpu_surface_layer`] tests a full-window GPU
-    /// surface against.
-    window_root_transform: vello::kurbo::Affine,
     /// Frame triggers shared with reactive closures; see [`FrameSignals`].
     signals: FrameSignals,
-    /// Wake target supplied when this renderer itself is hosted by a
-    /// `GpuSurface`. Async setup and renderer-owned redraws from nested surfaces
-    /// use it to wake the parent host without polling frames.
-    host_redraw_handle: Option<RedrawHandle>,
-    /// Module cache for shaders that embedded GPU surfaces, view effects and
-    /// filters assemble at runtime. Shared so identical WGSL compiles once.
-    shader_cache: Arc<WgslModuleCache>,
-    /// The scene renderer embedded GPU surfaces share, for the same reason: its
-    /// pipelines belong to the device rather than to any one scene.
-    scene_renderer: Arc<SharedSceneRenderer>,
     lifecycle: LifecycleState,
     animation_controller: AnimationController,
     frame_instant: Instant,
-    frame_clip_layers: u32,
-    frame_max_clip_depth: u32,
-    /// Whether this frame's window pass was handed straight to a GPU surface
-    /// instead of being composited. Recorded by
-    /// [`HydrolysisRenderer::render_scene_to_surface`] as it decides, so the
-    /// frame report says what happened rather than what was eligible.
-    frame_direct_gpu_surfaces: u32,
-    frame_applied_filter_count: u32,
-    frame_applied_filter_capture: Duration,
-    frame_applied_filter_effect: Duration,
     /// Retained render-tree GPU surfaces (`GpuSurfaceNode`-owned runtimes),
     /// registered at node build time. Polled by
     /// [`HydrolysisRenderer::poll_gpu_surface_redraw_handles`] for off-thread
@@ -269,11 +249,8 @@ pub struct HydrolysisRenderer {
     /// [`HydrolysisRenderer::refresh_active_applied_filters`] on redraw-only
     /// frames; dead entries are pruned by strong count.
     node_applied_filters: Vec<Rc<RefCell<AppliedFilterRuntime>>>,
-    /// The per-frame atlas every filtered subtree is captured through.
-    subtree_captures: SubtreeCaptures,
     pub(crate) lazy: LazyState,
     pub(crate) navigation: NavigationState,
-    navigation_captures: Vec<NavigationSceneCapture>,
     #[cfg(feature = "accessibility")]
     accessibility: AccessibilityBuilder,
     /// The persistent window render tree (`tree::RenderNode`), built on a structural
@@ -288,19 +265,102 @@ pub struct HydrolysisRenderer {
     subview_structural_change: bool,
 }
 
+/// Core hydrolysis renderer state: a [`SemanticCore`] plus the GPU-side scene,
+/// compositor and surface state the layout/encode pass needs.
+pub struct HydrolysisRenderer {
+    core: SemanticCore,
+    /// The widget theme the runtime's style supplies to layout and encode.
+    /// Never installed into the environment: build and patch cannot reach it.
+    theme: Rc<dyn crate::engine::WidgetTheme>,
+    vello_renderer: vello::Renderer,
+    scene: vello::Scene,
+    transient_scene: Option<vello::Scene>,
+    compositor: Compositor,
+    window_bounds: vello::kurbo::Rect,
+    /// The transform the window's root content is flushed under: logical layout
+    /// units onto the target's physical pixel grid. Stored alongside
+    /// [`Self::window_bounds`] because the pair is what says where the viewport
+    /// is in device pixels, which is what
+    /// [`HydrolysisRenderer::push_gpu_surface_layer`] tests a full-window GPU
+    /// surface against.
+    window_root_transform: vello::kurbo::Affine,
+    /// Wake target supplied when this renderer itself is hosted by a
+    /// `GpuSurface`. Async setup and renderer-owned redraws from nested surfaces
+    /// use it to wake the parent host without polling frames.
+    host_redraw_handle: Option<RedrawHandle>,
+    /// Module cache for shaders that embedded GPU surfaces, view effects and
+    /// filters assemble at runtime. Shared so identical WGSL compiles once.
+    shader_cache: Arc<WgslModuleCache>,
+    /// The scene renderer embedded GPU surfaces share, for the same reason: its
+    /// pipelines belong to the device rather than to any one scene.
+    scene_renderer: Arc<SharedSceneRenderer>,
+    frame_clip_layers: u32,
+    frame_max_clip_depth: u32,
+    /// Whether this frame's window pass was handed straight to a GPU surface
+    /// instead of being composited. Recorded by
+    /// [`HydrolysisRenderer::render_scene_to_surface`] as it decides, so the
+    /// frame report says what happened rather than what was eligible.
+    frame_direct_gpu_surfaces: u32,
+    frame_applied_filter_count: u32,
+    frame_applied_filter_capture: Duration,
+    frame_applied_filter_effect: Duration,
+    /// The per-frame atlas every filtered subtree is captured through.
+    subtree_captures: SubtreeCaptures,
+    navigation_captures: Vec<NavigationSceneCapture>,
+}
+
+impl core::ops::Deref for HydrolysisRenderer {
+    type Target = SemanticCore;
+    fn deref(&self) -> &SemanticCore {
+        &self.core
+    }
+}
+
+impl core::ops::DerefMut for HydrolysisRenderer {
+    fn deref_mut(&mut self) -> &mut SemanticCore {
+        &mut self.core
+    }
+}
+
 const HIT_TEST_ALPHA_THRESHOLD: f32 = 0.01;
 
 const TEXT_SELECTION_MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const TEXT_SELECTION_MULTI_CLICK_DISTANCE: f64 = 6.0;
 const TEXT_CONTEXT_MENU_WINDOW_TITLE: &str = "";
 
-impl HydrolysisRenderer {
+impl SemanticCore {
+    pub(crate) fn new(frame_instant: Instant) -> Self {
+        Self {
+            state: HydroState::default(),
+            hit_test: HitTestState::default(),
+            gesture_engine: GestureEngine::default(),
+            gesture_group_ids: BTreeMap::new(),
+            next_gesture_group_id: 0,
+            text_editing: TextEditingState::default(),
+            popup_menu: PopupMenuState::default(),
+            render_depth: 0,
+            signals: FrameSignals::new(frame_instant),
+            lifecycle: LifecycleState::default(),
+            animation_controller: AnimationController::default(),
+            frame_instant,
+            node_gpu_surfaces: Vec::new(),
+            node_view_effects: Vec::new(),
+            node_applied_filters: Vec::new(),
+            lazy: LazyState::default(),
+            navigation: NavigationState::default(),
+            #[cfg(feature = "accessibility")]
+            accessibility: AccessibilityBuilder::default(),
+            render_tree: None,
+            subview_structural_change: false,
+        }
+    }
+
     /// Runs `f` with accessibility-node registration suppressed. For a control
     /// whose own node already carries an internal sub-view's semantics (a merged
-    /// label, a numeric value): flushing that sub-view inside this scope keeps it
+    /// label, a numeric value): emitting that sub-view inside this scope keeps it
     /// visual-only, so the control stays a single accessibility node instead of
-    /// double-exposing its label as a separate node. Compiles to a plain call
-    /// without the `accessibility` feature, so call sites need no gating.
+    /// double-exposing its label as a separate node.
+    #[cfg(feature = "accessibility")]
     pub(crate) fn with_suppressed_accessibility<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         #[cfg(feature = "accessibility")]
         self.push_accessibility_suppression();
@@ -323,18 +383,25 @@ impl HydrolysisRenderer {
     pub(crate) fn take_subview_structural_change(&mut self) -> bool {
         core::mem::take(&mut self.subview_structural_change)
     }
+}
 
-    /// A renderer for `device`, which `adapter` produced.
+impl HydrolysisRenderer {
+    /// A renderer for `device`, which `adapter` produced, drawing with `theme`.
     ///
     /// The adapter is not a formality: the scene renderer that embedded GPU
     /// surfaces share is built for the engine `adapter` can actually run, and
     /// an adapter without indirect execution aborts inside wgpu rather than
     /// degrading when asked to run the classic compute pipeline.
     #[must_use]
-    pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
+    pub fn new(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        theme: Rc<dyn crate::engine::WidgetTheme>,
+    ) -> Self {
         Self::new_with_options(
             adapter,
             device,
+            theme,
             vello::RendererOptions {
                 use_cpu: false,
                 antialiasing_support: vello::AaSupport::area_only(),
@@ -359,51 +426,58 @@ impl HydrolysisRenderer {
     pub fn new_with_options(
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
+        theme: Rc<dyn crate::engine::WidgetTheme>,
         options: vello::RendererOptions,
     ) -> Self {
         let vello_renderer =
             vello::Renderer::new(device, options).expect("failed to create hydrolysis renderer");
         let frame_instant = Instant::now();
         Self {
-            state: HydroState::default(),
+            core: SemanticCore::new(frame_instant),
+            theme,
             vello_renderer,
             scene: vello::Scene::new(),
             transient_scene: None,
             compositor: Compositor::default(),
-            hit_test: HitTestState::default(),
-            gesture_engine: GestureEngine::default(),
-            gesture_group_ids: BTreeMap::new(),
-            next_gesture_group_id: 0,
-            text_editing: TextEditingState::default(),
-            popup_menu: PopupMenuState::default(),
-            render_depth: 0,
             window_bounds: vello::kurbo::Rect::ZERO,
             window_root_transform: vello::kurbo::Affine::IDENTITY,
-            signals: FrameSignals::new(frame_instant),
             host_redraw_handle: None,
             shader_cache: Arc::new(WgslModuleCache::new()),
             scene_renderer: Arc::new(SharedSceneRenderer::new(SceneEngine::for_adapter(adapter))),
-            lifecycle: LifecycleState::default(),
-            animation_controller: AnimationController::default(),
-            frame_instant,
             frame_clip_layers: 0,
             frame_max_clip_depth: 0,
             frame_direct_gpu_surfaces: 0,
             frame_applied_filter_count: 0,
             frame_applied_filter_capture: Duration::ZERO,
             frame_applied_filter_effect: Duration::ZERO,
-            node_gpu_surfaces: Vec::new(),
-            node_view_effects: Vec::new(),
-            node_applied_filters: Vec::new(),
             subtree_captures: SubtreeCaptures::default(),
-            lazy: LazyState::default(),
-            navigation: NavigationState::default(),
             navigation_captures: Vec::new(),
-            #[cfg(feature = "accessibility")]
-            accessibility: AccessibilityBuilder::default(),
-            render_tree: None,
-            subview_structural_change: false,
         }
+    }
+
+    /// The widget theme layout and encode draw with. Returned as a cloned
+    /// `Rc` so callers may hold it across further `&mut self` calls.
+    pub(crate) fn theme(&self) -> Rc<dyn crate::engine::WidgetTheme> {
+        Rc::clone(&self.theme)
+    }
+
+    /// Runs `f` with accessibility-node registration suppressed. For a control
+    /// whose own node already carries an internal sub-view's semantics (a merged
+    /// label, a numeric value): flushing that sub-view inside this scope keeps it
+    /// visual-only, so the control stays a single accessibility node instead of
+    /// double-exposing its label as a separate node. Compiles to a plain call
+    /// without the `accessibility` feature, so call sites need no gating.
+    ///
+    /// This shadows [`SemanticCore::with_suppressed_accessibility`] so rendered
+    /// callers flush through a `&mut HydrolysisRenderer`; the core method is the
+    /// one the semantic runtime's emission walk uses.
+    pub(crate) fn with_suppressed_accessibility<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        #[cfg(feature = "accessibility")]
+        self.push_accessibility_suppression();
+        let result = f(self);
+        #[cfg(feature = "accessibility")]
+        self.pop_accessibility_suppression();
+        result
     }
 }
 
