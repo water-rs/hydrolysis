@@ -687,7 +687,9 @@ pub(crate) fn list_accessibility(
             let row_env = env.clone();
             let item = materialize_list_item(&list.contents, index, &row_env);
             let chrome = state.section_chrome(index);
-            let slot_height = {
+            // Semantic rows have no layout extent — the slot is only measured
+            // when the rendered path needs it to place the row.
+            let slot_height = if _rendered {
                 let cached_extent = state.extent_index.borrow().measured(index);
                 if let Some(extent) = cached_extent {
                     extent
@@ -704,6 +706,8 @@ pub(crate) fn list_accessibility(
                     state.extent_index.borrow_mut().set_measured(index, extent);
                     extent
                 }
+            } else {
+                0.0
             };
             let slot_rect = vello::kurbo::Rect::new(viewport.x0, y, viewport.x1, y + slot_height);
             y += slot_height;

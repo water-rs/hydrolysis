@@ -1117,6 +1117,10 @@ impl SemanticCore {
             let styled = self.read_signal(&label.semantic_text().resolve(&scoped_env).content);
             return Some(styled.to_semantic().to_string());
         }
+        if let Some(text) = view.downcast_ref::<waterui_text::Text>() {
+            let styled = self.read_signal(&text.resolve(&scoped_env).content);
+            return Some(styled.to_semantic().to_string());
+        }
         if let Some(label) = view.downcast_ref::<Str>() {
             return Some(label.as_str().to_owned());
         }
