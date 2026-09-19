@@ -87,7 +87,7 @@ fn find_by_label<'a>(
 }
 
 /// The single node with `role`, if exactly one exists.
-fn find_only<'a>(update: &'a TreeUpdate, role: Role) -> Option<(NodeId, &'a Node)> {
+fn find_only(update: &TreeUpdate, role: Role) -> Option<(NodeId, &Node)> {
     let mut matches = update.nodes.iter().filter(|(_, node)| node.role() == role);
     let only = matches.next().map(|(id, node)| (*id, node));
     assert!(
@@ -97,7 +97,7 @@ fn find_only<'a>(update: &'a TreeUpdate, role: Role) -> Option<(NodeId, &'a Node
     only
 }
 
-fn lookup<'a>(update: &'a TreeUpdate, id: NodeId) -> &'a Node {
+fn lookup(update: &TreeUpdate, id: NodeId) -> &Node {
     update
         .nodes
         .iter()
@@ -1108,6 +1108,75 @@ fn navigation_stack_pushes_and_back_click_pops() {
 }
 
 #[test]
+fn navigation_stack_fires_lifecycle_hooks_on_push_and_pop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let log = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    let log_for_view = log.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let log = log_for_view.clone();
+        let detail_log = log.clone();
+        AnyView::new(NavigationStack::new(
+            NavigationView::new(
+                "Root",
+                vstack((NavigationLink::new("Open Detail", move || {
+                    let log = detail_log.clone();
+                    NavigationView::new("Detail", text("detail content"))
+                        .on_navigation_appear({
+                            let log = log.clone();
+                            move || log.borrow_mut().push("detail-appear")
+                        })
+                        .on_navigation_disappear({
+                            let log = log.clone();
+                            move || log.borrow_mut().push("detail-disappear")
+                        })
+                        .on_navigation_pop(move || log.borrow_mut().push("detail-pop"))
+                }),)),
+            )
+            .on_navigation_appear({
+                let log = log.clone();
+                move || log.borrow_mut().push("root-appear")
+            })
+            .on_navigation_disappear(move || log.borrow_mut().push("root-disappear")),
+        ))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["root-appear"],
+        "mounting the stack activates the root exactly once"
+    );
+
+    let (open, _) =
+        find_by_label(&update, Role::Button, "Open Detail").expect("the link is missing");
+    assert!(act(&mut runtime, Action::Click, open));
+    let update = pumped(&mut runtime);
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["root-appear", "root-disappear", "detail-appear"],
+        "a push must disappear the root and appear the destination"
+    );
+
+    let (back, _) = find_only(&update, Role::Button).expect("the back button is missing");
+    assert!(act(&mut runtime, Action::Click, back));
+    pumped(&mut runtime);
+    assert_eq!(
+        log.borrow().as_slice(),
+        [
+            "root-appear",
+            "root-disappear",
+            "detail-appear",
+            "detail-disappear",
+            "detail-pop",
+            "root-appear",
+        ],
+        "a pop must disappear and pop the destination, then reappear the root"
+    );
+}
+
+#[test]
 fn navigation_split_emits_sidebar_and_selected_detail() {
     let selection = Binding::container(None::<i32>);
     let selection_for_view = selection.clone();
@@ -1253,4 +1322,84 @@ fn lazy_stack_emits_every_item_without_layout() {
             "lazy item {expected:?} is missing — there is no viewport to virtualize against"
         );
     }
+}
+
+/// The `.focused(binding)` direction of focus: a runtime write to the focus
+/// binding lands UI focus on the field's node in the emitted tree, clearing
+/// the binding clears it, and a non-text node can hold the tree's focus
+/// while UI focus stays on the field — the two are deliberately separate.
+#[test]
+fn focused_binding_moves_ui_focus_and_tree_focus() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Field {
+        Name,
+        Email,
+    }
+
+    let focus = Binding::container(None::<Field>);
+    let name = Binding::container(Str::default());
+    let email = Binding::container(Str::default());
+    let focus_for_view = focus.clone();
+    let name_for_view = name.clone();
+    let email_for_view = email.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let focus = focus_for_view.clone();
+        AnyView::new(vstack((
+            field("Name", &name_for_view).focused(&focus, Field::Name),
+            field("Email", &email_for_view).focused(&focus, Field::Email),
+            button("Done"),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (name_node, _) =
+        find_by_label(&update, Role::TextInput, "Name").expect("the Name field is missing");
+    let (email_node, _) =
+        find_by_label(&update, Role::TextInput, "Email").expect("the Email field is missing");
+    let (done, _) = find_by_label(&update, Role::Button, "Done").expect("the button is missing");
+    assert_eq!(runtime.focused_ui_node(), None);
+
+    // A runtime write moves UI focus onto the field — and the tree reports
+    // focus on its node too.
+    focus.set(Some(Field::Name));
+    let update = pumped(&mut runtime);
+    assert_eq!(
+        update.focus, name_node,
+        "the tree must report focus on Name"
+    );
+    assert_eq!(runtime.focused_ui_node(), Some(name_node));
+
+    // A later write moves both to the second field.
+    focus.set(Some(Field::Email));
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, email_node);
+    assert_eq!(runtime.focused_ui_node(), Some(email_node));
+
+    // A non-text node taking the tree's focus leaves UI focus on the field —
+    // the text caret is independent of where keyboard focus sits.
+    assert!(act(&mut runtime, Action::Focus, done));
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, done);
+    assert_eq!(
+        runtime.focused_ui_node(),
+        Some(email_node),
+        "UI focus is the text caret — the button holds only the tree's focus"
+    );
+    assert_eq!(focus.get(), Some(Field::Email));
+
+    // Clearing the binding clears UI focus and writes None back; the tree's
+    // focus stays on the button it moved to.
+    focus.set(None);
+    let update = pumped(&mut runtime);
+    assert_eq!(runtime.focused_ui_node(), None);
+    assert_eq!(focus.get(), None);
+    assert_eq!(update.focus, done);
+
+    // A cleared UI focus accepts a new target: an accessibility Focus on the
+    // field moves UI focus and the tree's focus, and writes the tag back.
+    assert!(act(&mut runtime, Action::Focus, name_node));
+    let update = pumped(&mut runtime);
+    assert_eq!(update.focus, name_node);
+    assert_eq!(runtime.focused_ui_node(), Some(name_node));
+    assert_eq!(focus.get(), Some(Field::Name));
 }
