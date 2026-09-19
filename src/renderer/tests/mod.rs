@@ -13,6 +13,8 @@ mod gpu_surface_input;
 mod layout_contract;
 mod perf_full_rebuild;
 mod perf_scroll;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod popup_windows;
 mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;

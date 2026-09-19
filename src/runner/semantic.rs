@@ -386,52 +386,15 @@ impl SemanticRuntime {
     }
 
     /// The accessibility tree of every window this application has open,
-    /// merged exactly as [`HeadlessRuntime`](crate::HeadlessRuntime) merges:
+    /// merged by [`SemanticCore::take_merged_accessibility_tree_update`]:
     /// each popup's ids are shifted into their own range and its root attached
-    /// to the main root so the result is one tree.
+    /// to the main root so the result is one tree — the same merge the
+    /// rendered [`HeadlessRuntime`](crate::HeadlessRuntime) applies.
     #[cfg(feature = "accessibility")]
     fn take_merged_accessibility_tree_update(&mut self) -> Option<AccessibilityTreeUpdate> {
-        use accesskit::NodeId as AccessibilityNodeId;
-
-        /// Node ids are unique per core, so each window gets its own range.
-        const WINDOW_ID_STRIDE: u64 = 1 << 32;
-        const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
-
-        let mut merged = self.window.core.take_accessibility_tree_update()?;
-        if self.popup_windows.is_empty() {
-            return Some(merged);
-        }
-
-        let mut root_children = merged
-            .nodes
-            .iter()
-            .find(|(id, _)| *id == ROOT)
-            .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
-
-        for (index, popup) in self.popup_windows.iter_mut().enumerate() {
-            let Some(update) = popup.core.take_accessibility_tree_update() else {
-                continue;
-            };
-            let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
-            for (id, mut node) in update.nodes {
-                let children: Vec<_> = node
-                    .children()
-                    .iter()
-                    .map(|child| AccessibilityNodeId(child.0 + offset))
-                    .collect();
-                node.set_children(children);
-                let shifted = AccessibilityNodeId(id.0 + offset);
-                if id == ROOT {
-                    root_children.push(shifted);
-                }
-                merged.nodes.push((shifted, node));
-            }
-        }
-
-        if let Some((_, root)) = merged.nodes.iter_mut().find(|(id, _)| *id == ROOT) {
-            root.set_children(root_children);
-        }
-        Some(merged)
+        self.window.core.take_merged_accessibility_tree_update(
+            self.popup_windows.iter_mut().map(|popup| &mut popup.core),
+        )
     }
 }
 

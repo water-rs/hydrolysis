@@ -612,6 +612,71 @@ impl SemanticCore {
         self.accessibility.pending_tree_update.take()
     }
 
+    /// The accessibility tree of every open window, merged into one update.
+    ///
+    /// The main window's core takes its pending update; each popup core
+    /// contributes its own pending update with every node id shifted into a
+    /// per-window range (node ids are unique per core), and each popup root
+    /// attaches to the main root's children so the merged tree stays one
+    /// tree. Actions addressed at a shifted id demultiplex back to the owning
+    /// window's core by the same stride — see the runtime's
+    /// `perform_accessibility_action`.
+    ///
+    /// A popup with no pending update contributes nothing: a window that
+    /// settled without changing leaves the merged tree as the main window's
+    /// own update reports it.
+    #[cfg(feature = "accessibility")]
+    #[must_use]
+    pub fn take_merged_accessibility_tree_update<'a>(
+        &mut self,
+        popups: impl IntoIterator<Item = &'a mut SemanticCore>,
+    ) -> Option<AccessibilityTreeUpdate> {
+        use accesskit::NodeId as AccessibilityNodeId;
+
+        /// Node ids are unique per core, so each window gets its own range.
+        /// The action-dispatch side indexes popups by `id / STRIDE - 1`, so
+        /// this stride is part of the merged tree's contract.
+        const WINDOW_ID_STRIDE: u64 = 1 << 32;
+        const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
+
+        let mut merged = self.take_accessibility_tree_update()?;
+        let mut popups = popups.into_iter().peekable();
+        if popups.peek().is_none() {
+            return Some(merged);
+        }
+
+        let mut root_children = merged
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ROOT)
+            .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
+
+        for (index, popup) in popups.enumerate() {
+            let Some(update) = popup.take_accessibility_tree_update() else {
+                continue;
+            };
+            let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
+            for (id, mut node) in update.nodes {
+                let children: Vec<_> = node
+                    .children()
+                    .iter()
+                    .map(|child| AccessibilityNodeId(child.0 + offset))
+                    .collect();
+                node.set_children(children);
+                let shifted = AccessibilityNodeId(id.0 + offset);
+                if id == ROOT {
+                    root_children.push(shifted);
+                }
+                merged.nodes.push((shifted, node));
+            }
+        }
+
+        if let Some((_, root)) = merged.nodes.iter_mut().find(|(id, _)| *id == ROOT) {
+            root.set_children(root_children);
+        }
+        Some(merged)
+    }
+
     /// Borrows the pending tree update without consuming it.
     ///
     /// The platform accessibility bridge is the update's real consumer; an

@@ -392,16 +392,47 @@ impl HeadlessRuntime {
         self.runtime.platform.request_redraw();
     }
 
+    /// Performs an accessibility action against the merged tree.
+    ///
+    /// Popup-window node ids are shifted into their own stride in the merged
+    /// update (see [`SemanticCore::take_merged_accessibility_tree_update`]),
+    /// so a request whose target lands in a popup's range demuxes back to that
+    /// window's core — the action targets (a menu item's activation, a picker
+    /// row's selection) live there. Returns whether the action changed state,
+    /// in which case the next pump re-emits.
     #[cfg(feature = "accessibility")]
     pub fn perform_accessibility_action(&mut self, request: AccessibilityActionRequest) -> bool {
-        let action_env = self.env.extending(runtime_window_origin(&self.runtime));
-        let changed = self
-            .runtime
+        /// The same id range
+        /// [`SemanticCore::take_merged_accessibility_tree_update`] assigns
+        /// each popup.
+        const WINDOW_ID_STRIDE: u64 = 1 << 32;
+
+        let target = request.target_node.0;
+        let (window, request) = if target >= WINDOW_ID_STRIDE {
+            let index = target / WINDOW_ID_STRIDE - 1;
+            let popup = self
+                .popup_windows
+                .get_mut(index as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "hydrolysis headless runtime: accessibility action {:?} targets closed popup \
+                         node {target}",
+                        request.action
+                    )
+                });
+            let mut request = request;
+            request.target_node = accesskit::NodeId(target % WINDOW_ID_STRIDE);
+            (popup, request)
+        } else {
+            (&mut self.runtime, request)
+        };
+        let action_env = self.env.extending(runtime_window_origin(window));
+        let changed = window
             .renderer
             .handle_accessibility_action(request, &action_env);
         if changed {
-            self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
+            window.request_refresh();
+            window.platform.request_redraw();
         }
         changed
     }
@@ -511,6 +542,19 @@ impl HeadlessRuntime {
             let _ = handle_input_events(popup, &self.env);
             let _ = advance_runtime(popup, &self.env, at);
         }
+        // A popup whose state flipped `Closed` — its menu group dismissed it
+        // or a close request arrived — leaves the merged tree. Flag the main
+        // window so the update re-emits without it.
+        if self
+            .popup_windows
+            .iter()
+            .any(|popup| popup.window.state.get() == waterui::window::WindowState::Closed)
+        {
+            self.popup_windows
+                .retain(|popup| popup.window.state.get() != waterui::window::WindowState::Closed);
+            self.runtime.request_refresh();
+            self.runtime.platform.request_redraw();
+        }
         let should_render = capture_snapshot
             || self.runtime.mode.is_pending()
             || self.runtime.platform.take_redraw_request();
@@ -555,7 +599,11 @@ impl HeadlessRuntime {
                 || drained_after,
             profile: profile.with_total(frame_started_at.elapsed()),
             #[cfg(feature = "accessibility")]
-            tree_update: self.runtime.renderer.take_accessibility_tree_update(),
+            tree_update: self.runtime.renderer.take_merged_accessibility_tree_update(
+                self.popup_windows
+                    .iter_mut()
+                    .map(|popup| &mut *popup.renderer),
+            ),
             snapshot: render_result.and_then(|result| result.snapshot),
             #[cfg(feature = "accessibility")]
             ui_focus: self.runtime.renderer.focused_ui_node(),
