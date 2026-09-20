@@ -261,16 +261,16 @@ hydrolysis = { path = "." }
 # `waterui-testing` names this theme, and the tests author canvases directly.
 # Their dev heads declare the 0.5.0-wave versions the pinned framework
 # requires; drop these entries once those releases ship.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "b899c035a890c531b1489eefca4a7968de1d2a84" }
-waterui-canvas = { git = "https://github.com/water-rs/canvas", rev = "6ebc84d19347334390192029e8054eafe2ccbac0" }
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "38499ef90b0a9e0d3b413fa78350325e88e21044" }
+waterui-canvas = { git = "https://github.com/water-rs/canvas", rev = "5642e1a330e1ffabb906332bec521819a7fc4af7" }
 # Reached through the `waterui` facade.
-waterui-svg = { git = "https://github.com/water-rs/svg", rev = "79493d096341faf630e03350f22db73c07bb3b3a" }
+waterui-svg = { git = "https://github.com/water-rs/svg", rev = "12553db2de92e66ff919f56c6dd98ba42f757a00" }
 # Reached through `waterui-media`.
-waterui-image = { git = "https://github.com/water-rs/image", rev = "a1632420ddecde008bde3fe392eee0d9f660d67a" }
+waterui-image = { git = "https://github.com/water-rs/image", rev = "6b3077431d2edccfd6c7d0b4fb45d69bd1d5bc56" }
 # Reached through the `waterui` facade's `video-gpu` feature, which the media
 # presentation tests select so `realization::install_video` installs the
 # self-drawn player. Same revision waterui pins for itself.
-waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "e208a44b995883cfda7053f2cf12894e9f1a4ba9" }
+waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "811e207e4dc19f30caafd09f6e3a2ae5d2ceed65" }
 
 waterui = { git = "https://github.com/water-rs/waterui", rev = "d6807a87c39b2b3f6e992cd9f205f93a2155ed8b" }
 waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "d6807a87c39b2b3f6e992cd9f205f93a2155ed8b" }
