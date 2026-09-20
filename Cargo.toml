@@ -177,7 +177,7 @@ waterui-navigation = "0.5.0"
 # directly: live photos (media), the MCP session harness (mcp, aither-mcp,
 # futures-lite, serde_json).
 waterui-media = "0.5.0"
-waterui-mcp = "0.5.0"
+waterui-mcp = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 aither-mcp = { version = "0.4", default-features = false, features = ["server"] }
 futures-lite = "2.6"
 serde_json = "1"
@@ -287,7 +287,6 @@ waterui-layout = { git = "https://github.com/water-rs/waterui", rev = "b25438ae3
 waterui-locale = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 waterui-macros = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 waterui-map = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
-waterui-mcp = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 waterui-media = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 waterui-navigation = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
 waterui-preview-protocol = { git = "https://github.com/water-rs/waterui", rev = "b25438ae309d69c8a91c6ecc2580723ed1dd792b" }
