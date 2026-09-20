@@ -570,10 +570,18 @@ struct AdapterPreference {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AdapterPreference {
-    fn for_info(info: &wgpu::AdapterInfo) -> Self {
+    /// `prefer_software` is the diagnostics escape hatch: the flag is named
+    /// `FORCE_FALLBACK_ADAPTER`, so with it set a software adapter must win
+    /// over the real GPU beside it, which is the whole point of reproducing a
+    /// software-adapter run on a machine that has a GPU.
+    fn for_info(info: &wgpu::AdapterInfo, prefer_software: bool) -> Self {
         Self {
             backend_rank: backend_rank(info.backend),
-            device_type_rank: device_type_rank(info.device_type),
+            device_type_rank: if prefer_software {
+                software_first_device_type_rank(info.device_type)
+            } else {
+                device_type_rank(info.device_type)
+            },
         }
     }
 }
@@ -621,6 +629,79 @@ const fn device_type_rank(device_type: wgpu::DeviceType) -> u8 {
     }
 }
 
+/// What a user on a host without a usable GPU is told, wherever the renderer
+/// refuses to start.
+///
+/// Hydrolysis is GPU-required by design, so the honest answer is another host
+/// or another renderer. The escape hatch is named as diagnostics and nothing
+/// more: a software adapter reports compute support and still aborts the
+/// process inside shader compilation (Microsoft Basic Render Driver on
+/// Windows Server does exactly that), so recommending it as the remedy sends
+/// the user somewhere worse than the refusal.
+const GPU_REQUIRED_GUIDANCE: &str = "Hydrolysis renders through GPU compute pipelines and has no CPU path: \
+run on a machine with a GPU, or on a virtual machine enable hardware 3D acceleration and install the vendor driver. \
+For targets without a GPU, waterui-dew is the CPU renderer. \
+WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1 widens adapter selection to software adapters for diagnostics only; \
+a software adapter that cannot run the renderer's pipelines fails or aborts the process instead of drawing.";
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod adapter_selection_tests {
+    use super::{AdapterPreference, GPU_REQUIRED_GUIDANCE};
+
+    fn info(device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: String::new(),
+            vendor: 0,
+            device: 0,
+            device_type,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Vulkan,
+            subgroup_min_size: 0,
+            subgroup_max_size: 0,
+            transient_saves_memory: false,
+        }
+    }
+
+    #[test]
+    fn a_gpu_outranks_a_software_adapter_by_default() {
+        let gpu = AdapterPreference::for_info(&info(wgpu::DeviceType::DiscreteGpu), false);
+        let software = AdapterPreference::for_info(&info(wgpu::DeviceType::Cpu), false);
+        assert!(gpu < software);
+    }
+
+    #[test]
+    fn forcing_the_fallback_adapter_picks_software_over_a_gpu() {
+        let gpu = AdapterPreference::for_info(&info(wgpu::DeviceType::DiscreteGpu), true);
+        let software = AdapterPreference::for_info(&info(wgpu::DeviceType::Cpu), true);
+        assert!(
+            software < gpu,
+            "the escape hatch is named `force`: it must select the software adapter even when a GPU is present"
+        );
+    }
+
+    #[test]
+    fn the_refusal_does_not_recommend_the_escape_hatch_as_a_remedy() {
+        // A software adapter that reports compute support can still abort the
+        // process in shader compilation, so the guidance must offer another
+        // host or Dew and name the flag as diagnostics only.
+        assert!(GPU_REQUIRED_GUIDANCE.contains("waterui-dew"));
+        assert!(GPU_REQUIRED_GUIDANCE.contains("diagnostics only"));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const fn software_first_device_type_rank(device_type: wgpu::DeviceType) -> u8 {
+    match device_type {
+        wgpu::DeviceType::Cpu => 0,
+        wgpu::DeviceType::DiscreteGpu => 1,
+        wgpu::DeviceType::IntegratedGpu => 2,
+        wgpu::DeviceType::VirtualGpu => 3,
+        wgpu::DeviceType::Other => 4,
+    }
+}
+
 fn is_compute_capable_adapter(adapter: &wgpu::Adapter) -> bool {
     let downlevel_caps = adapter.get_downlevel_capabilities();
     let limits = adapter.limits();
@@ -652,19 +733,12 @@ async fn request_hydrolysis_adapter(
 
     #[cfg(not(all(target_arch = "wasm32", feature = "web")))]
     {
-        if selection.force_fallback_adapter() {
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface,
-                    force_fallback_adapter: true,
-                })
-                .await
-                .expect("hydrolysis adapter selection: failed to find fallback adapter");
-            log_selected_adapter(context, &adapter);
-            return adapter;
-        }
-
+        // The diagnostics escape hatch widens which adapters are eligible
+        // (`AdapterSelection::allow_software_adapter`); it does not hand the
+        // renderer whatever `request_adapter` returns. Asking wgpu for a
+        // fallback adapter directly skipped the compute-capability filter and
+        // the ranking below, which is how a CPU adapter that cannot run the
+        // compute pipelines reached vello's shader init.
         let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::all());
         let mut best_candidate: Option<(AdapterPreference, wgpu::Adapter)> = None;
         let mut inspected_adapters: Vec<String> = Vec::new();
@@ -717,7 +791,7 @@ async fn request_hydrolysis_adapter(
                 continue;
             }
 
-            let preference = AdapterPreference::for_info(&info);
+            let preference = AdapterPreference::for_info(&info, selection.force_fallback_adapter());
             match &best_candidate {
                 Some((best_preference, _)) if *best_preference <= preference => {}
                 _ => best_candidate = Some((preference, adapter)),
@@ -734,9 +808,9 @@ Set WGPU_BACKEND to an available backend or install/update the platform GPU driv
             }
 
             panic!(
-                "{context}: failed to find a compute-capable modern adapter. \
+                "{context}: this host has no GPU Hydrolysis can use. \
 Surface-compatible adapters inspected: {}. \
-Set WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1 to explicitly allow software fallback adapters for diagnostics.",
+{GPU_REQUIRED_GUIDANCE}",
                 inspected_adapters.join("; ")
             );
         });
@@ -854,15 +928,9 @@ fn ensure_compute_capable_adapter(
     }
 
     let info = adapter.get_info();
-    let fallback_hint = if cfg!(target_os = "windows") {
-        " On Windows, try forcing DX12 WARP: set WGPU_BACKEND=dx12 and WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1."
-    } else {
-        ""
-    };
     panic!(
         "{context}: {no_compute_message}. Selected adapter '{}' ({:?}) reports max_compute_workgroups_per_dimension = {}. \
-Hydrolysis requires compute shader support. On virtual machines, enable hardware 3D acceleration and update VM graphics tools/driver, \
-or run on a host with a compute-capable GPU.{fallback_hint}",
+{GPU_REQUIRED_GUIDANCE}",
         info.name, info.backend, limits.max_compute_workgroups_per_dimension
     );
 }
