@@ -7,6 +7,7 @@ use super::{
 use crate::platform::{
     InputEvent, OffscreenSurface, PlatformWindow as _, SurfaceError, SurfaceFrame, SurfaceProvider,
 };
+use crate::renderer::tests::MinimalTestTheme;
 use crate::renderer::{HydrolysisRenderer, InteractionKey};
 use core::time::Duration;
 use std::rc::Rc;
@@ -81,8 +82,9 @@ fn animation_ticks_schedule_full_frames() {
 
     assert!(runtime.mode.is_pending());
     assert!(
-        runtime.mode == FrameMode::Refresh,
-        "an animation tick schedules the same full frame as any content change"
+        runtime.mode == FrameMode::Animate,
+        "an animation tick schedules the same full frame as any content change, \
+         marked as continuation work rather than an unapplied update"
     );
 }
 
@@ -190,7 +192,7 @@ fn window_size_limits_reach_the_platform_window() {
 
 #[test]
 fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
-    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView};
+    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView, SubviewPlacement};
     use waterui_layout::container::FixedContainer;
 
     #[derive(Debug)]
@@ -204,7 +206,12 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
             )
         }
 
-        fn place(&self, _bounds: Rect, _children: &[&dyn SubView]) -> Vec<Rect> {
+        fn place(
+            &self,
+            _bounds: Rect,
+            _proposal: ProposalSize,
+            _children: &[&dyn SubView],
+        ) -> Vec<SubviewPlacement> {
             Vec::new()
         }
     }
@@ -223,6 +230,42 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
         min.expect("content-derived minimum must exist").width,
         0.0,
         "a valid zero minimum must not fall back to the content's ideal width"
+    );
+}
+
+/// The reported minimum must be a box the content can actually occupy: text
+/// re-wraps at the minimum width, so the minimum height is the wrapped height,
+/// not the single-line height a per-axis probe reports.
+#[test]
+fn window_minimum_is_the_coupled_box_not_independent_axes() {
+    use waterui::prelude::text;
+
+    let env = crate::renderer::tests::test_environment();
+    let minimum_of = |content: &'static str| {
+        let window = Window::new("", binding(WindowState::Normal), move || text(content));
+        let mut runtime = runtime_window_for(window);
+        let _ = super::pump_window_semantics(&mut runtime, &env);
+        runtime
+            .platform
+            .applied_size_limits()
+            .expect("runner must apply size limits on the pump")
+            .0
+            .expect("content-derived minimum must exist")
+    };
+
+    // Five words collapse to one word per line at the minimum width, so the
+    // window's minimum height must be five text lines — the per-axis probes
+    // used to report one line here, a box the content could never fit in.
+    let wrapped = minimum_of("AAAA AAAA AAAA AAAA AAAA");
+    let single_line = minimum_of("AAAA");
+    assert!(
+        wrapped.height >= single_line.height * 4.0,
+        "minimum {wrapped:?} must be the height the text needs at its minimum \
+         width, not the single-line height {single_line:?}"
+    );
+    assert!(
+        wrapped.width <= single_line.width * 2.0,
+        "minimum width {wrapped:?} should be word-granular, not the full line"
     );
 }
 
@@ -329,7 +372,11 @@ fn runtime_window_sized(
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,
@@ -434,7 +481,11 @@ fn test_runtime_window() -> RuntimeWindow<HeadlessPlatformWindow> {
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,
@@ -481,6 +532,10 @@ impl SurfaceProvider for RecoveringSurface {
 
     fn queue(&self) -> &wgpu::Queue {
         self.inner.queue()
+    }
+
+    fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+        self.inner.device_loss()
     }
 
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {

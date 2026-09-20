@@ -2,7 +2,8 @@ use crate::engine::Brush;
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 #[cfg(feature = "accessibility")]
-use crate::renderer::accessibility_activation_point;
+use crate::renderer::ROOT_NAVIGATION_IDENTITY;
+use crate::renderer::bounded_proposal;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
     WidgetRenderContext, measure_navigation_view_intrinsic,
@@ -31,8 +32,6 @@ use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native};
 use waterui_graphics::color::{Color, ResolvedColor};
 
-use crate::widgets::widget_theme;
-
 #[derive(Clone, Copy)]
 struct NavigationLeadingReserve(f64);
 
@@ -41,8 +40,8 @@ fn navigation_leading_reserve(env: &Environment) -> f64 {
         .map_or(0.0, |reserve| reserve.0)
 }
 
-fn back_button_title_reserve(env: &Environment) -> f64 {
-    let metrics = widget_theme(env).navigation_metrics();
+fn back_button_title_reserve(theme: &Rc<dyn crate::engine::WidgetTheme>) -> f64 {
+    let metrics = theme.navigation_metrics();
     metrics.back_button_size + metrics.title_leading_inset
 }
 
@@ -136,7 +135,11 @@ impl NavigationViewRenderState {
 
     /// Eagerly build the bar/content sub-views (the measure path has no renderer to
     /// build on), mirroring the dispatch path's normalization.
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.title.ensure_built(renderer, env);
         if self.subtitle_present {
             self.subtitle.ensure_built(renderer, env);
@@ -158,20 +161,26 @@ impl NavigationViewRenderState {
 }
 
 impl HydroNativeView for Native<NavigationView> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_navigation_view_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_navigation_view_intrinsic(view.as_inner(), state, env, theme)
     }
 
     fn dimensions(
         state: &mut HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         if let (Some(width), Some(height)) = (proposal.width, proposal.height) {
             return ViewDimensions::new(LayoutSize::new(width, height));
         }
-        ViewDimensions::new(Self::intrinsic(state, view, env))
+        ViewDimensions::new(Self::intrinsic(state, view, env, theme))
     }
 }
 
@@ -180,8 +189,9 @@ impl HydroNativeView for Native<NavigationView> {
 /// label resolved from the bar title view (extracted at build time on the node
 /// path, where the title view is owned by a [`RetainedSubview`]).
 pub(crate) fn navigation_view_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     hidden: &Computed<bool>,
     display_mode: NavigationTitleDisplayMode,
     default_title_label: Option<String>,
@@ -192,14 +202,50 @@ pub(crate) fn navigation_view_accessibility(
         if renderer.read_signal(hidden) {
             return;
         }
-        let metrics = widget_theme(env).navigation_metrics();
-        let bar_height = navigation_base_bar_height_for_display_mode(display_mode, env);
-        let bar_rect = vello::kurbo::Rect::new(
-            ctx.bounds.x0,
-            ctx.bounds.y0,
-            ctx.bounds.x1,
-            (ctx.bounds.y0 + bar_height).min(ctx.bounds.y1),
-        );
+        // Bar/title geometry exists only in the rendered runtime; the semantic
+        // emission walk has no bounds and no theme to take metrics from.
+        let (bar_bounds, title_bounds) =
+            ctx.as_ref()
+                .zip(theme)
+                .map_or((None, None), |(ctx, theme)| {
+                    let metrics = theme.navigation_metrics();
+                    let bar_height =
+                        navigation_base_bar_height_for_display_mode(display_mode, theme);
+                    let bar_rect = vello::kurbo::Rect::new(
+                        ctx.bounds.x0,
+                        ctx.bounds.y0,
+                        ctx.bounds.x1,
+                        (ctx.bounds.y0 + bar_height).min(ctx.bounds.y1),
+                    );
+                    let title_height = if matches!(display_mode, NavigationTitleDisplayMode::Large)
+                    {
+                        metrics.large_title_height
+                    } else {
+                        metrics.inline_title_height
+                    };
+                    let title_y0 = if matches!(display_mode, NavigationTitleDisplayMode::Large) {
+                        bar_rect.y1 - metrics.large_title_bottom_inset - title_height
+                    } else {
+                        bar_rect.y0 + (bar_height - title_height) * 0.5
+                    };
+                    let title_leading = navigation_leading_reserve(env);
+                    let title_rect = vello::kurbo::Rect::new(
+                        if title_leading > 0.0 {
+                            bar_rect.x0 + metrics.horizontal_inset + title_leading
+                        } else {
+                            bar_rect.x0 + metrics.title_leading_inset
+                        },
+                        title_y0,
+                        bar_rect.x1 - metrics.title_trailing_inset,
+                        title_y0 + title_height,
+                    );
+                    let title_bounds = (title_rect.width() > 0.0 && title_rect.height() > 0.0)
+                        .then(|| transformed_rect(ctx.hit_transform, title_rect));
+                    (
+                        Some(transformed_rect(ctx.hit_transform, bar_rect)),
+                        title_bounds,
+                    )
+                });
         let mut bar_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Navigation),
         );
@@ -207,56 +253,37 @@ pub(crate) fn navigation_view_accessibility(
         if let Some(label) = bar_label {
             bar_node.set_label(label);
         }
-        let title_height = if matches!(display_mode, NavigationTitleDisplayMode::Large) {
-            metrics.large_title_height
-        } else {
-            metrics.inline_title_height
-        };
-        let title_y0 = if matches!(display_mode, NavigationTitleDisplayMode::Large) {
-            bar_rect.y1 - metrics.large_title_bottom_inset - title_height
-        } else {
-            bar_rect.y0 + (bar_height - title_height) * 0.5
-        };
-        let title_leading = navigation_leading_reserve(env);
-        let title_rect = vello::kurbo::Rect::new(
-            if title_leading > 0.0 {
-                bar_rect.x0 + metrics.horizontal_inset + title_leading
-            } else {
-                bar_rect.x0 + metrics.title_leading_inset
-            },
-            title_y0,
-            bar_rect.x1 - metrics.title_trailing_inset,
-            title_y0 + title_height,
+        let mut title_node = AccessibilityNode::new(
+            renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Header),
         );
-        if title_rect.width() > 0.0 && title_rect.height() > 0.0 {
-            let mut title_node = AccessibilityNode::new(
-                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Header),
-            );
-            let title_label = renderer.resolve_accessibility_label(env, default_title_label);
-            if let Some(label) = title_label {
-                title_node.set_label(label);
+        let title_label = renderer.resolve_accessibility_label(env, default_title_label);
+        if let Some(label) = title_label {
+            title_node.set_label(label);
+        }
+        let title_node_id = match title_bounds {
+            Some(title_bounds) => {
+                renderer.register_accessibility_child_node(title_node, title_bounds, env, None)
             }
-            if let Some(title_node_id) = renderer.register_accessibility_child_node(
-                title_node,
-                transformed_rect(ctx.hit_transform, title_rect),
-                env,
-                None,
-            ) {
-                bar_node.push_child(title_node_id);
+            None => renderer.register_accessibility_child_node_semantic(title_node, env, None),
+        };
+        if let Some(title_node_id) = title_node_id {
+            bar_node.push_child(title_node_id);
+        }
+        match bar_bounds {
+            Some(bar_bounds) => {
+                let _ = renderer.register_accessibility_node(bar_node, bar_bounds, env, None);
+            }
+            None => {
+                let _ = renderer.register_accessibility_node_semantic(bar_node, env, None);
             }
         }
-        let _ = renderer.register_accessibility_node(
-            bar_node,
-            transformed_rect(ctx.hit_transform, bar_rect),
-            env,
-            None,
-        );
     }
     #[cfg(not(feature = "accessibility"))]
     {
         let _ = (
             renderer,
             ctx,
+            theme,
             hidden,
             display_mode,
             default_title_label,
@@ -274,16 +301,17 @@ pub(crate) fn measure_navigation_view_node(
     proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     if let (Some(width), Some(height)) = (proposal.width, proposal.height) {
         return ViewDimensions::new(LayoutSize::new(width, height));
     }
     let bar_hidden = state.hidden.get();
-    let metrics = widget_theme(env).navigation_metrics();
+    let metrics = theme.navigation_metrics();
     let bar_height = if bar_hidden {
         0.0
     } else {
-        let base = navigation_base_bar_height_for_display_mode(state.display_mode, env);
+        let base = navigation_base_bar_height_for_display_mode(state.display_mode, theme);
         let search_extra = if state.search.is_some() {
             metrics.search_height + metrics.search_vertical_inset * 2.0
         } else {
@@ -292,9 +320,9 @@ pub(crate) fn measure_navigation_view_node(
         base + search_extra
     };
     let title_size = if bar_height > 0.0 && state.principal.is_empty() {
-        let title = state.title.measure_built(hydro, env);
+        let title = state.title.measure_built(hydro, env, theme);
         let subtitle = if state.subtitle_present {
-            state.subtitle.measure_built(hydro, env)
+            state.subtitle.measure_built(hydro, env, theme)
         } else {
             LayoutSize::zero()
         };
@@ -303,20 +331,22 @@ pub(crate) fn measure_navigation_view_node(
             title.height + subtitle.height,
         )
     } else if bar_height > 0.0 {
-        measure_retained_toolbar_group(&state.principal, hydro, env)
+        measure_retained_toolbar_group(&state.principal, hydro, env, theme)
     } else {
         LayoutSize::zero()
     };
-    let leading_size = measure_retained_toolbar_group(&state.leading, hydro, env);
-    let trailing_size = measure_retained_toolbar_group(&state.trailing, hydro, env);
-    let bottom_size = measure_retained_toolbar_group(&state.bottom, hydro, env);
+    let leading_size = measure_retained_toolbar_group(&state.leading, hydro, env, theme);
+    let trailing_size = measure_retained_toolbar_group(&state.trailing, hydro, env, theme);
+    let bottom_size = measure_retained_toolbar_group(&state.bottom, hydro, env, theme);
     // Measure the retained field itself: a throwaway TextField would allocate on
     // every measure and shape its text in a cache the rendered field never sees.
     let search_size = state
         .search_field
         .as_ref()
-        .map_or_else(LayoutSize::zero, |field| field.measure_built(hydro, env));
-    let content_size = state.content.measure_built(hydro, env);
+        .map_or_else(LayoutSize::zero, |field| {
+            field.measure_built(hydro, env, theme)
+        });
+    let content_size = state.content.measure_built(hydro, env, theme);
     let width = f64::from(content_size.width)
         .max(
             f64::from(leading_size.width)
@@ -340,12 +370,13 @@ fn measure_retained_toolbar_group(
     group: &[RetainedSubview],
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let metrics = widget_theme(env).navigation_metrics();
+    let metrics = theme.navigation_metrics();
     let mut width = 0.0_f64;
     let mut height = 0.0_f64;
     for (index, item) in group.iter().enumerate() {
-        let size = item.measure_built(hydro, env);
+        let size = item.measure_built(hydro, env, theme);
         if index > 0 {
             width += metrics.item_spacing;
         }
@@ -375,9 +406,11 @@ pub(crate) fn render_navigation_view_node(
                 state.title.default_a11y_label(),
             )
         };
+        let theme = ctx.theme();
         navigation_view_accessibility(
             ctx.renderer_mut(),
-            render_ctx,
+            Some(render_ctx),
+            Some(&theme),
             &hidden_signal,
             display_mode,
             default_title_label,
@@ -402,11 +435,12 @@ pub(crate) fn render_navigation_view_parts(
             !state.bottom.is_empty(),
         )
     };
+    let theme = ctx.theme();
+    let metrics = theme.navigation_metrics();
     let top_bar_height = if ctx.renderer_mut().read_signal(&hidden_signal) {
         0.0
     } else {
-        let metrics = widget_theme(env).navigation_metrics();
-        let base = navigation_base_bar_height_for_display_mode(display_mode, env);
+        let base = navigation_base_bar_height_for_display_mode(display_mode, &theme);
         let search_extra = if search.is_some() {
             metrics.search_height + metrics.search_vertical_inset * 2.0
         } else {
@@ -414,7 +448,6 @@ pub(crate) fn render_navigation_view_parts(
         };
         base + search_extra
     };
-    let metrics = widget_theme(env).navigation_metrics();
     let bottom_bar_height = if has_bottom {
         metrics.inline_bar_height.min(ctx.bounds.height())
     } else {
@@ -422,7 +455,7 @@ pub(crate) fn render_navigation_view_parts(
     };
 
     if top_bar_height > 0.0 {
-        let base_bar_height = navigation_base_bar_height_for_display_mode(display_mode, env);
+        let base_bar_height = navigation_base_bar_height_for_display_mode(display_mode, &theme);
         let bar_rect = vello::kurbo::Rect::new(
             ctx.bounds.x0,
             ctx.bounds.y0,
@@ -431,7 +464,7 @@ pub(crate) fn render_navigation_view_parts(
         );
         let bar_color = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&color_signal));
         {
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_navigation_bar(&mut draw, bar_rect, &Brush::from(bar_color));
             let separator = vello::kurbo::Rect::new(
@@ -445,10 +478,18 @@ pub(crate) fn render_navigation_view_parts(
 
         let (leading_size, trailing_size) = {
             let mut state = state.borrow_mut();
-            let leading =
-                measure_toolbar_group_intrinsic(&mut state.leading, ctx.renderer_mut(), env);
-            let trailing =
-                measure_toolbar_group_intrinsic(&mut state.trailing, ctx.renderer_mut(), env);
+            let leading = measure_toolbar_group_intrinsic(
+                &mut state.leading,
+                ctx.renderer_mut(),
+                env,
+                &theme,
+            );
+            let trailing = measure_toolbar_group_intrinsic(
+                &mut state.trailing,
+                ctx.renderer_mut(),
+                env,
+                &theme,
+            );
             (leading, trailing)
         };
         let leading_width = f64::from(leading_size.width);
@@ -548,7 +589,13 @@ pub(crate) fn render_navigation_view_parts(
             if search_rect.width() > 0.0 && search_rect.height() > 0.0 {
                 let render_ctx = ctx.render_context();
                 if let Some(field) = state.borrow_mut().search_field.as_mut() {
-                    field.flush_in_rect(ctx.renderer_mut(), render_ctx, env, search_rect);
+                    field.flush_in_rect(
+                        ctx.renderer_mut(),
+                        render_ctx,
+                        env,
+                        ProposalSize::UNSPECIFIED,
+                        search_rect,
+                    );
                 }
             }
         }
@@ -562,10 +609,13 @@ pub(crate) fn render_navigation_view_parts(
     );
     if content_rect.width() > 0.0 && content_rect.height() > 0.0 {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .content
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, content_rect);
+        state.borrow_mut().content.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(content_rect),
+            content_rect,
+        );
     }
 
     if bottom_bar_height > 0.0 {
@@ -577,7 +627,7 @@ pub(crate) fn render_navigation_view_parts(
         );
         let bar_color = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&color_signal));
         {
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_navigation_bar(&mut draw, bottom_rect, &Brush::from(bar_color));
         }
@@ -602,8 +652,9 @@ fn measure_toolbar_group_intrinsic(
     group: &mut [RetainedSubview],
     renderer: &mut HydrolysisRenderer,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let metrics = widget_theme(env).navigation_metrics();
+    let metrics = theme.navigation_metrics();
     let mut width = 0.0_f64;
     let mut height = 0.0_f64;
     for (index, item) in group.iter_mut().enumerate() {
@@ -627,7 +678,7 @@ fn flush_toolbar_group(
     if group.is_empty() || bounds.width() <= 0.0 || bounds.height() <= 0.0 {
         return;
     }
-    let metrics = widget_theme(env).navigation_metrics();
+    let metrics = ctx.theme().navigation_metrics();
     let sizes: Vec<LayoutSize> = group
         .iter_mut()
         .map(|item| item.measure_intrinsic(ctx.renderer_mut(), env))
@@ -647,7 +698,13 @@ fn flush_toolbar_group(
         let rect = vello::kurbo::Rect::new(x, y, x + width, y + height);
         if rect.width() > 0.0 && rect.height() > 0.0 {
             let render_ctx = ctx.render_context();
-            item.flush_in_rect(ctx.renderer_mut(), render_ctx, env, rect);
+            item.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                ProposalSize::UNSPECIFIED,
+                rect,
+            );
         }
         x += width + metrics.item_spacing;
     }
@@ -672,9 +729,13 @@ fn flush_title_and_subtitle(
     let title_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
     if title_rect.height() > 0.0 {
         let render_ctx = ctx.render_context();
-        state
-            .title
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, title_rect);
+        state.title.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            title_rect,
+        );
     }
     y += title_height;
     if state.subtitle_present {
@@ -682,9 +743,13 @@ fn flush_title_and_subtitle(
         let subtitle_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
         if subtitle_rect.height() > 0.0 {
             let render_ctx = ctx.render_context();
-            state
-                .subtitle
-                .flush_in_rect(ctx.renderer_mut(), render_ctx, env, subtitle_rect);
+            state.subtitle.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                ProposalSize::UNSPECIFIED,
+                subtitle_rect,
+            );
         }
     }
 }
@@ -732,7 +797,11 @@ impl NavigationSplitRenderState {
         }
     }
 
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.primary.ensure_built(renderer, env);
         self.placeholder.ensure_built(renderer, env);
     }
@@ -741,7 +810,7 @@ impl NavigationSplitRenderState {
         &mut self,
         id: Id,
         compact: bool,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut crate::renderer::SemanticCore,
         env: &Environment,
     ) {
         let needs_rebuild = self
@@ -765,7 +834,7 @@ impl NavigationSplitRenderState {
         &mut self,
         id: Id,
         compact: bool,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut crate::renderer::SemanticCore,
         env: &Environment,
     ) {
         let needs_rebuild = self
@@ -787,8 +856,13 @@ impl NavigationSplitRenderState {
 }
 
 impl HydroNativeView for Native<NavigationSplitLayout> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_navigation_split_layout(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_navigation_split_layout(view.as_inner(), state, env, theme)
     }
 }
 
@@ -796,13 +870,14 @@ fn measure_navigation_split_layout(
     split: &NavigationSplitLayout,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let primary_view = normalize_layout_view(split.primary_builder().build(), env);
-    let primary = measure_transient_view_intrinsic(&primary_view, state, env);
+    let primary = measure_transient_view_intrinsic(&primary_view, state, env, theme);
     let primary_selection = split.primary_selection().get();
     let content = split.content_builder().and_then(|builder| {
         primary_selection.map(|selected| {
-            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env)
+            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env, theme)
         })
     });
     let detail_selection = split
@@ -811,12 +886,13 @@ fn measure_navigation_split_layout(
     let detail = match detail_selection {
         None => {
             let placeholder = normalize_layout_view(split.placeholder_builder().build(), env);
-            measure_transient_view_intrinsic(&placeholder, state, env)
+            measure_transient_view_intrinsic(&placeholder, state, env, theme)
         }
         Some(selected) => measure_owned_navigation_view_intrinsic(
             split.detail_builder().build(selected),
             state,
             env,
+            theme,
         ),
     };
     let column_width =
@@ -836,12 +912,13 @@ pub(crate) fn measure_navigation_split_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let primary = split.primary.measure_built(state, env);
+    let primary = split.primary.measure_built(state, env, theme);
     let primary_selection = split.primary_selection.get();
     let content = split.content_builder.as_ref().and_then(|builder| {
         primary_selection.map(|selected| {
-            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env)
+            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env, theme)
         })
     });
     let detail_selection = split
@@ -849,11 +926,12 @@ pub(crate) fn measure_navigation_split_node(
         .as_ref()
         .map_or(primary_selection, Signal::get);
     let detail = match detail_selection {
-        None => split.placeholder.measure_built(state, env),
+        None => split.placeholder.measure_built(state, env, theme),
         Some(selected) => measure_owned_navigation_view_intrinsic(
             split.detail_builder.build(selected),
             state,
             env,
+            theme,
         ),
     };
     let column_width = resolved_split_column_width(split.column_width, split.style);
@@ -968,10 +1046,13 @@ pub(crate) fn render_navigation_split_parts(
 
     if let Some(primary_rect) = primary_rect {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .primary
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, primary_rect);
+        state.borrow_mut().primary.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(primary_rect),
+            primary_rect,
+        );
     }
     if let Some(content_rect) = content_rect {
         render_split_content(ctx, state, env, primary, false, content_rect);
@@ -1008,7 +1089,9 @@ fn render_compact_split(
     let bounds = ctx.bounds;
     let mut back_selection = None;
     let mut compact_env = env.clone();
-    compact_env.insert(NavigationLeadingReserve(back_button_title_reserve(env)));
+    compact_env.insert(NavigationLeadingReserve(back_button_title_reserve(
+        &ctx.theme(),
+    )));
     if selection.three_column {
         if selection.secondary.is_some() {
             render_split_detail(ctx, state, &compact_env, selection.secondary, true, bounds);
@@ -1018,26 +1101,32 @@ fn render_compact_split(
             back_selection = Some(selection.primary_binding);
         } else {
             let render_ctx = ctx.render_context();
-            state
-                .borrow_mut()
-                .primary
-                .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            state.borrow_mut().primary.flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
         }
     } else if selection.primary.is_some() {
         render_split_detail(ctx, state, &compact_env, selection.primary, true, bounds);
         back_selection = Some(selection.primary_binding);
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .primary
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().primary.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 
     if let Some(selection) = back_selection {
-        let back_rect = navigation_back_button_rect(bounds, widget_theme(env).navigation_metrics());
+        let back_rect = navigation_back_button_rect(bounds, ctx.theme().navigation_metrics());
         {
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_navigation_back_button(&mut draw, back_rect);
         }
@@ -1069,13 +1158,22 @@ fn render_split_content(
             .as_mut()
             .expect("selected split content must be retained")
             .2
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            .flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .placeholder
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().placeholder.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 }
 
@@ -1096,13 +1194,22 @@ fn render_split_detail(
             .as_mut()
             .expect("selected split detail must be retained")
             .2
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+            .flush_in_rect(
+                ctx.renderer_mut(),
+                render_ctx,
+                env,
+                bounded_proposal(bounds),
+                bounds,
+            );
     } else {
         let render_ctx = ctx.render_context();
-        state
-            .borrow_mut()
-            .placeholder
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.borrow_mut().placeholder.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(bounds),
+            bounds,
+        );
     }
 }
 
@@ -1223,7 +1330,7 @@ fn render_navigation_page_scene(
             vello::kurbo::Affine::IDENTITY,
         );
         {
-            let theme = widget_theme(env);
+            let theme = renderer.theme();
             let mut draw = renderer.draw_context(context);
             theme.draw_navigation_back_button(
                 &mut draw,
@@ -1237,16 +1344,25 @@ fn render_navigation_page_scene(
 }
 
 impl HydroNativeView for Native<NavigationStack<(), ()>> {
-    fn intrinsic(_state: &mut HydroState, _view: &Self, _env: &Environment) -> LayoutSize {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
         LayoutSize::zero()
     }
 }
 
 /// Binds the navigation stack by retained semantic identity and emits the
-/// back-button accessibility node when the stack is non-empty.
+/// back-button accessibility node when the stack is non-empty. The rendered
+/// `Widget`-node path passes its [`RenderContext`]; the semantic emission walk
+/// passes `None` — the back button's `Click` pops the stack directly, so it
+/// needs no bounds.
 pub(crate) fn navigation_stack_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     state: &Rc<RefCell<NavigationStackRenderState>>,
     env: &Environment,
 ) {
@@ -1264,22 +1380,56 @@ pub(crate) fn navigation_stack_accessibility(
         back_node.set_label(crate::localization::text(env, "back"));
         back_node.add_action(AccessibilityAction::Focus);
         back_node.add_action(AccessibilityAction::Click);
-        let back_bounds = transformed_rect(
-            ctx.hit_transform,
-            navigation_back_button_rect(ctx.bounds, widget_theme(env).navigation_metrics()),
-        );
-        let _ = renderer.register_accessibility_node(
-            back_node,
-            back_bounds,
-            env,
-            Some(AccessibilityActionTarget::PointerPrimaryClick {
-                point: accessibility_activation_point(back_bounds),
-            }),
-        );
+        // Direct semantic activation: pop through the slot's controller, the
+        // same path the pointer target takes, so `Click` works with no bounds.
+        let action_target = renderer
+            .navigation
+            .slots
+            .get(&slot_key)
+            .map(|slot| slot.controller.clone())
+            .map(|controller| {
+                let back_slot_key = slot_key;
+                AccessibilityActionTarget::Activate {
+                    action: Rc::new(RefCell::new(
+                        move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
+                            // A denied pop is a handled activation whose
+                            // outcome is "attempt reported, destination
+                            // stays" — `attempt_pop` already fired
+                            // `pop_attempted`. `request_pop` runs only when
+                            // the destination allows it.
+                            if renderer.attempt_navigation_pop(&back_slot_key, env) {
+                                controller.request_pop(1);
+                            }
+                            true
+                        },
+                    )),
+                }
+            });
+        match ctx {
+            Some(ctx) => {
+                let metrics = theme
+                    .expect("rendered navigation stack accessibility passes the theme")
+                    .navigation_metrics();
+                let back_bounds = transformed_rect(
+                    ctx.hit_transform,
+                    navigation_back_button_rect(ctx.bounds, metrics),
+                );
+                let _ = renderer.register_accessibility_node(
+                    back_node,
+                    back_bounds,
+                    env,
+                    action_target,
+                );
+            }
+            None => {
+                let _ =
+                    renderer.register_accessibility_node_semantic(back_node, env, action_target);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (ctx, depth, env);
+        let _ = (renderer, ctx, theme, depth, env);
     }
 }
 
@@ -1289,6 +1439,7 @@ pub(crate) fn measure_navigation_stack_node(
     _proposal: ProposalSize,
     _hydro: &mut HydroState,
     _env: &Environment,
+    _theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     ViewDimensions::new(LayoutSize::zero())
 }
@@ -1313,8 +1464,15 @@ pub(crate) fn render_navigation_stack_node(
         ctx.renderer_mut().push_accessibility_suppression();
     }
     {
+        let theme = ctx.theme();
         let render_ctx = ctx.render_context();
-        navigation_stack_accessibility(ctx.renderer_mut(), render_ctx, state, env);
+        navigation_stack_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            Some(&theme),
+            state,
+            env,
+        );
     }
     #[cfg(feature = "accessibility")]
     if hidden {
@@ -1329,7 +1487,7 @@ pub(crate) fn render_navigation_stack_parts(
     env: &Environment,
 ) {
     let transition_style = state.borrow().transition_style.clone();
-    let transition_motion = widget_theme(env).navigation_motion();
+    let transition_motion = ctx.theme().navigation_motion();
     let slot_key = crate::renderer::NavigationKey::for_rc(state);
     let entries = ctx.renderer_mut().bind_navigation_entries(&slot_key);
 
@@ -1359,7 +1517,8 @@ pub(crate) fn render_navigation_stack_parts(
         navigation_entry_identity(&entries, depth - 1)
     };
     if depth > 0 {
-        local_env.insert(NavigationLeadingReserve(back_button_title_reserve(env)));
+        let theme = ctx.theme();
+        local_env.insert(NavigationLeadingReserve(back_button_title_reserve(&theme)));
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -1376,76 +1535,9 @@ pub(crate) fn render_navigation_stack_parts(
         &bounds,
     );
 
-    let events = {
-        let slot = ctx
-            .renderer_mut()
-            .navigation
-            .slots
-            .get_mut(&slot_key)
-            .expect("Hydrolysis navigation slot missing");
-        slot.events.borrow_mut().drain(..).collect::<Vec<_>>()
-    };
-    let mut navigation_change = None;
-    if !events.is_empty() {
-        for pair in events.windows(2) {
-            assert_eq!(
-                pair[0].current_identity, pair[1].previous_identity,
-                "Hydrolysis navigation events must form one atomic transaction chain"
-            );
-        }
-        let final_identity = events
-            .last()
-            .expect("non-empty navigation event batch must have a last event")
-            .current_identity;
-        assert_eq!(
-            final_identity, active_identity,
-            "Hydrolysis navigation event result must match retained stack entries"
-        );
-        let final_transaction_id = events
-            .last()
-            .expect("non-empty navigation event batch must have a last event")
-            .transaction_id;
-        let previous_identity = {
-            let slot = ctx
-                .renderer_mut()
-                .navigation
-                .slots
-                .get_mut(&slot_key)
-                .expect("Hydrolysis navigation slot missing");
-            assert_eq!(
-                events
-                    .first()
-                    .expect("non-empty navigation event batch must have a first event")
-                    .previous_identity,
-                slot.active_identity,
-                "Hydrolysis navigation event must start from the rendered destination"
-            );
-            if let Some(previous_transaction_id) = slot.pending_transaction_id.take() {
-                let _ = slot
-                    .controller
-                    .transition_cancelled(previous_transaction_id);
-            }
-            let previous_identity = slot.active_identity;
-            let previous_depth = slot.last_depth;
-            for event in events {
-                slot.pending_removed.extend(event.removed);
-            }
-            slot.transition = None;
-            slot.interactive_pop = None;
-            slot.pending_transaction_id = Some(final_transaction_id);
-            slot.pending_appearance = previous_identity != final_identity;
-            slot.active_identity = final_identity;
-            navigation_change = Some((previous_identity, previous_depth));
-            previous_identity
-        };
-        if previous_identity != active_identity {
-            ctx.renderer_mut().navigation_destination_disappeared(
-                &slot_key,
-                previous_identity,
-                &local_env,
-            );
-        }
-    }
+    let navigation_change =
+        ctx.renderer_mut()
+            .apply_navigation_events(&slot_key, active_identity, &local_env);
 
     ctx.renderer_mut()
         .activate_navigation_root_if_needed(&slot_key, &local_env);
@@ -1685,7 +1777,7 @@ pub(crate) fn render_navigation_stack_parts(
         scene
     });
 
-    let metrics = widget_theme(env).navigation_metrics();
+    let metrics = ctx.theme().navigation_metrics();
     let edge_rect = vello::kurbo::Rect::new(
         ctx.bounds.x0,
         ctx.bounds.y0,
@@ -1773,6 +1865,161 @@ pub(crate) fn render_navigation_stack_parts(
     );
 }
 
+/// Emits a retained navigation view's accessibility nodes for the semantic
+/// walk: the bar and title nodes `navigation_view_accessibility` registers,
+/// then the sub-views that flush unsuppressed in the rendered path — toolbar
+/// items, the search field, and the screen content. The title, subtitle, and
+/// principal sub-views flush under suppression (their semantics live on the
+/// bar's own nodes), so they emit nothing.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_navigation_view_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<NavigationViewRenderState>>,
+    env: &Environment,
+) {
+    if env
+        .get::<waterui::accessibility::AccessibilityHidden>()
+        .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden)
+    {
+        return;
+    }
+    let mut state = state.borrow_mut();
+    let (hidden_signal, display_mode, default_title_label) = {
+        (
+            state.hidden.clone(),
+            state.display_mode,
+            state.title.default_a11y_label(),
+        )
+    };
+    navigation_view_accessibility(
+        renderer,
+        None,
+        None,
+        &hidden_signal,
+        display_mode,
+        default_title_label,
+        env,
+    );
+    for item in &mut state.leading {
+        item.emit_accessibility(renderer, env);
+    }
+    for item in &mut state.trailing {
+        item.emit_accessibility(renderer, env);
+    }
+    for item in &mut state.bottom {
+        item.emit_accessibility(renderer, env);
+    }
+    if let Some(field) = state.search_field.as_mut() {
+        field.emit_accessibility(renderer, env);
+    }
+    state.content.emit_accessibility(renderer, env);
+}
+
+/// Emits a retained navigation split's accessibility nodes for the semantic
+/// walk: the sidebar, the selected content (resolved through `ensure_content`
+/// exactly as the rendered path), and the selected detail or placeholder.
+/// Column visibility is presentation — every retained pane emits.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_navigation_split_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<NavigationSplitRenderState>>,
+    env: &Environment,
+) {
+    let mut state = state.borrow_mut();
+    state.primary.emit_accessibility(renderer, env);
+    let primary_selection = renderer.read_signal(&state.primary_selection);
+    // The middle column exists only on a three-column split; a two-column
+    // split's primary selection drives the detail column, exactly as the
+    // rendered path routes it.
+    if state.is_three_column()
+        && let Some(selected) = primary_selection
+    {
+        state.ensure_content(selected, false, renderer, env);
+        state
+            .content
+            .as_mut()
+            .expect("selected split content must be retained")
+            .2
+            .emit_accessibility(renderer, env);
+    }
+    let detail_selection = if state.is_three_column() {
+        state
+            .secondary_selection
+            .as_ref()
+            .and_then(|binding| renderer.read_signal(binding))
+    } else {
+        primary_selection
+    };
+    if let Some(selected) = detail_selection {
+        state.ensure_detail(selected, false, renderer, env);
+        state
+            .detail
+            .as_mut()
+            .expect("selected split detail must be retained")
+            .2
+            .emit_accessibility(renderer, env);
+    } else {
+        state.placeholder.emit_accessibility(renderer, env);
+    }
+}
+
+/// Emits a retained navigation stack's accessibility nodes for the semantic
+/// walk: the back button `navigation_stack_accessibility` registers (which
+/// also binds the slot's entries), then the active page's subtree — the root
+/// when the stack is empty, the topmost pushed destination otherwise.
+/// Transition scenes are presentation and emit nothing.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_navigation_stack_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<NavigationStackRenderState>>,
+    env: &Environment,
+) {
+    navigation_stack_accessibility(renderer, None, None, state, env);
+    let slot_key = crate::renderer::NavigationKey::for_rc(state);
+    let entries = renderer.bind_navigation_entries(&slot_key);
+    let mut local_env = env.clone();
+    let controller = renderer
+        .navigation
+        .slots
+        .get(&slot_key)
+        .expect("hydrolysis navigation slot missing")
+        .controller
+        .clone();
+    if let Some(retained_env) = controller.retained_environment() {
+        local_env = retained_env;
+    }
+    local_env.insert(controller);
+    if let Some(root_state) = state.borrow_mut().resolve_root(&local_env) {
+        renderer.install_navigation_root_state(&slot_key, root_state);
+    }
+    let depth = entries.borrow().len();
+    let active_identity = if depth == 0 {
+        ROOT_NAVIGATION_IDENTITY
+    } else {
+        navigation_entry_identity(&entries, depth - 1)
+    };
+    renderer.apply_navigation_events(&slot_key, active_identity, &local_env);
+    renderer.activate_navigation_root_if_needed(&slot_key, &local_env);
+    // A semantic emit completes the transaction in place — there is no
+    // scene transition to await, so `popped`/`appeared` and the controller
+    // acknowledgement fire with the emit that shows the result.
+    renderer.complete_navigation_transaction(&slot_key, &local_env);
+    if depth == 0 {
+        state
+            .borrow_mut()
+            .root_mut()
+            .emit_accessibility(renderer, &local_env);
+        return;
+    }
+    let mut entries = entries.borrow_mut();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.identity == active_identity)
+        .unwrap_or_else(|| {
+            panic!("Hydrolysis navigation entry identity {active_identity} is not retained")
+        });
+    entry.content.emit_accessibility(renderer, &local_env);
+}
 #[cfg(test)]
 mod tests {
     use super::resolved_split_column_width;

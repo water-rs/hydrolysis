@@ -37,6 +37,15 @@ pub(crate) struct WidgetRenderContext<'a> {
     pub bounds: vello::kurbo::Rect,
 }
 
+/// An explicit offer from a native widget-owned content region.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn bounded_proposal(bounds: vello::kurbo::Rect) -> waterui_core::layout::ProposalSize {
+    waterui_core::layout::ProposalSize::new(
+        Some(bounds.width() as f32),
+        Some(bounds.height() as f32),
+    )
+}
+
 impl RenderContext {
     pub(crate) fn with_transforms(
         bounds: vello::kurbo::Rect,
@@ -81,6 +90,12 @@ impl<'a> WidgetRenderContext<'a> {
 
     pub(crate) fn render_context(&self) -> RenderContext {
         RenderContext::with_transforms(self.bounds, self.transform, self.hit_transform)
+    }
+
+    /// The renderer-owned widget theme, cloned out as an `Rc` so callers can
+    /// hold it without borrowing the context across a `&mut` renderer call.
+    pub(crate) fn theme(&self) -> std::rc::Rc<dyn crate::engine::WidgetTheme> {
+        self.renderer.theme()
     }
 
     pub(crate) fn child(

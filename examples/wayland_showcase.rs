@@ -106,12 +106,7 @@ fn main_view() -> impl View {
     .foreground(Color::srgb_hex("#0F172A"))
 }
 
-fn app() -> App {
-    // Widgets read their fonts and colors out of the environment, and a bare
-    // `Environment` has neither, so every text view panics on the first frame.
-    // The generated projects install this too.
-    let mut env = Environment::new();
-    hydrolysis_m3::install_defaults(&mut env);
+fn app(env: Environment) -> App {
     let window = Window::new(
         "Hydrolysis Wayland Showcase",
         binding(waterui::window::WindowState::Normal),
@@ -142,5 +137,10 @@ fn main() {
         std::process::exit(0);
     });
 
-    run(app());
+    // `run` installs the style's tokens (fonts, colors) over the framework
+    // defaults before the first frame; the app-level environment carries none.
+    run(
+        app(Environment::new()),
+        hydrolysis_m3::Material3::defaults(),
+    );
 }

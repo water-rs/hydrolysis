@@ -1,4 +1,4 @@
-use nami::Computed;
+use nami::{Computed, Signal};
 use std::cell::RefCell;
 use std::rc::Rc;
 use waterui::component::badge::BadgeConfig;
@@ -13,7 +13,6 @@ use crate::renderer::{
     WidgetRenderContext, measure_transient_view_intrinsic, measure_view_dimensions_with_proposal,
     normalize_view_for_render,
 };
-use crate::widgets::widget_theme;
 #[cfg(feature = "accessibility")]
 use accesskit::{Node as AccessibilityNode, Role as AccessibilityNodeRole};
 
@@ -40,7 +39,7 @@ impl BadgeRenderState {
     /// HydroState`, no renderer, so it must be built before then).
     pub(crate) fn prebuild_content(
         &mut self,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut crate::renderer::SemanticCore,
         env: &Environment,
     ) {
         self.content.ensure_built(renderer, env);
@@ -51,31 +50,37 @@ fn badge_content_size(
     state: &mut HydroState,
     badge: &Native<BadgeConfig>,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let content = normalize_view_for_render(badge.as_inner().content.build(), env);
-    measure_transient_view_intrinsic(&content, state, env)
+    measure_transient_view_intrinsic(&content, state, env, theme)
 }
 
-fn badge_large_label(value: i32, env: &Environment) -> StyledStr {
-    let theme = widget_theme(env);
+fn badge_large_label(value: i32, theme: &Rc<dyn crate::engine::WidgetTheme>) -> StyledStr {
     StyledStr::plain(value.to_string())
         .font(theme.badge_label_font())
         .foreground(theme.badge_label_color())
 }
 
 impl HydroNativeView for Native<BadgeConfig> {
-    fn intrinsic(state: &mut HydroState, badge: &Self, env: &Environment) -> LayoutSize {
-        badge_content_size(state, badge, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        badge: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        badge_content_size(state, badge, env, theme)
     }
 
     fn dimensions(
         state: &mut HydroState,
         badge: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
         let content = normalize_view_for_render(badge.as_inner().content.build(), env);
-        measure_view_dimensions_with_proposal(&content, proposal, state, env)
+        measure_view_dimensions_with_proposal(&content, proposal, state, env, theme)
     }
 }
 
@@ -86,8 +91,9 @@ pub(crate) fn measure_badge_node(
     _proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    ViewDimensions::new(state.content.measure_built(hydro, env))
+    ViewDimensions::new(state.content.measure_built(hydro, env, theme))
 }
 
 /// Renders a retained badge leaf every flush: flushes the content sub-view (whose
@@ -110,50 +116,72 @@ pub(crate) fn render_badge_parts(
     {
         let render_ctx = ctx.render_context();
         let mut state = state.borrow_mut();
-        state
-            .content
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, bounds);
+        state.content.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            bounds,
+        );
     }
 
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.badge_metrics();
     let value = {
         let signal = state.borrow().value.clone();
         ctx.renderer_mut().read_signal(&signal)
     };
-    let content_width = ctx.bounds.width();
-    let x0 = if value == 0 {
-        ctx.bounds.x0 + content_width * 0.5 + metrics.small_offset_x
-    } else {
-        ctx.bounds.x0 + content_width * 0.5 + metrics.large_offset_x
-    };
-    let y0 = if value == 0 {
-        ctx.bounds.y0 + metrics.small_offset_y
-    } else {
-        ctx.bounds.y0 + metrics.large_offset_y
+
+    // Measure before placing: the badge's leading edge sits `offset_x` inside
+    // the content's trailing edge — mirrored to the leading edge in RTL — and
+    // its bottom edge overlaps the top edge by `offset_y`, matching
+    // `BadgedBox` in Compose.
+    let large = (value != 0).then(|| {
+        let label = badge_large_label(value, &theme);
+        let text_size = HydrolysisRenderer::measure_text_dimensions(
+            ctx.state_mut(),
+            label.clone(),
+            HorizontalAlignment::Center,
+            env,
+            None,
+            Some(1),
+        )
+        .size;
+        (label, text_size)
+    });
+
+    let (badge_width, badge_height, offset_x, offset_y) = match &large {
+        None => (
+            metrics.small_size,
+            metrics.small_size,
+            metrics.small_offset_x,
+            metrics.small_offset_y,
+        ),
+        Some((_, text_size)) => (
+            (f64::from(text_size.width) + metrics.large_horizontal_padding * 2.0)
+                .max(metrics.large_size),
+            metrics.large_size,
+            metrics.large_offset_x,
+            metrics.large_offset_y,
+        ),
     };
 
-    if value == 0 {
-        let rect =
-            vello::kurbo::Rect::new(x0, y0, x0 + metrics.small_size, y0 + metrics.small_size);
+    let x0 = if waterui_core::layout::layout_direction(env)
+        .get()
+        .is_right_to_left()
+    {
+        ctx.bounds.x0 + offset_x - badge_width
+    } else {
+        ctx.bounds.x1 - offset_x
+    };
+    let y0 = ctx.bounds.y0 + offset_y - badge_height;
+    let rect = vello::kurbo::Rect::new(x0, y0, x0 + badge_width, y0 + badge_height);
+
+    let Some((label, text_size)) = large else {
         let mut draw = ctx.draw_context();
         theme.draw_badge_small(&mut draw, rect);
         return;
-    }
-
-    let label = badge_large_label(value, env);
-    let text_size = HydrolysisRenderer::measure_text_dimensions(
-        ctx.state_mut(),
-        label.clone(),
-        HorizontalAlignment::Center,
-        env,
-        None,
-        Some(1),
-    )
-    .size;
-    let width = (f64::from(text_size.width) + metrics.large_horizontal_padding * 2.0)
-        .max(metrics.large_size);
-    let rect = vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + metrics.large_size);
+    };
     {
         let mut draw = ctx.draw_context();
         theme.draw_badge_large(&mut draw, rect);
@@ -192,4 +220,27 @@ pub(crate) fn render_badge_parts(
         HorizontalAlignment::Center,
         env,
     );
+}
+
+/// Emits a retained badge's accessibility nodes for the semantic walk: the
+/// wrapped content's subtree (unsuppressed in the rendered path), then the
+/// count indicator's `Label` node — a vector-drawn badge value is otherwise
+/// invisible to assistive technology.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_badge_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<BadgeRenderState>>,
+    env: &Environment,
+) {
+    let mut state = state.borrow_mut();
+    state.content.emit_accessibility(renderer, env);
+    let value = {
+        let signal = state.value.clone();
+        renderer.read_signal(&signal)
+    };
+    if value != 0 {
+        let mut node = AccessibilityNode::new(AccessibilityNodeRole::Label);
+        node.set_label(value.to_string());
+        let _ = renderer.register_accessibility_node_semantic(node, env, None);
+    }
 }

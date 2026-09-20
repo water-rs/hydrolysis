@@ -332,6 +332,8 @@ pub trait SurfaceProvider {
     fn adapter(&self) -> &wgpu::Adapter;
     fn device(&self) -> &wgpu::Device;
     fn queue(&self) -> &wgpu::Queue;
+    /// Reports this surface's device lost; taken when the device was opened.
+    fn device_loss(&self) -> &waterui_graphics::DeviceLoss;
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError>;
     fn present(&mut self, frame: SurfaceFrame);
     fn size(&self) -> (u32, u32);
@@ -418,6 +420,8 @@ struct OffscreenGpuContextInner {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Reports this device lost; taken when the device was opened.
+    device_loss: waterui_graphics::DeviceLoss,
 }
 
 impl Drop for OffscreenGpuContextInner {
@@ -492,12 +496,14 @@ impl OffscreenGpuContext {
             })
             .await
             .expect("hydrolysis offscreen surface: failed to request wgpu device");
+        let device_loss = waterui_graphics::DeviceLoss::observe(&device);
 
         Self {
             inner: std::sync::Arc::new(OffscreenGpuContextInner {
                 adapter,
                 device,
                 queue,
+                device_loss,
             }),
         }
     }
@@ -874,6 +880,10 @@ impl SurfaceProvider for OffscreenSurface {
         &self.gpu.inner.queue
     }
 
+    fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+        &self.gpu.inner.device_loss
+    }
+
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {
         let texture = self.last_presented.take().unwrap_or_else(|| {
             self.gpu
@@ -1146,6 +1156,8 @@ mod winit_impl {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
+        /// Reports this device lost; taken when the device was opened.
+        device_loss: waterui_graphics::DeviceLoss,
     }
 
     pub struct WinitSurface {
@@ -1248,12 +1260,14 @@ mod winit_impl {
                         })
                         .await
                         .expect("hydrolysis winit surface: failed to request device");
+                    let device_loss = waterui_graphics::DeviceLoss::observe(&device);
                     (
                         WinitGpuContext {
                             instance,
                             adapter,
                             device,
                             queue,
+                            device_loss,
                         },
                         surface,
                     )
@@ -1300,6 +1314,10 @@ mod winit_impl {
 
         fn queue(&self) -> &wgpu::Queue {
             &self.gpu.queue
+        }
+
+        fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+            &self.gpu.device_loss
         }
 
         fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {

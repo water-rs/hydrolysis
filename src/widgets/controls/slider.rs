@@ -3,8 +3,8 @@ use crate::renderer::AccessibilityActionTarget;
 #[cfg(feature = "accessibility")]
 use crate::renderer::slider_step_for_range;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, WidgetRenderContext,
-    measure_slider_intrinsic, slider_value_epsilon, transformed_rect,
+    HydroNativeView, HydroState, RenderContext, WidgetRenderContext, measure_slider_intrinsic,
+    slider_value_epsilon, transformed_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -24,7 +24,7 @@ use waterui_core::layout::{ProposalSize, ViewDimensions};
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
-use crate::widgets::util::{widget_disabled, widget_theme};
+use crate::widgets::util::widget_disabled;
 
 /// The retained render state of a slider. A `SliderConfig`'s value-end labels are
 /// move-only `AnyView`s (they cannot be re-dispatched twice), so the persistent
@@ -64,7 +64,11 @@ impl SliderRenderState {
 
     /// Eagerly build the label sub-views (the measure path has only
     /// `&mut HydroState`, no renderer, so labels must be built before then).
-    pub(crate) fn prebuild_labels(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild_labels(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
         self.min_value_label.ensure_built(renderer, env);
         self.max_value_label.ensure_built(renderer, env);
@@ -72,21 +76,26 @@ impl SliderRenderState {
 }
 
 impl HydroNativeView for Native<SliderConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_slider_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_slider_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
 /// Field-level accessibility emission for the [`SliderRenderState`]-based
 /// retained node path.
 fn slider_accessibility_parts(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     label: &Label,
     range: &RangeInclusive<f64>,
     value: &Binding<f64>,
-    disabled: &nami::Computed<bool>,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -109,7 +118,7 @@ fn slider_accessibility_parts(
         node.add_action(AccessibilityAction::Focus);
         // A disabled slider stays in the tree (focusable, announced as
         // disabled) but exposes no value actions and no action target.
-        let action_target = if renderer.read_signal(disabled) {
+        let action_target = if renderer.read_signal(&widget_disabled(env)) {
             node.set_disabled();
             None
         } else {
@@ -122,12 +131,15 @@ fn slider_accessibility_parts(
                 step: slider_step_for_range(range.clone()),
             })
         };
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+        if let Some(node_id) = renderer.register_accessibility_leaf(ctx, node, env, action_target) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, label, range, value, disabled, env);
+        let _ = (renderer, ctx, label, range, value, env, focus_keys);
     }
 }
 
@@ -140,12 +152,16 @@ pub(crate) fn measure_slider_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let metrics = theme.slider_metrics();
-    let label_size = render_state.label_view.measure_built(state, env);
-    let min_label_size = render_state.min_value_label.measure_built(state, env);
-    let max_label_size = render_state.max_value_label.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
+    let min_label_size = render_state
+        .min_value_label
+        .measure_built(state, env, theme);
+    let max_label_size = render_state
+        .max_value_label
+        .measure_built(state, env, theme);
 
     let control_row_height = metrics
         .handle_height
@@ -184,12 +200,12 @@ pub(crate) fn render_slider_node(
         let slider = state.borrow();
         slider_accessibility_parts(
             ctx.renderer_mut(),
-            render_ctx,
+            Some(render_ctx),
             &slider.label,
             &slider.range,
             &slider.value,
-            &widget_disabled(env),
             env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
         );
     }
     render_slider_parts(ctx, state, env);
@@ -201,7 +217,7 @@ pub(crate) fn render_slider_parts(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.slider_metrics();
     let mut state = state.borrow_mut();
     // Reading the disabled signal watches it, so a change schedules a frame
@@ -245,7 +261,13 @@ pub(crate) fn render_slider_parts(
         let label_view = &mut state.label_view;
         ctx.renderer_mut()
             .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(renderer, render_ctx, env, label_rect);
+                label_view.flush_in_rect(
+                    renderer,
+                    render_ctx,
+                    env,
+                    ProposalSize::UNSPECIFIED,
+                    label_rect,
+                );
             });
         if disabled {
             ctx.pop_layer();
@@ -275,9 +297,13 @@ pub(crate) fn render_slider_parts(
             ctx.push_layer_rect(theme.disabled_content_alpha(), min_label_rect);
         }
         let render_ctx = ctx.render_context();
-        state
-            .min_value_label
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, min_label_rect);
+        state.min_value_label.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            min_label_rect,
+        );
         if disabled {
             ctx.pop_layer();
         }
@@ -289,9 +315,13 @@ pub(crate) fn render_slider_parts(
             ctx.push_layer_rect(theme.disabled_content_alpha(), max_label_rect);
         }
         let render_ctx = ctx.render_context();
-        state
-            .max_value_label
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, max_label_rect);
+        state.max_value_label.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            max_label_rect,
+        );
         if disabled {
             ctx.pop_layer();
         }
@@ -413,4 +443,30 @@ pub(crate) fn render_slider_parts(
             true
         },
     );
+}
+
+/// Emits a retained slider's accessibility nodes for the semantic walk: the
+/// slider node `slider_accessibility_parts` registers, plus the minimum and
+/// maximum value labels — they flush unsuppressed in the rendered path, so
+/// they emit their own nodes here too. The main label flushes visual-only and
+/// emits nothing.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_slider_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<SliderRenderState>>,
+    env: &Environment,
+) {
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
+    let mut state = state.borrow_mut();
+    slider_accessibility_parts(
+        renderer,
+        None,
+        &state.label,
+        &state.range,
+        &state.value,
+        env,
+        &[interaction_key],
+    );
+    state.min_value_label.emit_accessibility(renderer, env);
+    state.max_value_label.emit_accessibility(renderer, env);
 }

@@ -53,7 +53,7 @@ impl<T: 'static, G> SubscribedSnapshot<T, G> {
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(super) fn watch_signal<S>(&mut self, signal: &S)
     where
         S: Signal + Clone + 'static,

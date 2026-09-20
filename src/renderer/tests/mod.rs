@@ -10,13 +10,19 @@ use executor_core::async_task::{self, AsyncTask, Runnable};
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
+mod layout_contract;
 mod perf_full_rebuild;
 mod perf_scroll;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod popup_windows;
 mod retained_scene;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod semantic_runtime;
+mod shadow;
 mod tree;
-use vello::kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii};
+use vello::kurbo::{Affine, BezPath, Point, Rect};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
@@ -38,7 +44,6 @@ use waterui_navigation::tab::{Tab, TabsLayout};
 
 use crate::engine::{Brush, DrawContext, WidgetTheme};
 use crate::platform::PlatformWindow as _;
-use crate::widgets::util::widget_theme;
 use waterui_backend_core::widget::{
     BadgeMetrics, ButtonMetrics, DividerMetrics, InputFieldMetrics, InteractionFocusBinding,
     InteractionMotion, ListMetrics, ModalInteraction, NavigationMetrics, NavigationMotion,
@@ -50,12 +55,46 @@ use waterui_core::EasingCurve;
 use waterui_core::handler::SharedAction;
 
 fn test_renderer() -> HydrolysisRenderer {
+    test_renderer_with_theme(MinimalTestTheme::default())
+}
+
+fn test_renderer_with_theme(theme: MinimalTestTheme) -> HydrolysisRenderer {
     let mut platform =
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
-    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device());
-    renderer.set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme));
+    renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
     renderer
+}
+
+/// Emits the semantic node a real widget emits for an interaction identity:
+/// it advertises `Focus` (and `Click` when it activates), its action target is
+/// registered, and the interaction key is linked so the pointer machinery —
+/// and keyboard traversal, which reads the semantic tree — resolves the node.
+#[cfg(feature = "accessibility")]
+fn emit_focusable_node(
+    renderer: &mut HydrolysisRenderer,
+    key: &InteractionKey,
+    bounds: Rect,
+    env: &Environment,
+    activation: Option<AccessibilityActivation>,
+) -> AccessibilityNodeId {
+    let mut node = AccessibilityNode::new(AccessibilityNodeRole::Button);
+    node.add_action(AccessibilityAction::Focus);
+    let action_target = activation.map(|action| {
+        node.add_action(AccessibilityAction::Click);
+        AccessibilityActionTarget::Activate { action }
+    });
+    let node_id = renderer
+        .register_accessibility_node(node, bounds, env, action_target)
+        .expect("a focusable node in bounds registers");
+    renderer.register_accessibility_focus_link(key, node_id);
+    node_id
 }
 
 /// Queues `spawn_local` futures for unit tests without running them.
@@ -120,9 +159,14 @@ fn themed_test_environment() -> Environment {
     let mut env = Environment::new();
     crate::testing::install_theme(&mut env);
     crate::localization::install(&mut env);
-    env.insert(Box::new(MinimalTestTheme) as Box<dyn WidgetTheme>);
+    env.insert(BadgeDrawLog(Rc::new(RefCell::new(Vec::new()))));
     env
 }
+
+/// Every badge indicator rect the test theme was asked to draw, in window
+/// coordinates. Tests read it back via `env.get::<BadgeDrawLog>()`.
+#[derive(Clone, Default)]
+pub(crate) struct BadgeDrawLog(pub Rc<RefCell<Vec<Rect>>>);
 
 #[derive(Clone, Copy)]
 struct RecursivelyErasedView;
@@ -364,6 +408,7 @@ fn text_input_target(
 #[test]
 fn measure_layout_dimensions_collects_alignment_keys_from_wrapper_layouts() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let child = normalize_layout_view(
         AnyView::new(().size(20.0, 10.0).horizontal_alignment_guide(
             HorizontalAlignment::Leading,
@@ -382,6 +427,7 @@ fn measure_layout_dimensions_collects_alignment_keys_from_wrapper_layouts() {
         ProposalSize::UNSPECIFIED,
         &mut state,
         &env,
+        &theme,
     );
 
     assert_eq!(
@@ -414,6 +460,7 @@ fn layout_normalization_still_rejects_recursive_component_bodies() {
 #[test]
 fn scale_metadata_is_layout_transparent() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let scale = Binding::f32(1.0);
     let view = normalize_layout_view(
         AnyView::new(
@@ -425,11 +472,11 @@ fn scale_metadata_is_layout_transparent() {
     );
 
     let mut state = HydroState::default();
-    let initial = measure_view_dimensions(&view, &mut state, &env).size;
+    let initial = measure_view_dimensions(&view, &mut state, &env, &theme).size;
 
     scale.set(2.0);
     let mut state = HydroState::default();
-    let scaled = measure_view_dimensions(&view, &mut state, &env).size;
+    let scaled = measure_view_dimensions(&view, &mut state, &env, &theme).size;
 
     assert_eq!(initial, LayoutSize::new(80.0, 120.0));
     assert_eq!(scaled, initial);
@@ -438,6 +485,7 @@ fn scale_metadata_is_layout_transparent() {
 #[test]
 fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let value = Binding::f64(0.5);
     let view = normalize_layout_view(
         AnyView::new(slider("Playback position", &value).hide_label()),
@@ -445,7 +493,7 @@ fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
     );
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let measured = subview.measure(ProposalSize::new(Some(0.0), None));
 
@@ -458,10 +506,11 @@ fn hydro_subview_preserves_stretch_control_minimum_under_zero_width_proposal() {
 #[test]
 fn hydro_subview_preserves_non_stretch_button_intrinsic_under_zero_width_proposal() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let view = normalize_layout_view(AnyView::new(button("Medium (0.7)").action(|| {})), &env);
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let intrinsic = subview.measure(ProposalSize::UNSPECIFIED);
     let constrained = subview.measure(ProposalSize::new(Some(0.0), None));
@@ -475,6 +524,7 @@ fn hydro_subview_preserves_non_stretch_button_intrinsic_under_zero_width_proposa
 #[test]
 fn state_wrapped_button_remains_non_stretch_for_layout() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let expanded = Binding::bool(false);
     let view = normalize_layout_view(
         AnyView::new(
@@ -488,7 +538,7 @@ fn state_wrapped_button_remains_non_stretch_for_layout() {
     );
     let mut state = HydroState::default();
     let state = RefCell::new(&mut state);
-    let subview = HydroSubview::from_view(&view, &state, &env);
+    let subview = HydroSubview::from_view(&view, &state, &env, &theme);
 
     let intrinsic = subview.measure(ProposalSize::UNSPECIFIED);
     let proposed = subview.measure(ProposalSize::new(Some(720.0), None));
@@ -786,12 +836,21 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     let env = test_environment();
     let bounds = vello::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
     let surface = platform.surface();
-    renderer.set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
     capture_root_window(&mut renderer, view, &env, bounds);
 
     let point = vello::kurbo::Point::new(60.0, 60.0);
@@ -812,6 +871,7 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
 #[test]
 fn string_views_measure_through_body_recursion() {
     let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
     let mut state = HydroState::default();
     let proposal = ProposalSize::UNSPECIFIED;
 
@@ -820,24 +880,28 @@ fn string_views_measure_through_body_recursion() {
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let borrowed = measure_view_dimensions_with_proposal(
         &AnyView::new("Hydrolysis"),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let owned = measure_view_dimensions_with_proposal(
         &AnyView::new(String::from("Hydrolysis")),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
     let cow = measure_view_dimensions_with_proposal(
         &AnyView::new(Cow::Borrowed("Hydrolysis")),
         proposal,
         &mut state,
         &env,
+        &theme,
     );
 
     assert_eq!(borrowed.size, raw.size);
@@ -962,6 +1026,48 @@ fn container_label_without_role_names_the_container_only() {
     assert_eq!(container.children().len(), 2);
 }
 
+/// A naming scope collapses onto the single element it names, and the element
+/// keeps the bounds it was actually placed in — not the labelled view's
+/// assigned frame. Under the negotiated-placement contract a parent may stretch
+/// a container past its own answer: a window's overlay places its base over the
+/// whole bounds, so a root `view.size(8, 8)` is assigned the window while its
+/// content lands in the resolved 8x8 box. Reporting the container's outer
+/// bounds would announce a window-sized element around an 8x8 drawing.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_naming_scope_keeps_the_elements_own_bounds_when_the_parent_stretched_it() {
+    let env = test_environment().extending(waterui_graphics::SceneViewMergeToParent);
+    let mut renderer = test_renderer();
+    let recording = waterui_graphics::Picture::record(|_scene| {});
+    let picture = waterui_graphics::Picture::new(
+        waterui_core::layout::Size::new(24.0, 24.0),
+        nami::constant(recording),
+    );
+    let view = waterui_layout::frame::Frame::new(picture)
+        .width(8.0)
+        .height(8.0)
+        .a11y_role(AccessibilityRole::Image)
+        .a11y_label("Sized");
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled root frame must publish an accessibility tree");
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Sized"))
+        .expect("the labelled element must exist");
+    let bounds = node.bounds().expect("the element must carry bounds");
+    assert!(
+        (bounds.width() - 8.0).abs() < 0.5 && (bounds.height() - 8.0).abs() < 0.5,
+        "the element must report the 8x8 box it was placed in, got {}x{}",
+        bounds.width(),
+        bounds.height(),
+    );
+}
+
 /// A view hook wraps whatever it returns in a snapshot of the environment it was
 /// called with, and layout normalization resolves that body before the naming
 /// scope exists — so the snapshot carries no label, and flattening it replaces
@@ -972,11 +1078,15 @@ fn container_label_without_role_names_the_container_only() {
 #[cfg(feature = "accessibility")]
 #[test]
 fn a_label_survives_the_environment_snapshot_a_view_hook_takes() {
-    use waterui_core::{AnyView, Native};
+    use waterui_core::AnyView;
     use waterui_map::{Coordinate, Map, MapConfig, Region};
 
     let mut env = test_environment();
-    env.insert_hook::<MapConfig, AnyView>(|_env, config| AnyView::new(Native::new(config)));
+    // The hooked body stands in for a real map realization — `Native<MapConfig>`
+    // is unreachable because the backend has no map engine and panics on it.
+    env.insert_hook::<MapConfig, AnyView>(|_env, _config| {
+        AnyView::new(text("map").a11y_role(AccessibilityRole::Image))
+    });
     let mut renderer = test_renderer();
     // The frame matters: a layout container normalizes its children, and it is
     // normalization that resolves the hooked body — one level above the naming
@@ -1001,6 +1111,87 @@ fn a_label_survives_the_environment_snapshot_a_view_hook_takes() {
         "the hooked map must carry the caller's name, exactly once"
     );
     assert_eq!(labelled[0].1.role(), AccessibilityNodeRole::Image);
+}
+
+/// A `WebView` created under an application-provided controller exists — the
+/// controller permits it — but on a build bridging no engine there is nothing
+/// to draw it with, and the backend fails rather than occupying a layout slot
+/// with no page behind it.
+#[cfg(not(hydrolysis_macos_system_webview))]
+#[test]
+#[should_panic(expected = "no web engine is bridged")]
+fn a_webview_with_no_engine_to_draw_it_panics() {
+    use std::future::{Future, ready};
+
+    use waterui_core::{Signal, Str};
+    use waterui_webview::{
+        BackendEvent, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime,
+        ScriptMessageHandler, WatcherGuard, WatcherSet, WebView, WebViewConfig, WebViewController,
+        WebViewHandle,
+    };
+
+    /// The smallest controller that can still create a `WebView`: the handle
+    /// answers what construction asks and discards the rest, because the
+    /// assertion only needs the view to exist long enough for the backend to
+    /// refuse it.
+    struct TestWebViewController;
+
+    impl CustomWebViewController for TestWebViewController {
+        fn open(&self, _config: WebViewConfig) -> impl WebViewHandle {
+            TestWebViewHandle {
+                watchers: WatcherSet::new(),
+            }
+        }
+    }
+
+    struct TestWebViewHandle {
+        watchers: WatcherSet<BackendEvent>,
+    }
+
+    impl WebViewHandle for TestWebViewHandle {
+        fn go_back(&self) {}
+        fn go_forward(&self) {}
+        fn go_to(&self, _url: &waterui_webview::Url) {}
+        fn stop(&self) {}
+        fn refresh(&self) {}
+        fn set_user_agent(&self, _user_agent: &str) {}
+        fn can_go_back(&self) -> bool {
+            false
+        }
+        fn can_go_forward(&self) -> bool {
+            false
+        }
+        fn inject_script(&self, _key: &str, _script: &str, _time: ScriptInjectionTime) {}
+        fn add_handler(&self, _name: &str, _handler: Box<ScriptMessageHandler>) {}
+        fn remove_handler(&self, _name: &str) {}
+        fn set_bridge_origins(&self, _policy: OriginPolicy) {}
+        // No interception facility: the double has no engine to route an asset
+        // origin through, and the assertion it serves never opens assets.
+        fn asset_origin(&self) -> Option<waterui_webview::Url> {
+            None
+        }
+        fn set_cookie(&self, _cookie: Cookie<'static>) {}
+        fn set_redirects_enabled(&self, _enabled: impl Signal<Output = bool>) {}
+        fn watch(&self, f: impl Fn(BackendEvent) + 'static) -> WatcherGuard {
+            self.watchers.insert(f)
+        }
+        fn get_cookies(&self) -> impl Future<Output = Vec<Cookie<'static>>> {
+            ready(Vec::new())
+        }
+        fn run_javascript(&self, _script: &str) -> impl Future<Output = Result<Str, Str>> {
+            ready(Err(Str::from_static("no page")))
+        }
+        fn call_async_javascript(&self, _body: &str) -> impl Future<Output = Result<Str, Str>> {
+            ready(Err(Str::from_static("no page")))
+        }
+    }
+
+    let mut env = test_environment();
+    env.insert(WebViewController::new(TestWebViewController));
+    let mut renderer = test_renderer();
+    let view = WebView::open("https://github.com/water-rs/waterui");
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
 }
 
 /// A reactive collection is a container too. Rows are how a tab bar, a menu, or a
@@ -1345,11 +1536,11 @@ fn interaction_state_does_not_migrate_between_semantic_identities() {
     renderer.begin_rebuild_frame();
     let (_, slot, _) =
         renderer.bind_interaction_target(first_key, Rect::new(0.0, 0.0, 80.0, 80.0), &env);
-    renderer.hit_test.interaction.begin_press(
-        &slot,
-        Point::new(20.0, 20.0),
-        renderer.frame_instant(),
-    );
+    let at = renderer.frame_instant();
+    renderer
+        .hit_test
+        .interaction
+        .begin_press(&slot, Point::new(20.0, 20.0), at);
     renderer.finish_rebuild_frame();
 
     renderer.begin_rebuild_frame();
@@ -1374,11 +1565,11 @@ fn began_press_samples_a_visible_press_layer_after_fade_in() {
 
     renderer.begin_rebuild_frame();
     let (_, slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &env);
-    renderer.hit_test.interaction.begin_press(
-        &slot,
-        Point::new(20.0, 20.0),
-        renderer.frame_instant(),
-    );
+    let at = renderer.frame_instant();
+    renderer
+        .hit_test
+        .interaction
+        .begin_press(&slot, Point::new(20.0, 20.0), at);
     renderer.finish_rebuild_frame();
 
     // Advance past the press fade-in (105ms in MinimalTestTheme) and re-bind:
@@ -1505,11 +1696,24 @@ fn keyboard_focus_activates_control_on_key_release() {
     let action_activations = Rc::clone(&activations);
 
     renderer.begin_rebuild_frame();
-    let (_, press_slot, _) = renderer.bind_interaction_target(key, bounds, &env);
+    let (_, press_slot, handles) = renderer.bind_interaction_target(key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, press_slot, move |_, _, _| {
         action_activations.set(action_activations.get() + 1);
         true
     });
+    #[cfg(feature = "accessibility")]
+    let semantic_activations = Rc::new(Cell::new(0));
+    #[cfg(feature = "accessibility")]
+    {
+        let counter = Rc::clone(&semantic_activations);
+        let activation: AccessibilityActivation = Rc::new(RefCell::new(
+            move |_: &mut SemanticCore, _: &Environment| {
+                counter.set(counter.get() + 1);
+                true
+            },
+        ));
+        emit_focusable_node(&mut renderer, &key, bounds, &env, Some(activation));
+    }
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1521,9 +1725,19 @@ fn keyboard_focus_activates_control_on_key_release() {
         Modifiers::default(),
         &env,
     ));
-    assert_eq!(activations.get(), 0);
+    // The rendered contract is the pointer contract: key-down presses and
+    // holds the affordance, and the control activates on key-up.
+    assert_eq!(activations.get(), 0, "key-down must not activate");
+    assert!(handles.pressing(), "key-down holds the pressed affordance");
+    #[cfg(feature = "accessibility")]
+    assert_eq!(
+        semantic_activations.get(),
+        0,
+        "a rendered runtime dispatches no Click"
+    );
     assert!(renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
     assert_eq!(activations.get(), 1);
+    assert!(!handles.pressing(), "key-up releases the affordance");
 }
 
 #[test]
@@ -1537,8 +1751,10 @@ fn interaction_focus_binding_tracks_keyboard_focus() {
     let bounds = Rect::new(0.0, 0.0, 80.0, 80.0);
 
     renderer.begin_rebuild_frame();
-    let (_, press_slot, _) = renderer.bind_interaction_target(key, bounds, &env);
+    let (_, press_slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    emit_focusable_node(&mut renderer, &key, bounds, &env, None);
 
     assert!(!focused.get());
     assert!(renderer.handle_key_with_env(
@@ -1572,11 +1788,16 @@ fn modal_scope_traps_keyboard_focus_and_handles_escape() {
 
     renderer.begin_rebuild_frame();
     let (_, background_press_slot, _) =
-        renderer.bind_interaction_target(background_key, bounds, &env);
+        renderer.bind_interaction_target(background_key.clone(), bounds, &env);
     renderer.register_interactive_pointer_target(bounds, background_press_slot, |_, _, _| true);
     let (_, modal_press_slot, _) =
         renderer.bind_interaction_target(modal_key.clone(), bounds, &modal_env);
     renderer.register_interactive_pointer_target(bounds, modal_press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    {
+        emit_focusable_node(&mut renderer, &background_key, bounds, &env, None);
+        emit_focusable_node(&mut renderer, &modal_key, bounds, &modal_env, None);
+    }
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1609,6 +1830,8 @@ fn inactive_modal_scope_does_not_trap_keyboard_focus() {
     let (_, press_slot, _) = renderer.bind_interaction_target(key.clone(), bounds, &dialog_env);
     assert!(!press_slot.modal);
     renderer.register_interactive_pointer_target(bounds, press_slot, |_, _, _| true);
+    #[cfg(feature = "accessibility")]
+    emit_focusable_node(&mut renderer, &key, bounds, &dialog_env, None);
 
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
@@ -1620,32 +1843,15 @@ fn inactive_modal_scope_does_not_trap_keyboard_focus() {
 }
 
 #[derive(Default)]
-struct NoopDrawContext;
-
-impl DrawContext for NoopDrawContext {
-    fn fill_rect(&mut self, _rect: Rect, _brush: &Brush) {}
-    fn fill_rounded_rect(&mut self, _rect: Rect, _radii: RoundedRectRadii, _brush: &Brush) {}
-    fn stroke_rect(&mut self, _rect: Rect, _brush: &Brush, _width: f64) {}
-    fn stroke_rounded_rect(
-        &mut self,
-        _rect: Rect,
-        _radii: RoundedRectRadii,
-        _brush: &Brush,
-        _width: f64,
-    ) {
-    }
-    fn stroke_line(&mut self, _from: Point, _to: Point, _brush: &Brush, _width: f64) {}
-    fn stroke_circle(&mut self, _center: Point, _radius: f64, _brush: &Brush, _width: f64) {}
-    fn fill_circle(&mut self, _center: Point, _radius: f64, _brush: &Brush) {}
-    fn fill_path(&mut self, _path: &BezPath, _brush: &Brush) {}
-    fn stroke_path(&mut self, _path: &BezPath, _brush: &Brush, _width: f64) {}
-    fn push_layer(&mut self, _alpha: f32, _clip: Option<&Rect>) {}
-    fn pop_layer(&mut self) {}
-    fn push_transform(&mut self, _affine: Affine) {}
-    fn pop_transform(&mut self) {}
+pub(crate) struct MinimalTestTheme {
+    badge_draws: Rc<RefCell<Vec<Rect>>>,
 }
 
-struct MinimalTestTheme;
+impl crate::Style for MinimalTestTheme {
+    /// The minimal theme installs no tokens of its own — the runtime's
+    /// framework defaults (`install_default_tokens`) are all a test needs.
+    fn install_tokens(&self, _env: &mut Environment) {}
+}
 
 impl WidgetTheme for MinimalTestTheme {
     fn interaction_motion(&self) -> InteractionMotion {
@@ -1825,6 +2031,7 @@ impl WidgetTheme for MinimalTestTheme {
             popup_top_spacing: 4.0,
             popup_row_height: 48.0,
             popup_corner_radius: 6.0,
+            segment_min_width: 58.0,
         }
     }
 
@@ -2021,9 +2228,9 @@ impl WidgetTheme for MinimalTestTheme {
             large_size: 16.0,
             large_horizontal_padding: 4.0,
             small_offset_x: 6.0,
-            small_offset_y: 4.0,
-            large_offset_x: 2.0,
-            large_offset_y: 1.0,
+            small_offset_y: 6.0,
+            large_offset_x: 12.0,
+            large_offset_y: 14.0,
         }
     }
 
@@ -2035,8 +2242,12 @@ impl WidgetTheme for MinimalTestTheme {
         waterui_text::font::Font::default()
     }
 
-    fn draw_badge_small(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_badge_large(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_badge_small(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+        self.badge_draws.borrow_mut().push(bounds);
+    }
+    fn draw_badge_large(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+        self.badge_draws.borrow_mut().push(bounds);
+    }
 
     fn list_metrics(&self) -> ListMetrics {
         ListMetrics {
@@ -2083,26 +2294,9 @@ impl WidgetTheme for MinimalTestTheme {
 }
 
 #[test]
-fn widget_theme_can_be_replaced_in_environment() {
-    let env = test_environment();
-
-    let metrics = widget_theme(&env).button_metrics(ButtonStyle::Plain, ButtonSize::default());
-    assert_eq!(metrics.min_width, 123.0);
-    assert_eq!(metrics.min_height, 45.0);
-
-    let mut draw = NoopDrawContext;
-    widget_theme(&env).draw_button_chrome(
-        &mut draw,
-        Rect::new(0.0, 0.0, 10.0, 10.0),
-        ButtonStyle::Plain,
-        WidgetInteractionState::NONE,
-    );
-}
-
-#[test]
 fn ime_preedit_commit_and_disable_update_focused_text_target() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let selection = Rc::new(RefCell::new(TextSelectionSlot {
         anchor: 0,
         focus: 0,
@@ -2158,7 +2352,7 @@ fn ime_preedit_commit_and_disable_update_focused_text_target() {
 #[test]
 fn text_input_focus_stays_on_its_field_when_a_row_is_inserted_above_it() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let first = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let focused = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let emit = |renderer: &mut HydrolysisRenderer,
@@ -2220,7 +2414,7 @@ fn text_input_focus_stays_on_its_field_when_a_row_is_inserted_above_it() {
 #[test]
 fn text_input_focus_is_dropped_when_its_field_stops_being_emitted() {
     let mut renderer = test_renderer();
-    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
     let survivor = Rc::new(RefCell::new(TextSelectionSlot::default()));
     let removed = Rc::new(RefCell::new(TextSelectionSlot::default()));
     for (value, selection) in [("survivor", &survivor), ("removed", &removed)] {
@@ -2275,6 +2469,132 @@ fn text_selection_pointer_update_uses_transient_redraw_path() {
     );
 }
 
+/// A text-input target with real bounds and a real shaped layout, so click
+/// gestures resolve to actual caret/word/line ranges instead of an empty
+/// layout's index 0.
+fn shaped_text_input_target(
+    value: &str,
+    selection: &Rc<RefCell<TextSelectionSlot>>,
+    env: &Environment,
+) -> TextInputTarget {
+    let mut state = HydroState::default();
+    let layout = HydrolysisRenderer::build_text_layout(
+        &mut state,
+        StyledStr::plain(value.to_owned()),
+        HorizontalAlignment::Leading,
+        env,
+        Some(200.0),
+    );
+    let mut target = text_input_target(text_field_model(value, None), Rc::clone(selection));
+    target.bounds = Rect::new(0.0, 0.0, 200.0, 60.0);
+    target.text_bounds = Rect::new(0.0, 0.0, 200.0, 60.0);
+    target.text_clip_bounds = target.text_bounds;
+    target.cursor_area = target.text_bounds;
+    target.layout = layout;
+    target
+}
+
+/// The window point at the center of the caret geometry for `byte_index`, used
+/// to aim synthetic clicks inside a specific word.
+fn caret_point_in_target(target: &TextInputTarget, byte_index: usize) -> Point {
+    let cursor =
+        parley::Cursor::from_byte_index(&target.layout, byte_index, parley::Affinity::Downstream);
+    let geometry = cursor.geometry(&target.layout, 1.0);
+    Point::new(
+        target.text_bounds.x0 + (geometry.x0 + geometry.x1) * 0.5,
+        target.text_bounds.y0 + (geometry.y0 + geometry.y1) * 0.5,
+    )
+}
+
+/// The release event re-runs the drag-extension path before the drag is
+/// cleared. A double-click drag must keep its word granularity there — and for
+/// any jitter between down and up — instead of collapsing the word the gesture
+/// selected back to the caret under the pointer.
+#[test]
+fn double_click_word_selection_survives_pointer_release() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
+    let env = test_environment();
+    let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
+    let target = shaped_text_input_target("hello world", &selection, &env);
+    let point = caret_point_in_target(&target, 8);
+    renderer.text_editing.text_input_targets.push(target);
+
+    renderer.handle_pointer_down(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    renderer.handle_pointer_up(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    renderer.handle_pointer_down(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11,
+        "double-click must select the whole word under the pointer"
+    );
+
+    renderer.handle_pointer_up(point.x as f32, point.y as f32, PointerButton::Primary, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11,
+        "releasing a double-click must not collapse the word selection to a caret"
+    );
+}
+
+/// Holding the button after a double-click extends the selection word by word,
+/// anchored on the word the gesture snapped to — matching platform text-field
+/// behavior.
+#[test]
+fn double_click_drag_extends_selection_by_words() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme::default().text_caret_motion());
+    let env = test_environment();
+    let selection = Rc::new(RefCell::new(TextSelectionSlot::default()));
+    let target = shaped_text_input_target("hello world", &selection, &env);
+    let world_point = caret_point_in_target(&target, 8);
+    let hello_point = caret_point_in_target(&target, 2);
+    renderer.text_editing.text_input_targets.push(target);
+
+    renderer.handle_pointer_down(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    renderer.handle_pointer_up(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    // Second click stays held: this is a double-click-drag, not a third click.
+    renderer.handle_pointer_down(
+        world_point.x as f32,
+        world_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        6..11
+    );
+
+    // Still holding the second click's button, drag back across "hello": the
+    // selection grows to cover both whole words, not a caret at the pointer.
+    renderer.handle_pointer_move(hello_point.x as f32, hello_point.y as f32, &env);
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        0..11,
+        "double-click drag must extend the selection word by word"
+    );
+    renderer.handle_pointer_up(
+        hello_point.x as f32,
+        hello_point.y as f32,
+        PointerButton::Primary,
+        &env,
+    );
+    assert_eq!(
+        normalized_selection_range(selection.borrow().anchor, selection.borrow().focus),
+        0..11
+    );
+}
+
 #[test]
 fn secure_text_context_menu_excludes_copy_and_cut() {
     let selection = Rc::new(RefCell::new(TextSelectionSlot {
@@ -2286,7 +2606,7 @@ fn secure_text_context_menu_excludes_copy_and_cut() {
 
     let mut env = test_environment();
     crate::localization::install(&mut env);
-    let entries = HydrolysisRenderer::build_text_context_menu_entries(&target, &env);
+    let entries = SemanticCore::build_text_context_menu_entries(&target, &env);
     let labels = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -2370,10 +2690,11 @@ fn resolved_text_fast_path_matches_the_recursive_measure() {
     for view in [&str_view, &string_view] {
         let mut state = HydroState::default();
         let state_cell = RefCell::new(&mut state);
-        let fast_path = HydroSubview::from_view(view, &state_cell, &env).measure(proposal);
+        let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+        let fast_path = HydroSubview::from_view(view, &state_cell, &env, &theme).measure(proposal);
         let recursive = {
             let mut state = state_cell.borrow_mut();
-            measure_view_dimensions_with_proposal(view, proposal, &mut state, &env)
+            measure_view_dimensions_with_proposal(view, proposal, &mut state, &env, &theme)
         };
 
         assert_eq!(
@@ -2482,7 +2803,8 @@ fn every_view_answers_the_three_point_probe_consistently() {
         let view = normalize_layout_view(view, &env);
         let mut state = HydroState::default();
         let cell = RefCell::new(&mut state);
-        let subview = HydroSubview::from_view(&view, &cell, &env);
+        let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+        let subview = HydroSubview::from_view(&view, &cell, &env, &theme);
 
         let ideal = subview.measure(ProposalSize::UNSPECIFIED).size;
 
@@ -2536,4 +2858,71 @@ fn every_view_answers_the_three_point_probe_consistently() {
             );
         }
     }
+}
+
+/// `BadgeMetrics` offsets are anchored to the content's trailing edge — the
+/// badge's leading edge sits `offset_x` inside it, mirrored to the leading
+/// edge in RTL — and its bottom edge overlaps the top edge by `offset_y`,
+/// matching `BadgedBox` in Compose. They are not center offsets.
+#[test]
+fn badge_indicator_anchors_to_the_content_trailing_edge() {
+    use waterui::component::badge::Badge;
+    use waterui_core::layout::LayoutDirection;
+
+    /// `Badge` requires `Clone` content and `Frame` is not `Clone`, so the
+    /// anchor is a sized view produced from a `Clone` shell.
+    #[derive(Clone)]
+    struct FillAnchor;
+
+    impl View for FillAnchor {
+        fn body(self, _env: &Environment) -> impl View {
+            ().size(160.0, 160.0)
+        }
+    }
+
+    let mut env = test_environment();
+    let log = env
+        .get::<BadgeDrawLog>()
+        .expect("badge draw log is installed")
+        .clone();
+    let bounds = Rect::new(0.0, 0.0, 160.0, 160.0);
+    let anchor = FillAnchor;
+
+    // The renderer retains badge state by node, so each variant captures on a
+    // fresh renderer.
+    let capture = |view: Badge, env: &Environment| {
+        log.0.borrow_mut().clear();
+        let mut renderer = test_renderer_with_theme(MinimalTestTheme {
+            badge_draws: Rc::clone(&log.0),
+        });
+        capture_root_window(&mut renderer, view, env, bounds);
+        log.0.borrow().clone()
+    };
+
+    // Dot (value 0): leading edge 6 inside the trailing edge, top edge flush —
+    // the dot fills the content's top-trailing 6×6 corner.
+    assert_eq!(
+        capture(Badge::new(0, anchor.clone()), &env).as_slice(),
+        &[Rect::new(154.0, 0.0, 160.0, 6.0)]
+    );
+
+    // Count badge: leading edge 12 inside the trailing edge regardless of its
+    // width, bottom edge 14 below the content's top (its 16-high pill tops out
+    // 2 above the anchor).
+    let draws = capture(Badge::new(5, anchor.clone()), &env);
+    assert_eq!(draws.len(), 1, "one badge indicator draw, got {draws:?}");
+    assert_eq!(draws[0].x0, 148.0);
+    assert_eq!(draws[0].y0, -2.0);
+
+    // RTL mirrors the anchor to the leading edge.
+    env.insert(LayoutDirection::RightToLeft);
+    assert_eq!(
+        capture(Badge::new(0, anchor.clone()), &env).as_slice(),
+        &[Rect::new(0.0, 0.0, 6.0, 6.0)]
+    );
+
+    let draws = capture(Badge::new(5, anchor.clone()), &env);
+    assert_eq!(draws.len(), 1, "one badge indicator draw, got {draws:?}");
+    assert_eq!(draws[0].x1, 12.0);
+    assert_eq!(draws[0].y0, -2.0);
 }

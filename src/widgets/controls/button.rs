@@ -1,7 +1,5 @@
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
-#[cfg(feature = "accessibility")]
-use crate::renderer::accessibility_activation_point;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
     WidgetRenderContext, local_interaction_state, measure_label_intrinsic, measure_view_intrinsic,
@@ -28,7 +26,7 @@ use waterui_core::{AnyView, Environment, Native};
 use waterui_graphics::color::Color;
 use waterui_text::styled::StyledStr;
 
-use crate::widgets::util::{inset_rect, widget_disabled, widget_theme};
+use crate::widgets::util::{inset_rect, widget_disabled};
 
 /// The retained render state of a button. A `TitleOnly` label is rendered as
 /// centered styled text fresh each frame (so its reactive title stays live); any
@@ -51,21 +49,43 @@ impl ButtonRenderState {
         }
     }
 
-    /// Eagerly build the general (non-title) label sub-view, applying the button's
-    /// style-specific label styling + theme label color (mirroring the styled-text
-    /// path's `styled_button_label` + `button_label_view`). A plain `TitleOnly`
-    /// label stays `None` and is rendered as styled text each frame. The measure
-    /// path has no renderer, so the sub-view must be built here at tree-build time.
+    /// Create the general (non-title) label sub-view at tree-build time. A plain
+    /// `TitleOnly` label stays `None` and is rendered as styled text each frame.
+    /// The sub-view is created unbuilt and unpainted: the theme supplies the
+    /// label font and foreground — paint — so styling is applied in
+    /// [`Self::ensure_label_built`] during the layout-time prepare pass, the
+    /// first point a theme exists.
     ///
     /// A label carrying custom content also resolves to `TitleOnly`, because it
     /// has no icon — but its content is a view, and rendering its semantic text
     /// instead would throw that view away. Content kind decides here, not
     /// display mode.
-    pub(crate) fn prebuild_label(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn init_label(&mut self) {
         if renders_as_plain_title(&self.config.label) {
             return;
         }
-        let theme = widget_theme(env);
+        self.label_view = Some(RetainedSubview::new(AnyView::new(
+            self.config.label.clone(),
+        )));
+    }
+
+    /// Apply the theme's label styling and build the label sub-view. Called from
+    /// the layout-time prepare pass (`WidgetBehavior::prepare`) — the measure
+    /// path has no renderer, so the sub-view must be built before then. A
+    /// semantic runtime never prepares, so the label view is never styled or
+    /// built there: accessibility reads the label config directly.
+    pub(crate) fn ensure_label_built(
+        &mut self,
+        renderer: &mut HydrolysisRenderer,
+        env: &Environment,
+    ) {
+        let Some(subview) = &mut self.label_view else {
+            return;
+        };
+        if subview.is_built() {
+            return;
+        }
+        let theme = renderer.theme();
         let style = self.config.style;
         let interaction_style = env.get::<InteractionStyle>();
         let floating_style = env.get::<FloatingScope>().map(|scope| &scope.0);
@@ -73,17 +93,16 @@ impl ButtonRenderState {
             Some(Color::new(waterui::theme::color::Foreground))
         } else {
             disabled_aware_label_color(
-                theme,
+                &theme,
                 style,
                 &widget_disabled(env),
                 interaction_style,
                 floating_style,
             )
         };
-        let styled = styled_button_label(theme, style, self.config.label.clone());
-        let mut subview = RetainedSubview::new(button_label_view(color, AnyView::new(styled)));
+        let styled = styled_button_label(&theme, style, self.config.label.clone());
+        subview.map_source(|_| button_label_view(color, AnyView::new(styled)));
         subview.ensure_built(renderer, env);
-        self.label_view = Some(subview);
     }
 }
 
@@ -92,22 +111,24 @@ impl HydroNativeView for Native<ButtonConfig> {
         state: &mut crate::renderer::HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_button_intrinsic(view.as_inner(), state, env)
+        measure_button_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
-/// Emits a button's accessibility node from its config. Shared by the dispatch
-/// path ([`Native<ButtonConfig>::accessibility`]) and the retained `Widget`-node
-/// path so both produce the same a11y tree.
+/// Emits a button's accessibility node from its retained state. Shared by the
+/// rendered `Widget`-node flush and the semantic emission walk so both produce
+/// the same a11y tree.
 pub(crate) fn button_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
-    button: &ButtonConfig,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    state: &Rc<RefCell<ButtonRenderState>>,
     env: &Environment,
 ) {
     #[cfg(feature = "accessibility")]
     {
+        let button = &state.borrow().config;
         let mut node = AccessibilityNode::new(renderer.resolve_accessibility_role(
             env,
             match button.style {
@@ -121,7 +142,6 @@ pub(crate) fn button_accessibility(
             node.set_label(label);
         }
         node.add_action(AccessibilityAction::Focus);
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
         // A disabled button stays in the tree (focusable, announced as
         // disabled) but exposes no click action and no action target.
         let disabled = renderer.read_signal(&widget_disabled(env));
@@ -130,17 +150,46 @@ pub(crate) fn button_accessibility(
             None
         } else {
             node.add_action(AccessibilityAction::Click);
-            let activation_point = accessibility_activation_point(bounds);
-            Some(AccessibilityActionTarget::PointerPrimaryClick {
-                point: activation_point,
+            Some(AccessibilityActionTarget::Activate {
+                action: button_activation(state, env),
             })
         };
-        let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+        let node_id = match ctx {
+            Some(ctx) => {
+                let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                renderer.register_accessibility_node(node, bounds, env, action_target)
+            }
+            None => renderer.register_accessibility_node_semantic(node, env, action_target),
+        };
+        if let Some(node_id) = node_id {
+            renderer.register_accessibility_focus_link(
+                &crate::renderer::InteractionKey::for_rc(state, 0),
+                node_id,
+            );
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, button, env);
+        let _ = (renderer, ctx, state, env);
     }
+}
+
+/// The activation closure a button's pointer target and its accessibility
+/// `Click` target share: invokes `config.action` through the retained state
+/// cell so both hit the live config.
+#[cfg(feature = "accessibility")]
+pub(crate) fn button_activation(
+    state: &Rc<RefCell<ButtonRenderState>>,
+    env: &Environment,
+) -> crate::renderer::AccessibilityActivation {
+    let state = Rc::clone(state);
+    let action_env = env.clone();
+    Rc::new(RefCell::new(
+        move |_renderer: &mut crate::renderer::SemanticCore, _env: &Environment| {
+            (state.borrow_mut().config.action)(&action_env);
+            true
+        },
+    ))
 }
 
 /// Resolves button-chrome size from the label size and theme metrics. The
@@ -176,8 +225,8 @@ pub(crate) fn measure_button_node(
     proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let metrics = button_metrics(
         theme,
         render_state.config.style,
@@ -186,7 +235,7 @@ pub(crate) fn measure_button_node(
         env.get::<FloatingScope>().map(|scope| &scope.0),
     );
     let label_size = match &render_state.label_view {
-        Some(subview) => subview.measure_built(state, env),
+        Some(subview) => subview.measure_built(state, env, theme),
         None => {
             let styled = styled_button_title(
                 theme,
@@ -212,7 +261,7 @@ pub(crate) fn render_button_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        button_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        button_accessibility(ctx.renderer_mut(), Some(render_ctx), state, env);
     }
     render_button_parts(ctx, state, env);
 }
@@ -229,6 +278,7 @@ pub(crate) struct MenuRenderState {
     /// The build-time decision of how to render the label.
     label: MenuLabel,
     items: nami::Computed<Vec<waterui_controls::menu::ResolvedMenuItem>>,
+    #[cfg(feature = "accessibility")]
     accessibility_label: nami::Computed<StyledStr>,
 }
 
@@ -247,7 +297,10 @@ impl MenuRenderState {
         let ResolvedMenu {
             label,
             items,
+            #[cfg(feature = "accessibility")]
             accessibility_label,
+            #[cfg(not(feature = "accessibility"))]
+                accessibility_label: _,
         } = menu;
         let label = match label.downcast::<Label>() {
             Ok(label) if renders_as_plain_title(&label) => MenuLabel::Title(*label),
@@ -257,16 +310,27 @@ impl MenuRenderState {
         Self {
             label,
             items,
+            #[cfg(feature = "accessibility")]
             accessibility_label,
         }
     }
 
-    /// Eagerly build the label sub-view (the measure path has no renderer),
-    /// applying the theme's default label foreground first (mirroring the dispatch
-    /// path's `button_label_view`).
-    pub(crate) fn prebuild_label(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    /// Apply the theme's default label foreground and build the label sub-view
+    /// (mirroring the dispatch path's `button_label_view`). Called from the
+    /// layout-time prepare pass (`WidgetBehavior::prepare`) — the measure path
+    /// has no renderer, so the sub-view must be built before then; a semantic
+    /// runtime never prepares and never needs the painted label.
+    pub(crate) fn ensure_label_built(
+        &mut self,
+        renderer: &mut HydrolysisRenderer,
+        env: &Environment,
+    ) {
+        let theme = renderer.theme();
         if let MenuLabel::View(subview) = &mut self.label {
-            let color = widget_theme(env).button_label_color(MENU_TRIGGER_STYLE, false);
+            if subview.is_built() {
+                return;
+            }
+            let color = theme.button_label_color(MENU_TRIGGER_STYLE, false);
             subview.map_source(|view| button_label_view(color, view));
             subview.ensure_built(renderer, env);
         }
@@ -278,27 +342,32 @@ impl HydroNativeView for Native<ResolvedMenu> {
         state: &mut crate::renderer::HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_menu_intrinsic(view.as_inner(), state, env)
+        measure_menu_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
 /// Emits a menu trigger's accessibility node from its accessibility-label signal.
-/// Shared by the dispatch path and the retained node path.
+/// Shared by the rendered `Widget`-node flush (which passes its [`RenderContext`]
+/// and theme for the popup anchor and metrics) and the semantic emission walk
+/// (which passes `None` for both — activation only marks a menu group active).
 pub(crate) fn menu_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
-    accessibility_label: &nami::Computed<StyledStr>,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
+    state: &Rc<RefCell<MenuRenderState>>,
     env: &Environment,
 ) {
     #[cfg(feature = "accessibility")]
     {
+        let accessibility_label = state.borrow().accessibility_label.clone();
         let mut node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
         );
         let default_label = Some(
             renderer
-                .read_signal(accessibility_label)
+                .read_signal(&accessibility_label)
                 .to_plain()
                 .to_string(),
         );
@@ -308,20 +377,51 @@ pub(crate) fn menu_accessibility(
         }
         node.add_action(AccessibilityAction::Focus);
         node.add_action(AccessibilityAction::Click);
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let activation_point = accessibility_activation_point(bounds);
-        let _ = renderer.register_accessibility_node(
-            node,
-            bounds,
-            env,
-            Some(AccessibilityActionTarget::PointerPrimaryClick {
-                point: activation_point,
-            }),
-        );
+        // Direct activation: show the popup under the trigger's own anchor. The
+        // semantic runtime has no trigger rect, so its popup mounts at the
+        // origin through `activate_popup_menu_nodes` — the items land in the
+        // merged accessibility tree exactly as the rendered popup's do.
+        let request = ctx.as_ref().zip(theme).map(|(ctx, theme)| {
+            let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+            (
+                LayoutPoint::new(bounds.x0 as f32, bounds.y1 as f32),
+                theme.text_context_menu_metrics(),
+            )
+        });
+        let items = state.borrow().items.clone();
+        let activation = AccessibilityActionTarget::Activate {
+            action: Rc::new(RefCell::new(
+                move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
+                    let nodes = popup_menu_nodes(&items.get());
+                    match request {
+                        Some((anchor, metrics)) => {
+                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, env);
+                        }
+                        None => {
+                            renderer.activate_popup_menu_nodes(nodes, env);
+                        }
+                    }
+                    true
+                },
+            )),
+        };
+        let node_id = match ctx {
+            Some(ctx) => {
+                let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                renderer.register_accessibility_node(node, bounds, env, Some(activation))
+            }
+            None => renderer.register_accessibility_node_semantic(node, env, Some(activation)),
+        };
+        if let Some(node_id) = node_id {
+            renderer.register_accessibility_focus_link(
+                &crate::renderer::InteractionKey::for_rc(state, 0),
+                node_id,
+            );
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, accessibility_label, env);
+        let _ = (renderer, ctx, theme, state, env);
     }
 }
 
@@ -331,15 +431,15 @@ pub(crate) fn measure_menu_node(
     proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let metrics = theme.button_metrics(MENU_TRIGGER_STYLE, ButtonSize::default());
     let label_size = match &state.label {
         MenuLabel::Title(label) => {
             let styled = styled_button_title(theme, MENU_TRIGGER_STYLE, label, env);
             HydrolysisRenderer::measure_text_intrinsic_size(hydro, styled, env)
         }
-        MenuLabel::View(subview) => subview.measure_built(hydro, env),
+        MenuLabel::View(subview) => subview.measure_built(hydro, env, theme),
     };
     ViewDimensions::new(button_chrome_size(label_size, &metrics, proposal))
 }
@@ -355,9 +455,15 @@ pub(crate) fn render_menu_node(
         .get::<waterui::accessibility::AccessibilityHidden>()
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
+        let theme = ctx.theme();
         let render_ctx = ctx.render_context();
-        let accessibility_label = state.borrow().accessibility_label.clone();
-        menu_accessibility(ctx.renderer_mut(), render_ctx, &accessibility_label, env);
+        menu_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            Some(&theme),
+            state,
+            env,
+        );
     }
     render_menu_parts(ctx, state, env);
 }
@@ -367,7 +473,7 @@ pub(crate) fn render_button_parts(
     state: &Rc<RefCell<ButtonRenderState>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let style = state.borrow().config.style;
     let size = state.borrow().config.size;
     let interaction_style = env.get::<InteractionStyle>().cloned();
@@ -400,7 +506,7 @@ pub(crate) fn render_button_parts(
     }
 
     let metrics = button_metrics(
-        theme,
+        &theme,
         style,
         size,
         interaction_style.as_ref(),
@@ -424,17 +530,23 @@ pub(crate) fn render_button_parts(
             let render_ctx = ctx.render_context();
             ctx.renderer_mut()
                 .with_suppressed_accessibility(|renderer| {
-                    subview.flush_in_rect(renderer, render_ctx, env, label_target);
+                    subview.flush_in_rect(
+                        renderer,
+                        render_ctx,
+                        env,
+                        ProposalSize::UNSPECIFIED,
+                        label_target,
+                    );
                 });
         } else if label_target.width() > 0.0 && label_target.height() > 0.0 {
             // Title label: centered styled text rendered fresh each frame,
             // picking the enabled or disabled label color for this frame.
-            let mut styled = styled_button_title(theme, style, &state_mut.config.label, env);
+            let mut styled = styled_button_title(&theme, style, &state_mut.config.label, env);
             let title_color = if env.get::<ListRowChrome>().is_some() {
                 Some(Color::new(waterui::theme::color::Foreground))
             } else {
                 button_label_color(
-                    theme,
+                    &theme,
                     style,
                     disabled,
                     interaction_style.as_ref(),
@@ -506,7 +618,7 @@ pub(crate) fn render_menu_parts(
     state: &Rc<RefCell<MenuRenderState>>,
     env: &Environment,
 ) {
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let style = MENU_TRIGGER_STYLE;
     let bounds = ctx.bounds;
     let hit_bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
@@ -527,7 +639,7 @@ pub(crate) fn render_menu_parts(
             MenuLabel::Title(label)
                 if label_bounds.width() > 0.0 && label_bounds.height() > 0.0 =>
             {
-                let mut styled = styled_button_title(theme, style, label, env);
+                let mut styled = styled_button_title(&theme, style, label, env);
                 if let Some(color) = theme.button_label_color(style, false) {
                     styled = styled_with_default_foreground(styled, color);
                 }
@@ -540,7 +652,13 @@ pub(crate) fn render_menu_parts(
                 let render_ctx = ctx.render_context();
                 ctx.renderer_mut()
                     .with_suppressed_accessibility(|renderer| {
-                        subview.flush_in_rect(renderer, render_ctx, env, label_bounds);
+                        subview.flush_in_rect(
+                            renderer,
+                            render_ctx,
+                            env,
+                            ProposalSize::UNSPECIFIED,
+                            label_bounds,
+                        );
                     });
             }
         }
@@ -557,11 +675,17 @@ pub(crate) fn render_menu_parts(
     // on open, but a change still re-presents the trigger).
     let _ = ctx.renderer_mut().read_signal(&items);
     let anchor = LayoutPoint::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
+    let menu_metrics = theme.text_context_menu_metrics();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
-            renderer.show_popup_menu_nodes(popup_menu_nodes(&items.get()), anchor, env)
+            renderer.show_popup_menu_nodes(
+                popup_menu_nodes(&items.get()),
+                anchor,
+                menu_metrics,
+                env,
+            )
         },
     );
 }
@@ -570,8 +694,8 @@ pub(crate) fn measure_button_intrinsic(
     button: &ButtonConfig,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let theme = widget_theme(env);
     let metrics = button_metrics(
         theme,
         button.style,
@@ -587,8 +711,8 @@ pub(crate) fn measure_menu_intrinsic(
     menu: &ResolvedMenu,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let theme = widget_theme(env);
     let metrics = theme.button_metrics(MENU_TRIGGER_STYLE, ButtonSize::default());
     let label_size = if let Some(label) = menu.label.downcast_ref::<Label>()
         && renders_as_plain_title(label)
@@ -596,7 +720,7 @@ pub(crate) fn measure_menu_intrinsic(
         let styled = styled_button_title(theme, MENU_TRIGGER_STYLE, label, env);
         HydrolysisRenderer::measure_text_intrinsic_size(state, styled, env)
     } else {
-        measure_view_intrinsic(&menu.label, state, env)
+        measure_view_intrinsic(&menu.label, state, env, theme)
     };
     button_chrome_size(label_size, &metrics, ProposalSize::UNSPECIFIED)
 }
@@ -621,7 +745,7 @@ fn button_label_view(color: Option<Color>, label: AnyView) -> AnyView {
 pub(crate) struct ListRowChrome;
 
 fn disabled_aware_label_color(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     disabled: &nami::Computed<bool>,
     interaction_style: Option<&InteractionStyle>,
@@ -644,7 +768,7 @@ fn disabled_aware_label_color(
 }
 
 fn button_metrics(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     size: ButtonSize,
     interaction_style: Option<&InteractionStyle>,
@@ -669,7 +793,7 @@ fn button_metrics(
 }
 
 fn button_label_color(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     disabled: bool,
     interaction_style: Option<&InteractionStyle>,
@@ -724,7 +848,7 @@ impl waterui_core::resolve::Resolvable for SelectResolvedColor {
 }
 
 fn measure_button_label_intrinsic(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     label: &Label,
     state: &mut HydroState,
@@ -735,7 +859,7 @@ fn measure_button_label_intrinsic(
         HydrolysisRenderer::measure_text_intrinsic_size(state, styled, env)
     } else {
         let label = styled_button_label(theme, style, label.clone());
-        measure_label_intrinsic(&label, state, env)
+        measure_label_intrinsic(&label, state, env, theme)
     }
 }
 
@@ -752,7 +876,7 @@ fn renders_as_plain_title(label: &Label) -> bool {
 }
 
 fn styled_button_title(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     label: &Label,
     env: &Environment,
@@ -791,7 +915,7 @@ fn styled_with_default_foreground(styled: StyledStr, color: Color) -> StyledStr 
 /// label built from caller-supplied views carries its own typography, and
 /// `Label::font` rejects it outright.
 fn styled_button_label(
-    theme: &dyn waterui_backend_core::widget::WidgetTheme,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     label: Label,
 ) -> Label {
@@ -803,6 +927,30 @@ fn styled_button_label(
     } else {
         label
     }
+}
+
+/// Emits a retained button's accessibility node for the semantic walk — the
+/// same node `button_accessibility` registers, with no bounds. The label
+/// sub-view flushes visual-only (its semantics are merged into the button's
+/// node), so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_button_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ButtonRenderState>>,
+    env: &Environment,
+) {
+    button_accessibility(renderer, None, state, env);
+}
+
+/// Emits a retained menu trigger's accessibility node for the semantic walk —
+/// the same node `menu_accessibility` registers, with no bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_menu_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<MenuRenderState>>,
+    env: &Environment,
+) {
+    menu_accessibility(renderer, None, None, state, env);
 }
 
 #[cfg(test)]

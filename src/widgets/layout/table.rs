@@ -1,3 +1,4 @@
+use crate::renderer::bounded_proposal;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -7,8 +8,10 @@ use crate::renderer::lazy::{
     LazyTableSlot, resolve_table_visible_rows, resolve_visible_column_window,
     table_metrics_from_slot,
 };
+#[cfg(feature = "accessibility")]
+use crate::renderer::lazy::{VisibleColumnWindow, VisibleIndexWindow};
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, VisibleSubviewCache,
+    HydroNativeView, HydroState, MeasuredTableMetrics, RenderContext, VisibleSubviewCache,
     WidgetRenderContext, measure_table_metrics, refresh_table_slot_baseline, table_data_cell_rect,
     table_header_cell_rect, transformed_rect, update_table_slot_visible_cell_widths,
 };
@@ -24,7 +27,7 @@ use waterui_core::views::Views;
 use waterui_core::{AnyView, Environment, Native};
 use waterui_layout::scroll::Axis as ScrollAxis;
 
-use crate::widgets::{draw_scroll_indicators, inset_rect, widget_theme};
+use crate::widgets::{draw_scroll_indicators, inset_rect};
 
 /// The cache key for a table's retained cell sub-views. The table re-reads its
 /// `Vec<TableColumn>` each frame with no stable per-column id, so cells are keyed by
@@ -97,8 +100,13 @@ impl TableRenderState {
 }
 
 impl HydroNativeView for Native<TableConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_table_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_table_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -107,19 +115,27 @@ fn measure_table_intrinsic(
     table: &TableConfig,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let columns = table.columns.get();
     if columns.is_empty() {
         return LayoutSize::zero();
     }
-    let metrics = measure_table_metrics(&columns, state, env);
+    let metrics = measure_table_metrics(&columns, state, env, theme);
     LayoutSize::new(metrics.table_width as f32, metrics.table_height as f32)
 }
 
 /// Emits a table's accessibility tree from its node-owned retained state.
+///
+/// The rendered flush passes its [`RenderContext`] and theme: column widths and
+/// the visible windows are real. The semantic walk passes `None` for both and
+/// emits every column header and every cell with no bounds — a table's cell
+/// contents are already bounded by its data — while the scroll handle tracks
+/// offsets in cell units.
 pub(crate) fn table_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     state: &Rc<RefCell<TableRenderState>>,
     env: &Environment,
 ) {
@@ -131,13 +147,36 @@ pub(crate) fn table_accessibility(
     {
         let state_ref = state.borrow();
         let mut slot = state_ref.slot.borrow_mut();
-        refresh_table_slot_baseline(&columns, &mut slot, renderer.state_mut(), env);
+        if let Some(theme) = theme {
+            refresh_table_slot_baseline(&columns, &mut slot, renderer.state_mut(), env, theme);
+        } else {
+            // The semantic walk has no theme to measure against: it keeps the
+            // row count current so the scroll handle and cell emission cover
+            // the full table.
+            slot.max_rows = columns
+                .iter()
+                .map(|column| column.rows().len().get())
+                .max()
+                .unwrap_or(0);
+        }
     }
-    let viewport = ctx.bounds;
-    let layout_metrics = widget_theme(env).table_metrics();
+    let viewport = ctx.map_or(vello::kurbo::Rect::ZERO, |ctx| ctx.bounds);
+    let layout_metrics = theme.map(|theme| theme.table_metrics());
     let table_metrics = {
         let state_ref = state.borrow();
-        table_metrics_from_slot(&state_ref.slot.borrow(), layout_metrics)
+        match layout_metrics {
+            Some(layout_metrics) => {
+                table_metrics_from_slot(&state_ref.slot.borrow(), layout_metrics)
+            }
+            // The semantic scroll domain is in cell units: one unit per
+            // column and per row, so ScrollLeft/ScrollDown move the emission
+            // window by whole cells without a layout pass.
+            None => MeasuredTableMetrics {
+                column_widths: vec![1.0; columns.len()],
+                table_width: columns.len() as f64,
+                table_height: state_ref.slot.borrow().max_rows as f64,
+            },
+        }
     };
     let handle = state.borrow().bind_scroll(
         viewport.width(),
@@ -148,26 +187,44 @@ pub(crate) fn table_accessibility(
     #[cfg(feature = "accessibility")]
     {
         let scroll_metrics = handle.metrics();
+        let rendered = layout_metrics.is_some();
         let row_window = {
             let state_ref = state.borrow();
             let slot = state_ref.slot.borrow();
-            resolve_table_visible_rows(
-                scroll_metrics.offset_y,
-                viewport.height(),
-                slot.max_rows,
-                layout_metrics,
-            )
+            match layout_metrics {
+                Some(layout_metrics) => resolve_table_visible_rows(
+                    scroll_metrics.offset_y,
+                    viewport.height(),
+                    slot.max_rows,
+                    layout_metrics,
+                ),
+                None => VisibleIndexWindow {
+                    start: 0,
+                    end: slot.max_rows,
+                    leading_offset: 0.0,
+                },
+            }
         };
         let mut column_window = {
             let state_ref = state.borrow();
             let slot = state_ref.slot.borrow();
-            resolve_visible_column_window(
-                &slot.column_widths,
-                scroll_metrics.offset_x,
-                scroll_metrics.offset_x + viewport.width(),
-            )
+            if rendered {
+                resolve_visible_column_window(
+                    &slot.column_widths,
+                    scroll_metrics.offset_x,
+                    scroll_metrics.offset_x + viewport.width(),
+                )
+            } else {
+                VisibleColumnWindow {
+                    start: 0,
+                    end: columns.len(),
+                    leading_offset: 0.0,
+                }
+            }
         };
-        {
+        if let Some(layout_metrics) = layout_metrics {
+            let _ = layout_metrics;
+            let theme = theme.expect("hydrolysis rendered table accessibility requires a theme");
             {
                 let state_ref = state.borrow();
                 let mut slot = state_ref.slot.borrow_mut();
@@ -178,6 +235,7 @@ pub(crate) fn table_accessibility(
                     column_window,
                     renderer.state_mut(),
                     env,
+                    theme,
                 );
             }
             let state_ref = state.borrow();
@@ -215,9 +273,10 @@ pub(crate) fn table_accessibility(
             .take(column_window.end)
             .skip(column_window.start)
         {
-            let width = state.borrow().slot.borrow().column_widths[column_index];
-            let header_cell =
-                table_header_cell_rect(origin_x, origin_y, x_offset, width, layout_metrics);
+            let width = table_metrics.column_widths[column_index];
+            let header_cell = layout_metrics.map_or(vello::kurbo::Rect::ZERO, |m| {
+                table_header_cell_rect(origin_x, origin_y, x_offset, width, m)
+            });
             let header_view = AnyView::new(column.label());
             let mut header_node = AccessibilityNode::new(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::ColumnHeader),
@@ -234,25 +293,29 @@ pub(crate) fn table_accessibility(
                 .checked_add(1)
                 .and_then(i64::checked_neg)
                 .expect("hydrolysis table header accessibility identity overflow");
-            if let Some(header_node_id) = renderer.register_accessibility_child_node_with_key(
-                header_key,
-                header_node,
-                transformed_rect(ctx.hit_transform, header_cell),
-                env,
-                None,
-            ) {
+            let header_node_id = match ctx {
+                Some(ctx) => renderer.register_accessibility_child_node_with_key(
+                    header_key,
+                    header_node,
+                    transformed_rect(ctx.hit_transform, header_cell),
+                    env,
+                    None,
+                ),
+                None => renderer.register_accessibility_child_node_with_key_semantic(
+                    header_key,
+                    header_node,
+                    env,
+                    None,
+                ),
+            };
+            if let Some(header_node_id) = header_node_id {
                 table_node.push_child(header_node_id);
             }
             let rows = column.rows();
             for row_index in row_window.start..row_window.end {
-                let cell_rect = table_data_cell_rect(
-                    origin_x,
-                    origin_y,
-                    x_offset,
-                    width,
-                    row_index,
-                    layout_metrics,
-                );
+                let cell_rect = layout_metrics.map_or(vello::kurbo::Rect::ZERO, |m| {
+                    table_data_cell_rect(origin_x, origin_y, x_offset, width, row_index, m)
+                });
                 if let Some(cell) = rows.get_view(row_index) {
                     let cell_view = AnyView::new(cell);
                     let mut cell_node = AccessibilityNode::new(
@@ -276,13 +339,19 @@ pub(crate) fn table_accessibility(
                         .and_then(|pair| pair.checked_add(row_key))
                         .and_then(|pair| pair.checked_add(1))
                         .expect("hydrolysis table cell accessibility identity overflow");
-                    if let Some(cell_node_id) = renderer.register_accessibility_child_node_with_key(
-                        cell_key,
-                        cell_node,
-                        transformed_rect(ctx.hit_transform, cell_rect),
-                        env,
-                        None,
-                    ) {
+                    let cell_node_id = match ctx {
+                        Some(ctx) => renderer.register_accessibility_child_node_with_key(
+                            cell_key,
+                            cell_node,
+                            transformed_rect(ctx.hit_transform, cell_rect),
+                            env,
+                            None,
+                        ),
+                        None => renderer.register_accessibility_child_node_with_key_semantic(
+                            cell_key, cell_node, env, None,
+                        ),
+                    };
+                    if let Some(cell_node_id) = cell_node_id {
                         table_node.push_child(cell_node_id);
                     }
                 }
@@ -290,9 +359,9 @@ pub(crate) fn table_accessibility(
             x_offset += width;
         }
 
-        let _ = renderer.register_accessibility_node(
+        let _ = renderer.register_accessibility_leaf(
+            ctx,
             table_node,
-            transformed_rect(ctx.hit_transform, viewport),
             env,
             Some(AccessibilityActionTarget::Scroll {
                 handle: handle.clone(),
@@ -312,8 +381,9 @@ pub(crate) fn measure_table_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    ViewDimensions::new(measure_table_intrinsic(table, state, env))
+    ViewDimensions::new(measure_table_intrinsic(table, state, env, theme))
 }
 
 /// Renders a retained table leaf every flush.
@@ -332,7 +402,14 @@ pub(crate) fn render_table_node(
     }
     {
         let render_ctx = ctx.render_context();
-        table_accessibility(ctx.renderer_mut(), render_ctx, state, env);
+        let theme = ctx.theme();
+        table_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            Some(&theme),
+            state,
+            env,
+        );
     }
     #[cfg(feature = "accessibility")]
     if hidden {
@@ -352,11 +429,12 @@ pub(crate) fn render_table_parts(
         return;
     }
     let viewport = ctx.bounds;
-    let layout_metrics = widget_theme(env).table_metrics();
+    let theme = ctx.theme();
+    let layout_metrics = theme.table_metrics();
     {
         let state_ref = state.borrow();
         let mut slot = state_ref.slot.borrow_mut();
-        refresh_table_slot_baseline(&columns, &mut slot, ctx.state_mut(), env);
+        refresh_table_slot_baseline(&columns, &mut slot, ctx.state_mut(), env, &theme);
     }
     let initial_table_metrics = {
         let state_ref = state.borrow();
@@ -398,6 +476,7 @@ pub(crate) fn render_table_parts(
             column_window,
             ctx.state_mut(),
             env,
+            &theme,
         );
     }
     let table_metrics = {
@@ -438,7 +517,7 @@ pub(crate) fn render_table_parts(
             origin_x + table_metrics.table_width,
             origin_y + layout_metrics.header_height,
         );
-        let theme = widget_theme(env);
+        let theme = ctx.theme();
         let mut draw = ctx.draw_context();
         theme.draw_table_background(&mut draw, table_rect);
         theme.draw_table_header_background(&mut draw, header_rect);
@@ -503,7 +582,7 @@ pub(crate) fn render_table_parts(
                     inset,
                 );
             }
-            let theme = widget_theme(env);
+            let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_table_cell_border(&mut draw, cell_rect);
         }
@@ -513,7 +592,7 @@ pub(crate) fn render_table_parts(
             origin_x + x_offset + width,
             origin_y + table_metrics.table_height,
         );
-        let theme = widget_theme(env);
+        let theme = ctx.theme();
         let mut draw = ctx.draw_context();
         theme.draw_table_column_separator(&mut draw, separator_from, separator_to);
         x_offset += width;
@@ -558,8 +637,26 @@ fn flush_cell_subview(
         let state_ref = state.borrow();
         let mut cache = state_ref.item_cache.borrow_mut();
         let subview = cache.entry(key, move || view);
-        subview.flush_in_rect(ctx.renderer_mut(), render_ctx, env, rect);
+        subview.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            bounded_proposal(rect),
+            rect,
+        );
     }
     #[cfg(feature = "accessibility")]
     ctx.renderer_mut().pop_accessibility_suppression();
+}
+
+/// Emits a retained table's accessibility tree for the semantic walk — the
+/// same nodes `table_accessibility` registers, with no bounds and every cell
+/// present.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_table_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<TableRenderState>>,
+    env: &Environment,
+) {
+    table_accessibility(renderer, None, None, state, env);
 }

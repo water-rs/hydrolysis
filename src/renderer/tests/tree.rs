@@ -1,6 +1,6 @@
 //! Phase 1 unit tests for the persistent retained render tree.
 
-use super::{test_environment, test_renderer};
+use super::{MinimalTestTheme, test_environment, test_renderer};
 use crate::renderer::{ContainerNode, RenderContext, RenderNode, TextNode};
 use nami::Computed;
 #[cfg(feature = "accessibility")]
@@ -8,7 +8,7 @@ use std::rc::Rc;
 use vello::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
 use waterui_controls::button::button;
-use waterui_core::layout::{HorizontalAlignment, Size};
+use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size};
 use waterui_core::{AnyView, SignalExt as _};
 use waterui_testing::TestArtifacts;
 
@@ -59,7 +59,12 @@ fn render_node_container_lays_out_and_flushes_text() {
 
     renderer.reset_scene();
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
 
     match &node {
         RenderNode::Container(container) => {
@@ -111,7 +116,12 @@ fn geometry_static_flush_reuses_cached_placement() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let placed_after_layout = match &node {
         RenderNode::Container(container) => container.placed.clone(),
         _ => panic!("expected a container node"),
@@ -155,7 +165,12 @@ fn opacity_wrapper_builds_and_flushes_via_dsl() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 80.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let ctx = RenderContext::with_transforms(bounds, Affine::IDENTITY, Affine::IDENTITY);
     node.flush(&mut renderer, ctx, &env);
     assert!(
@@ -234,7 +249,8 @@ fn widget_reactive_label_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -281,7 +297,8 @@ fn reactive_size_change_reflows_via_refresh_not_rebuild() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 320, 80);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 320, 80, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -330,7 +347,8 @@ fn widget_reactive_value_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -378,7 +396,8 @@ fn text_field_value_display_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -428,7 +447,8 @@ fn render_tree_live_path_processes_watch_switch() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
 
     let start = Instant::now();
     let first = rt.pump_at(false, start);
@@ -485,7 +505,8 @@ fn body_dispatched_once_then_every_frame_refreshes() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 160, MinimalTestTheme::default());
     let start = Instant::now();
 
     assert!(
@@ -543,7 +564,8 @@ fn render_tree_chart_switch_snapshot() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -619,7 +641,8 @@ fn render_tree_scene_view_switch_snapshot() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -683,7 +706,8 @@ fn render_tree_scroll_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -745,7 +769,8 @@ fn scroll_offset_persists_across_refresh() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
     let start = Instant::now();
 
     let unscrolled = rt
@@ -804,7 +829,8 @@ fn render_tree_collection_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let snapshot = rt
         .pump_at(true, std::time::Instant::now())
@@ -856,7 +882,8 @@ fn wrapper_keeps_reactive_descendant_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -921,7 +948,8 @@ fn gesture_wrapper_keeps_reactive_descendant_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -985,7 +1013,8 @@ fn render_tree_grid_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 440, 920);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 440, 920, MinimalTestTheme::default());
 
     let snapshot = rt
         .pump_at(true, std::time::Instant::now())

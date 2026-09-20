@@ -60,11 +60,22 @@ pub(super) enum FrameMode {
     /// Refresh the retained window tree on the next pump (building it first if this
     /// renderer has not built it yet).
     Refresh,
+    /// Re-sample animated scalars on the next pump: the same full refresh pass
+    /// as `Refresh`, but scheduled by the animation tick itself, so it marks
+    /// the app busy rather than stale — the tree last emitted is current.
+    Animate,
 }
 
 impl FrameMode {
     pub(super) const fn is_pending(self) -> bool {
         !matches!(self, FrameMode::Idle)
+    }
+
+    /// Whether the scheduled frame exists to apply an unapplied semantic
+    /// change. `Animate` is scheduled continuation work, not staleness.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn is_unapplied_change(self) -> bool {
+        matches!(self, FrameMode::Refresh)
     }
 }
 
@@ -156,8 +167,13 @@ pub(super) fn schedule_animation_update<P: PlatformWindow>(
         return;
     }
     // Every animated scalar is re-sampled in the render tree's node flush; the
-    // tick schedules a full frame like every other content change.
-    runtime.request_refresh();
+    // tick schedules a full frame like every other content change. It is
+    // scheduled as `Animate` rather than `Refresh`: the frame continues work
+    // already in flight, so it must not read as an unapplied semantic update.
+    // A `Refresh` already armed by a patch or rebuild is never downgraded.
+    if matches!(runtime.mode, FrameMode::Idle) {
+        runtime.mode = FrameMode::Animate;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,7 +265,6 @@ pub struct FrameProfile {
 }
 
 impl FrameProfile {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn with_total(mut self, total: Duration) -> Self {
         self.total = total;
         self
@@ -309,17 +324,18 @@ pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -
     }
 }
 
+/// Runs one frame and reports whether it was presented to the surface — an
+/// idle frame, or one whose surface had to be reconfigured, is not.
 pub(super) fn render_window<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     drain_local_tasks: &mut dyn FnMut() -> bool,
-) {
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
+) -> bool {
     let result = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
-    let _ = (result.rebuilt, result.snapshot, result.profile);
+    // The rebuild flag and the snapshot belong to the headless harness; a live
+    // window only asks whether the frame reached its surface.
+    let _ = (result.rebuilt, result.snapshot);
+    result.profile.counters.rendered
 }
 
 pub(super) const fn surface_error_requires_reconfigure(
@@ -432,9 +448,12 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let (width, height) = surface.size();
     let bounds = create_bounds(width, height, scale_factor);
     let root_transform = vello::kurbo::Affine::scale(scale_factor);
-    runtime
-        .renderer
-        .set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    runtime.renderer.set_frame_resources(
+        surface.adapter(),
+        surface.device(),
+        surface.queue(),
+        surface.device_loss(),
+    );
 
     let pump_started_at = Instant::now();
     let mut phases = FramePhases::default();
@@ -450,7 +469,7 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let mut flushed = false;
     match runtime.mode {
         FrameMode::Idle => {}
-        FrameMode::Refresh if !runtime.renderer.has_render_tree() => {
+        FrameMode::Refresh | FrameMode::Animate if !runtime.renderer.has_render_tree() => {
             build_window_scene(
                 runtime,
                 env,
@@ -483,7 +502,7 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
                 refresh_window_scene(runtime, env, &mut phases);
             }
         }
-        FrameMode::Refresh => {
+        FrameMode::Refresh | FrameMode::Animate => {
             refresh_window_scene(runtime, env, &mut phases);
             runtime.clear_frame_mode();
             flushed = true;
@@ -514,7 +533,7 @@ pub(super) struct ScenePumpOutcome {
     pub(super) phases: FramePhases,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "winit")))]
 pub(super) fn pump_window_semantics<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
@@ -602,6 +621,7 @@ fn render_to_surface(
             adapter: surface.adapter(),
             device: surface.device(),
             queue: surface.queue(),
+            device_loss: surface.device_loss().clone(),
             texture: Some(frame.texture()),
             view: frame.view(),
             format,
@@ -972,7 +992,7 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
 
     runtime.request_refresh();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height, adapter, device, queue) = {
+    let (width, height, adapter, device, queue, device_loss) = {
         let surface = runtime.platform.surface();
         let (width, height) = surface.size();
         (
@@ -981,11 +1001,12 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
             surface.adapter().clone(),
             surface.device().clone(),
             surface.queue().clone(),
+            surface.device_loss().clone(),
         )
     };
     runtime
         .renderer
-        .set_frame_resources(&adapter, &device, &queue);
+        .set_frame_resources(&adapter, &device, &queue, &device_loss);
     let bounds = create_bounds(width, height, scale_factor);
     let transform = vello::kurbo::Affine::scale(scale_factor);
     assert!(
@@ -1204,17 +1225,16 @@ where
                 state: KeyState::Pressed,
                 modifiers,
             } => {
+                let key_env = input_env(runtime, env);
                 let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
                     pressed: true,
                     logical: &logical_key,
                     code: physical_code,
                     repeat,
                     modifiers,
-                }) || runtime.renderer.handle_key_with_env(
-                    &key,
-                    modifiers,
-                    &input_env(runtime, env),
-                );
+                }) || runtime
+                    .renderer
+                    .handle_key_with_env(&key, modifiers, &key_env);
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "key_pressed",
@@ -1270,15 +1290,14 @@ where
                 state: KeyState::Released,
                 modifiers,
             } => {
+                let key_env = input_env(runtime, env);
                 let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
                     pressed: false,
                     logical: &logical_key,
                     code: physical_code,
                     repeat,
                     modifiers,
-                }) || runtime
-                    .renderer
-                    .handle_key_release_with_env(&key, &input_env(runtime, env));
+                }) || runtime.renderer.handle_key_release_with_env(&key, &key_env);
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::ModifiersChanged(modifiers) => {

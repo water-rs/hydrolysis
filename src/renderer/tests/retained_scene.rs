@@ -28,7 +28,7 @@ use waterui_layout::stack::{VStack, vstack, zstack};
 use nami::collection::List;
 use waterui::graphics::Color;
 use waterui_core::dynamic::watch;
-use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView};
+use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView, SubviewPlacement};
 use waterui_core::views::ForEach;
 use waterui_graphics::color::signal_color;
 use waterui_layout::AbsoluteLayout;
@@ -37,7 +37,7 @@ use waterui_layout::container::LazyContainer;
 use waterui_layout::frame::Frame;
 use waterui_layout::stack::ZStackLayout;
 
-use super::{pumped_test_environment, test_environment};
+use super::{MinimalTestTheme, pumped_test_environment, test_environment};
 use crate::HeadlessRuntime;
 
 /// Aggregated frame-economy metrics over a run of parametric (post-trigger) frames.
@@ -116,14 +116,19 @@ impl Layout for CountingLayout {
         self.inner.size_that_fits(proposal, children)
     }
 
-    fn place(&self, bounds: Rect, children: &[&dyn SubView]) -> Vec<Rect> {
+    fn place(
+        &self,
+        bounds: Rect,
+        proposal: ProposalSize,
+        children: &[&dyn SubView],
+    ) -> Vec<SubviewPlacement> {
         self.place_calls.set(
             self.place_calls
                 .get()
                 .checked_add(1)
                 .expect("counting layout place-call counter overflow"),
         );
-        self.inner.place(bounds, children)
+        self.inner.place(bounds, proposal, children)
     }
 }
 
@@ -140,7 +145,8 @@ fn run_scenario(
         AnyViewBuilder::<AnyView>::new(move || make_view(&value))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     // Initial structural build.
@@ -183,7 +189,7 @@ fn dynamic_runtime(
         AnyViewBuilder::<AnyView>::new(move || make_view(&value))
     };
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, 400, 640)
+    HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default())
 }
 
 /// Phase 3: a same-size content change to one `Dynamic` node is applied as an isolated
@@ -238,7 +244,13 @@ fn dynamic_size_change_reflows_without_rebuild() {
         AnyViewBuilder::<AnyView>::new(move || dynamic_changing_size_visible(&value))
     };
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -250,7 +262,8 @@ fn dynamic_size_change_reflows_without_rebuild() {
         AnyViewBuilder::<AnyView>::new(move || dynamic_changing_size_visible(&value))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
 
@@ -300,7 +313,7 @@ fn collection_runtime(list: &List<SelfId<u64>>) -> HeadlessRuntime {
         AnyViewBuilder::<AnyView>::new(move || collection_overlay(&list))
     };
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, 400, 640)
+    HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default())
 }
 
 /// Adding an item to a reactive collection in a constant-size overlay reconciles
@@ -386,7 +399,8 @@ fn fixed_scroll_refreshes_window_frame_without_rebuild() {
         ))))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
@@ -499,7 +513,8 @@ fn steady_state_transform_animation_retains_the_tree() {
         })
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -540,7 +555,13 @@ fn dynamic_growth_from_empty_renders_content_without_rebuild() {
         AnyView::new(zstack((().size(360.0, 600.0), overlay_content())))
     });
     let static_env = test_environment();
-    let mut static_runtime = HeadlessRuntime::new_for_tests(static_env, static_builder, 400, 640);
+    let mut static_runtime = HeadlessRuntime::new_for_tests(
+        static_env,
+        static_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = static_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -554,7 +575,8 @@ fn dynamic_growth_from_empty_renders_content_without_rebuild() {
         AnyView::new(zstack((().size(360.0, 600.0), dynamic.clone())))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
 
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
@@ -615,7 +637,13 @@ fn reused_collection_item_reactive_background_tracks_on_selection() {
         AnyViewBuilder::<AnyView>::new(move || reactive_bg_collection(&selected))
     };
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -630,7 +658,8 @@ fn reused_collection_item_reactive_background_tracks_on_selection() {
         AnyViewBuilder::<AnyView>::new(move || reactive_bg_collection(&selected))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let _ = runtime.pump_at(true, start);
 
@@ -678,7 +707,13 @@ fn collection_membership_exit_animates_then_settles() {
     let truth_list: List<SelfId<u64>> = List::from(vec![SelfId::new(0), SelfId::new(2)]);
     let truth_builder = AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&truth_list));
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -691,7 +726,8 @@ fn collection_membership_exit_animates_then_settles() {
         AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&list))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let before = runtime
         .pump_at(true, start)
@@ -737,7 +773,13 @@ fn collection_membership_enter_animates_then_settles() {
         List::from(vec![SelfId::new(0), SelfId::new(1), SelfId::new(2)]);
     let truth_builder = AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&truth_list));
     let truth_env = test_environment();
-    let mut truth_runtime = HeadlessRuntime::new_for_tests(truth_env, truth_builder, 400, 640);
+    let mut truth_runtime = HeadlessRuntime::new_for_tests(
+        truth_env,
+        truth_builder,
+        400,
+        640,
+        MinimalTestTheme::default(),
+    );
     let expected = truth_runtime
         .pump_at(true, Instant::now())
         .snapshot
@@ -750,7 +792,8 @@ fn collection_membership_enter_animates_then_settles() {
         AnyViewBuilder::<AnyView>::new(move || transition_color_stack(&list))
     };
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 400, 640);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 400, 640, MinimalTestTheme::default());
     let start = Instant::now();
     let before = runtime
         .pump_at(true, start)
@@ -847,7 +890,8 @@ fn sibling_applied_filters_share_one_atlas_page() {
 
     let env = pumped_test_environment();
     let builder = AnyViewBuilder::<AnyView>::new(filtered_boxes);
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 96, 48);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 96, 48, MinimalTestTheme::default());
     let snapshot = pump_until_filters_render(&mut runtime, 2);
     assert_eq!(
         runtime.renderer().applied_filter_capture_pages(),
@@ -877,7 +921,8 @@ fn nested_applied_filters_capture_inner_before_outer() {
 
     let env = pumped_test_environment();
     let builder = AnyViewBuilder::<AnyView>::new(nested_boxes);
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, 96, 96);
+    let mut runtime =
+        HeadlessRuntime::new_for_tests(env, builder, 96, 96, MinimalTestTheme::default());
     let snapshot = pump_until_filters_render(&mut runtime, 2);
     assert_eq!(
         runtime.renderer().applied_filter_capture_pages(),

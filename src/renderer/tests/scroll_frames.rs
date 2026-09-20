@@ -20,7 +20,7 @@ use waterui_core::id::SelfId;
 use waterui_layout::scroll::scroll;
 use waterui_layout::stack::{VStack, vstack};
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, PointerButton, PointerKind, TouchPhase};
 
@@ -42,7 +42,13 @@ fn labeled_rows() -> AnyView {
 fn runtime() -> HeadlessRuntime {
     let builder = AnyViewBuilder::<AnyView>::new(labeled_rows);
     let env = test_environment();
-    HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT)
+    HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    )
 }
 
 fn scroll_y(result: &crate::HeadlessPumpResult) -> f64 {
@@ -138,7 +144,13 @@ fn pan_over_lazy_content_materializes_entering_rows() {
         })))
     });
     let env = test_environment();
-    let mut runtime = HeadlessRuntime::new_for_tests(env, builder, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        env,
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
     let start = Instant::now();
     let _ = runtime.pump_at(false, start);
 
@@ -280,4 +292,49 @@ fn momentum_tail_presents_every_consumed_delta() {
              (got {presented}, want {expected}, delta this frame {dy})"
         );
     }
+}
+
+#[test]
+fn inset_lazy_stack_materializes_the_visible_rows_after_pan() {
+    let builder = AnyViewBuilder::<AnyView>::new(|| {
+        let data = (0..100).map(SelfId::new).collect::<Vec<_>>();
+        AnyView::new(scroll(
+            vstack((
+                text("Header").height(300.0),
+                VStack::for_each(data, |row| {
+                    text(format!("Inset row {}", row.into_inner())).height(44.0)
+                })
+                .spacing(0.0),
+            ))
+            .spacing(0.0),
+        ))
+    });
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: 200.0,
+        y: 320.0,
+        dx: 0.0,
+        dy: -700.0,
+        phase: TouchPhase::Moved,
+    });
+    let frame = runtime.pump_at(false, start + Duration::from_millis(16));
+    let update = frame
+        .tree_update
+        .as_ref()
+        .expect("pan publishes visible rows");
+    assert!(
+        update
+            .nodes
+            .iter()
+            .any(|(_, node)| node.label() == Some("Inset row 10")),
+        "a row below the header and inside the viewport must be materialized"
+    );
 }

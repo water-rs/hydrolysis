@@ -3,7 +3,14 @@ use waterui_layout::stack::LazyStackAxis;
 
 #[derive(Default)]
 pub(crate) struct LazyState {
-    pub(crate) lazy_viewport_stack: Vec<vello::kurbo::Rect>,
+    pub(crate) lazy_viewport_stack: Vec<LazyViewport>,
+}
+
+/// Viewport geometry with the coordinate transform of its scroll content.
+#[derive(Clone, Copy)]
+pub(crate) struct LazyViewport {
+    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) transform: vello::kurbo::Affine,
 }
 
 impl LazyState {
@@ -198,8 +205,8 @@ impl VirtualExtentIndex {
         self.estimate = estimate;
         self.spacing = spacing;
         let estimated_stride = estimate + spacing;
-        for index in 1..=count {
-            self.fenwick[index] = estimated_stride * (index & index.wrapping_neg()) as f64;
+        for (index, slot) in self.fenwick.iter_mut().enumerate().take(count + 1).skip(1) {
+            *slot = estimated_stride * (index & index.wrapping_neg()) as f64;
         }
     }
 

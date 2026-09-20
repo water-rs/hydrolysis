@@ -28,10 +28,10 @@ use futures::channel::oneshot;
 use nami::Signal;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
-    NSArray, NSDictionary, NSError, NSHTTPCookie, NSInteger, NSJSONSerialization,
-    NSJSONWritingOptions, NSObject, NSRect, NSString, NSURL,
+    NSArray, NSData, NSDictionary, NSError, NSHTTPCookie, NSHTTPURLResponse, NSInteger,
+    NSJSONSerialization, NSJSONWritingOptions, NSObject, NSRect, NSString, NSURL,
     NSURLErrorAppTransportSecurityRequiresSecureConnection, NSURLErrorCancelled,
     NSURLErrorCannotConnectToHost, NSURLErrorCannotFindHost, NSURLErrorClientCertificateRejected,
     NSURLErrorClientCertificateRequired, NSURLErrorDNSLookupFailed, NSURLErrorDomain,
@@ -43,13 +43,16 @@ use objc2_foundation::{
 use objc2_web_kit::{
     WKContentWorld, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
     WKNavigationDelegate, WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin,
-    WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
-    WKWebViewConfiguration,
+    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKUserScript,
+    WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
 use waterui_core::{Computed, Environment, Str};
 use waterui_webview::{
-    BackendEvent, Cookie, CustomWebViewController, OriginPolicy, ScriptInjectionTime, Url,
-    WatcherGuard, WatcherSet, WebViewController, WebViewError, WebViewEvent, WebViewHandle, bridge,
+    ASSET_ORIGIN, ASSET_SCHEME, AssetResponse, AssetServer, BackendEvent, Cookie,
+    CustomWebViewController, OriginPolicy, ScriptInjectionTime, Url, WatcherGuard, WatcherSet,
+    WebViewConfig, WebViewController, WebViewError, WebViewEvent, WebViewHandle,
+    assets::{asset_target, dispatch},
+    bridge,
 };
 
 /// Bridges `waterui.invoke` to WebKit's message-handler transport.
@@ -635,10 +638,131 @@ impl WebViewDelegate {
     }
 }
 
+struct AssetSchemeHandlerIvars {
+    server: AssetServer,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "WuiHydrolysisAssetSchemeHandler"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AssetSchemeHandlerIvars]
+    struct AssetSchemeHandler;
+
+    unsafe impl NSObjectProtocol for AssetSchemeHandler {}
+
+    unsafe impl WKURLSchemeHandler for AssetSchemeHandler {
+        #[unsafe(method(webView:startURLSchemeTask:))]
+        #[allow(non_snake_case)]
+        unsafe fn webView_startURLSchemeTask(
+            &self,
+            _web_view: &WKWebView,
+            task: &ProtocolObject<dyn WKURLSchemeTask>,
+        ) {
+            // SAFETY: main-thread message sends to the request object WebKit
+            // retains for the duration of this task; see the module safety note.
+            let request = unsafe { task.request() };
+            let (method, url) = (
+                request.HTTPMethod().map(|method| method.to_string()),
+                request
+                    .URL()
+                    .and_then(|url| url.absoluteString())
+                    .map(|url| url.to_string()),
+            );
+            // A `waterui:` URL that does not name the asset origin is a 404 —
+            // it must never resolve against a tree it did not ask for.
+            let response = url
+                .as_deref()
+                .and_then(|url| asset_target(url, ASSET_ORIGIN))
+                .map(|(path, query)| {
+                    dispatch(
+                        &self.ivars().server,
+                        method.as_deref().unwrap_or("GET"),
+                        path,
+                        query,
+                    )
+                })
+                .unwrap_or_else(AssetResponse::not_found);
+            answer_scheme_task(task, url.as_deref(), response);
+        }
+
+        #[unsafe(method(webView:stopURLSchemeTask:))]
+        #[allow(non_snake_case)]
+        unsafe fn webView_stopURLSchemeTask(
+            &self,
+            _web_view: &WKWebView,
+            _task: &ProtocolObject<dyn WKURLSchemeTask>,
+        ) {
+            // Every task is answered synchronously inside `startURLSchemeTask`,
+            // so by the time WebKit stops one it has already finished; there is
+            // no in-flight answer to discard.
+        }
+    }
+);
+
+impl AssetSchemeHandler {
+    fn new(mtm: MainThreadMarker, server: AssetServer) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AssetSchemeHandlerIvars { server });
+        // SAFETY: `msg_send!` to `super.init` is the designated superclass
+        // initializer for a `define_class!` type, and the `->
+        // Retained<Self>` signature is the one objc2 expects here.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Answers a started scheme task with `response` and finishes it.
+///
+/// `request_url` is the URL WebKit started the task for; an
+/// `NSHTTPURLResponse` has to be constructed against *some* URL, and the
+/// request's own is the only honest choice.
+fn answer_scheme_task(
+    task: &ProtocolObject<dyn WKURLSchemeTask>,
+    request_url: Option<&str>,
+    response: AssetResponse,
+) {
+    let url = request_url
+        .and_then(|url| NSURL::URLWithString(&NSString::from_str(url)))
+        .expect("WebKit only starts scheme tasks for URLs it could parse");
+    let names: Vec<Retained<NSString>> = response
+        .headers
+        .iter()
+        .map(|(name, _)| NSString::from_str(name))
+        .collect();
+    let values: Vec<Retained<NSString>> = response
+        .headers
+        .iter()
+        .map(|(_, value)| NSString::from_str(value))
+        .collect();
+    let headers = NSDictionary::from_slices(
+        &names.iter().map(|name| &**name).collect::<Vec<_>>(),
+        &values.iter().map(|value| &**value).collect::<Vec<_>>(),
+    );
+    let ns_response = NSHTTPURLResponse::initWithURL_statusCode_HTTPVersion_headerFields(
+        NSHTTPURLResponse::alloc(),
+        &url,
+        response.status as NSInteger,
+        Some(&NSString::from_str("HTTP/1.1")),
+        Some(&headers),
+    )
+    .expect("NSHTTPURLResponse accepts any status code and header dictionary");
+    // SAFETY: the task is live — WebKit only stops it after this answer
+    // completes, and `stopURLSchemeTask` makes no further callbacks.
+    unsafe {
+        task.didReceiveResponse(&ns_response);
+        if !response.body.is_empty() {
+            task.didReceiveData(&NSData::from_vec(response.body));
+        }
+        task.didFinish();
+    }
+}
+
 struct MacSystemWebViewInner {
     web_view: Retained<WKWebView>,
     delegate: Retained<WebViewDelegate>,
     shared: Rc<SharedState>,
+    /// The bundled-asset origin this view answers, when it was opened with an
+    /// [`AssetServer`].
+    asset_origin: Option<Url>,
 }
 
 /// A main-thread WKWebView handle used by Hydrolysis hybrid composition.
@@ -656,7 +780,7 @@ impl core::fmt::Debug for MacSystemWebViewHandle {
 }
 
 impl MacSystemWebViewHandle {
-    fn new() -> Self {
+    fn new(config: WebViewConfig) -> Self {
         let mtm = MainThreadMarker::new()
             .expect("Hydrolysis WKWebView must be created on the macOS main thread");
         let shared = Rc::new(SharedState::default());
@@ -664,6 +788,23 @@ impl MacSystemWebViewHandle {
         // SAFETY: main-thread message send to an object this wrapper retains; see
         // the module safety note.
         let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+        // The bundled-asset origin exists only when the view was opened with a
+        // server to answer it; the configuration retains the handler it is
+        // registered under.
+        let asset_origin = config.asset_server.map(|server| {
+            let handler = AssetSchemeHandler::new(mtm, server);
+            // SAFETY: main-thread message send to an object this wrapper
+            // retains; see the module safety note.
+            unsafe {
+                configuration.setURLSchemeHandler_forURLScheme(
+                    Some(ProtocolObject::from_ref(&*handler)),
+                    &NSString::from_str(ASSET_SCHEME),
+                );
+            }
+            ASSET_ORIGIN
+                .parse()
+                .expect("the bundled asset origin is a fixed constant")
+        });
         // SAFETY: main-thread message send to an object this wrapper retains; see
         // the module safety note.
         let web_view = unsafe {
@@ -683,6 +824,7 @@ impl MacSystemWebViewHandle {
                 web_view,
                 delegate,
                 shared,
+                asset_origin,
             }),
         };
         handle.rebuild_user_scripts();
@@ -897,6 +1039,10 @@ impl WebViewHandle for MacSystemWebViewHandle {
         unsafe { self.inner.web_view.canGoForward() }
     }
 
+    fn asset_origin(&self) -> Option<Url> {
+        self.inner.asset_origin.clone()
+    }
+
     fn set_cookie(&self, cookie: Cookie<'static>) {
         let cookie = Self::native_cookie(&cookie, &self.inner.web_view);
         // SAFETY: main-thread message send to an object this wrapper retains; see
@@ -1035,8 +1181,8 @@ impl MacSystemWebViewHandle {
 pub struct MacSystemWebViewController;
 
 impl CustomWebViewController for MacSystemWebViewController {
-    fn open(&self) -> impl WebViewHandle {
-        MacSystemWebViewHandle::new()
+    fn open(&self, config: WebViewConfig) -> impl WebViewHandle {
+        MacSystemWebViewHandle::new(config)
     }
 }
 

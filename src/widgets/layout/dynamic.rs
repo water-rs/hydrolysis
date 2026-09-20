@@ -2,6 +2,7 @@ use crate::renderer::{
     HydroNativeView, HydroState, measure_view_dimensions, measure_view_dimensions_with_proposal,
     normalize_layout_view,
 };
+use std::rc::Rc;
 use waterui_core::dynamic::Dynamic;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{Environment, Native};
@@ -14,6 +15,7 @@ fn measure_dynamic(
     dynamic: &Dynamic,
     env: &Environment,
     proposal: ProposalSize,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let identity = dynamic.identity();
     state
@@ -23,9 +25,9 @@ fn measure_dynamic(
         slot.take().map(|content| {
             let normalized = normalize_layout_view(content, env);
             let dimensions = if proposal == ProposalSize::UNSPECIFIED {
-                measure_view_dimensions(&normalized, state, env)
+                measure_view_dimensions(&normalized, state, env, theme)
             } else {
-                measure_view_dimensions_with_proposal(&normalized, proposal, state, env)
+                measure_view_dimensions_with_proposal(&normalized, proposal, state, env, theme)
             };
             *slot = Some(normalized);
             dimensions
@@ -60,16 +62,29 @@ fn measure_dynamic(
 }
 
 impl HydroNativeView for Native<Dynamic> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_dynamic(state, view.as_inner(), env, ProposalSize::UNSPECIFIED).size
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_dynamic(
+            state,
+            view.as_inner(),
+            env,
+            ProposalSize::UNSPECIFIED,
+            theme,
+        )
+        .size
     }
 
     fn dimensions(
         state: &mut HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
-        measure_dynamic(state, view.as_inner(), env, proposal)
+        measure_dynamic(state, view.as_inner(), env, proposal, theme)
     }
 }

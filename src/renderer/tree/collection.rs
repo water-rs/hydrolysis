@@ -2,6 +2,7 @@
 //! reconciled by id) and [`LazyStackNode`] (viewport-virtualized lazy stack).
 
 use super::*;
+use std::rc::Rc;
 
 use waterui_core::animation::Animation;
 use waterui_core::layout::Point;
@@ -210,6 +211,8 @@ pub(crate) struct LazyStackNode {
     /// Estimated extent for not-yet-measured items, seeded from the first measure;
     /// used to size the scroll content without measuring the whole collection.
     pub(super) estimate: Cell<f64>,
+    /// First-item dimensions and the cross-axis query that produced them.
+    pub(super) estimate_sample: Cell<Option<(Option<f32>, Size)>>,
     /// Membership changes reset index-based measurements, including moves that
     /// preserve the collection length.
     pub(super) dirty: Rc<Cell<bool>>,
@@ -234,12 +237,19 @@ impl CollectionNode {
 
     /// Build the `NodeSubView` proxies for this collection's entries, sharing one
     /// state cell across the level (mirrors [`ContainerNode`] measurement).
-    pub(super) fn measure(&self, state: &mut HydroState, proposal: ProposalSize) -> ViewDimensions {
+    pub(super) fn measure(
+        &self,
+        state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
         if self.has_active_transition()
             && let Some(runtime) = &self.transition
             && let Some(axis) = runtime.axis
         {
-            return ViewDimensions::new(self.measure_transitioning_stack(state, proposal, axis));
+            return ViewDimensions::new(
+                self.measure_transitioning_stack(state, theme, proposal, axis),
+            );
         }
         // At rest — and for fade-only (non-stack) transitions, whose exiting
         // entries keep their place while fading — the layout measures every
@@ -248,7 +258,7 @@ impl CollectionNode {
         let subs: Vec<NodeSubView> = self
             .entries
             .iter()
-            .map(|entry| NodeSubView::new(&entry.node, &cell, &self.env))
+            .map(|entry| NodeSubView::new(&entry.node, &cell, &self.env, theme))
             .collect();
         let refs: Vec<&dyn SubView> = subs.iter().map(|sub| sub as &dyn SubView).collect();
         ViewDimensions::new(self.layout.size_that_fits(proposal, &refs))
@@ -262,6 +272,7 @@ impl CollectionNode {
     fn measure_transitioning_stack(
         &self,
         state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
         axis: TransitionAxis,
     ) -> LayoutSize {
@@ -279,7 +290,7 @@ impl CollectionNode {
             if factor <= f64::EPSILON {
                 continue;
             }
-            let sub = NodeSubView::new(&entry.node, &cell, &self.env);
+            let sub = NodeSubView::new(&entry.node, &cell, &self.env, theme);
             let size = sub.measure(item_proposal).size;
             let (item_main, item_cross) = if axis.vertical {
                 (f64::from(size.height), f64::from(size.width))
@@ -301,17 +312,23 @@ impl CollectionNode {
         }
     }
 
-    pub(super) fn layout(&mut self, renderer: &mut HydrolysisRenderer, size: Size) {
+    pub(super) fn layout(
+        &mut self,
+        renderer: &mut HydrolysisRenderer,
+        proposal: ProposalSize,
+        size: Size,
+    ) {
         let env = self.env.clone();
-        let mut rects = {
+        let theme = renderer.theme();
+        let mut placements = {
             let cell = RefCell::new(&mut renderer.state);
             let subs: Vec<NodeSubView> = self
                 .entries
                 .iter()
-                .map(|entry| NodeSubView::new(&entry.node, &cell, &env))
+                .map(|entry| NodeSubView::new(&entry.node, &cell, &env, &theme))
                 .collect();
             let refs: Vec<&dyn SubView> = subs.iter().map(|sub| sub as &dyn SubView).collect();
-            self.layout.place(Rect::from_size(size), &refs)
+            self.layout.place(Rect::from_size(size), proposal, &refs)
         };
         if self.has_active_transition()
             && let Some(runtime) = &self.transition
@@ -325,7 +342,8 @@ impl CollectionNode {
             // it enters or exits.
             let mut cursor = 0.0_f32;
             let mut first_visible = true;
-            for (entry, rect) in self.entries.iter().zip(rects.iter_mut()) {
+            for (entry, placement) in self.entries.iter().zip(&mut placements) {
+                let rect = &mut placement.frame;
                 let factor = entry.factor;
                 if factor <= f32::EPSILON {
                     // Fully absent this frame: park it at the cursor with its
@@ -347,10 +365,15 @@ impl CollectionNode {
                 cursor += extent * factor;
             }
         }
-        for (entry, rect) in self.entries.iter_mut().zip(rects.iter()) {
-            entry.node.layout(renderer, &env, *rect.size());
+        for (entry, placement) in self.entries.iter_mut().zip(&placements) {
+            entry
+                .node
+                .layout(renderer, &env, placement.proposal, *placement.frame.size());
         }
-        self.placed = rects;
+        self.placed = placements
+            .into_iter()
+            .map(|placement| placement.frame)
+            .collect();
     }
 
     pub(super) fn flush(&self, renderer: &mut HydrolysisRenderer, ctx: RenderContext) {
@@ -388,6 +411,36 @@ impl CollectionNode {
             }
         }
         #[cfg(feature = "accessibility")]
+        if let Some(container_scope) = container_scope {
+            renderer.push_accessibility_owner(&self.accessibility_identity);
+            renderer.end_accessibility_container(container_scope);
+            renderer.pop_accessibility_owner();
+        }
+    }
+
+    /// Emits every stable entry's accessibility nodes for the semantic walk —
+    /// the same container scope and per-phase suppression the rendered flush
+    /// applies, with no bounds and no clip layers.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn emit_accessibility(&self, renderer: &mut SemanticCore) {
+        let container_scope = self.accessibility_container_env.as_ref().map(|env| {
+            renderer.push_accessibility_owner(&self.accessibility_identity);
+            let scope = renderer.begin_accessibility_container_semantic(env);
+            renderer.pop_accessibility_owner();
+            scope
+        });
+        for entry in &self.entries {
+            if entry.factor <= f32::EPSILON {
+                continue;
+            }
+            if entry.phase.suppresses_accessibility() {
+                renderer.with_suppressed_accessibility(|renderer| {
+                    entry.node.emit_accessibility(renderer, &self.env);
+                });
+            } else {
+                entry.node.emit_accessibility(renderer, &self.env);
+            }
+        }
         if let Some(container_scope) = container_scope {
             renderer.push_accessibility_owner(&self.accessibility_identity);
             renderer.end_accessibility_container(container_scope);
@@ -443,7 +496,7 @@ impl CollectionNode {
     /// exit — kept in display order, anchored after the live id they followed —
     /// and new ids animate in (the initial membership was built at rest by
     /// [`RenderNode::build_collection`]; only later changes reach here).
-    pub(super) fn reconcile(&mut self, renderer: &mut HydrolysisRenderer) {
+    pub(super) fn reconcile(&mut self, renderer: &mut SemanticCore) {
         let env = self.env.clone();
         let len = self.views.len().get();
         let now = renderer.frame_instant;
@@ -531,7 +584,7 @@ impl CollectionNode {
     /// `Stable`, and while anything is still mid-flight a refresh is requested
     /// so frames keep coming until the collection settles. Returns whether the
     /// tree changed shape or is still animating (both need a fresh layout).
-    pub(super) fn advance_transitions(&mut self, renderer: &mut HydrolysisRenderer) -> bool {
+    pub(super) fn advance_transitions(&mut self, renderer: &mut SemanticCore) -> bool {
         let Some(runtime) = &self.transition else {
             return false;
         };
@@ -572,8 +625,12 @@ fn place_on_axis(rect: Rect, axis: TransitionAxis, main_position: f32) -> Rect {
 impl LazyStackNode {
     /// Applies structural updates owned by the currently visible retained items
     /// before the parent scroll view measures this stack.
-    pub(super) fn patch_visible(&self, renderer: &mut HydrolysisRenderer) -> bool {
-        self.item_cache.borrow_mut().patch_for_parent(renderer)
+    pub(super) fn patch_visible(&self, renderer: &mut SemanticCore) -> bool {
+        let changed = self.item_cache.borrow_mut().patch_for_parent(renderer);
+        if changed {
+            self.estimate_sample.set(None);
+        }
+        changed
     }
 
     fn spacing(&self) -> f64 {
@@ -583,11 +640,10 @@ impl LazyStackNode {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn item_proposal(&self, cross: f64) -> ProposalSize {
+    fn item_proposal(&self, cross: Option<f32>) -> ProposalSize {
         match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(Some(cross as f32), None),
-            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(None, Some(cross as f32)),
+            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(cross, None),
+            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(None, cross),
         }
     }
 
@@ -596,8 +652,9 @@ impl LazyStackNode {
     fn measure_item(
         &self,
         state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         index: usize,
-        cross: f64,
+        cross: Option<f32>,
     ) -> (Size, StretchAxis) {
         let id = self
             .views
@@ -606,7 +663,7 @@ impl LazyStackNode {
         let proposal = self.item_proposal(cross);
         if let Some(item) = self.item_cache.borrow().get(&id) {
             return (
-                item.measure_built_with_proposal(state, &self.env, proposal),
+                item.measure_built_with_proposal(state, &self.env, theme, proposal),
                 item.stretch_axis(),
             );
         }
@@ -616,9 +673,14 @@ impl LazyStackNode {
             .get_view(index)
             .unwrap_or_else(|| panic!("hydrolysis LazyStack failed to materialize item {index}"));
         let view = normalize_layout_view(view, &self.env);
-        let bound = RefCell::new(&mut *state);
-        let subview = HydroSubview::from_view(&view, &bound, &self.env);
-        (subview.measure(proposal).size, subview.stretch_axis())
+        state.measurement.begin_transient_measurement();
+        let result = {
+            let bound = RefCell::new(&mut *state);
+            let subview = HydroSubview::from_view(&view, &bound, &self.env, theme);
+            (subview.measure(proposal).size, subview.stretch_axis())
+        };
+        state.measurement.end_transient_measurement();
+        result
     }
 
     fn main_extent(&self, size: Size) -> f64 {
@@ -628,16 +690,27 @@ impl LazyStackNode {
         }
     }
 
-    /// Seeds the estimated item extent from item 0 if not yet known.
-    fn ensure_estimate(&self, state: &mut HydroState, cross: f64) {
-        if self.estimate.get() > 0.0 {
-            return;
+    /// Keeps estimates scoped to the cross-axis query and collection lifetime.
+    fn ensure_estimate(
+        &self,
+        state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        cross: Option<f32>,
+    ) -> Size {
+        if let Some((previous, size)) = self.estimate_sample.get()
+            && previous == cross
+            && !self.dirty.get()
+        {
+            return size;
         }
-        let (size, _) = self.measure_item(state, 0, cross);
+        let (size, _) = self.measure_item(state, theme, 0, cross);
         let extent = self.main_extent(size);
         self.estimate.set(extent.max(1.0));
+        self.estimate_sample.set(Some((cross, size)));
+        self.dirty.set(true);
         self.prepare_extent_index(self.views.len().get());
         self.extent_index.borrow_mut().set_measured(0, extent);
+        size
     }
 
     fn prepare_extent_index(&self, count: usize) {
@@ -657,7 +730,13 @@ impl LazyStackNode {
     /// Re-measures the last visible window after its retained children were
     /// patched. This makes a reactive row-height change part of the same parent
     /// layout pass instead of discovering it later during flush.
-    fn refresh_visible_extents(&self, state: &mut HydroState, count: usize, cross: f64) {
+    fn refresh_visible_extents(
+        &self,
+        state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        count: usize,
+        cross: Option<f32>,
+    ) {
         let visible = self.visible_range.borrow().clone();
         let cache = self.item_cache.borrow();
         for index in visible.start.min(count)..visible.end.min(count) {
@@ -669,29 +748,34 @@ impl LazyStackNode {
                 continue;
             };
             let proposal = self.item_proposal(cross);
-            let size = item.measure_built_with_proposal(state, &self.env, proposal);
+            let size = item.measure_built_with_proposal(state, &self.env, theme, proposal);
             let extent = self.main_extent(size);
             self.extent_index.borrow_mut().set_measured(index, extent);
         }
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(super) fn measure(&self, state: &mut HydroState, proposal: ProposalSize) -> ViewDimensions {
+    pub(super) fn measure(
+        &self,
+        state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
         let count = self.views.len().get();
         if count == 0 {
             return ViewDimensions::new(Size::zero());
         }
         let cross = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => proposal.width.unwrap_or(0.0),
-            LazyStackAxisConfig::Horizontal { .. } => proposal.height.unwrap_or(0.0),
+            LazyStackAxisConfig::Vertical { .. } => proposal.width,
+            LazyStackAxisConfig::Horizontal { .. } => proposal.height,
         };
-        self.ensure_estimate(state, f64::from(cross));
+        let sample = self.ensure_estimate(state, theme, cross);
         self.prepare_extent_index(count);
-        self.refresh_visible_extents(state, count, f64::from(cross));
+        self.refresh_visible_extents(state, theme, count, cross);
         let main = self.extent_index.borrow().total_extent() as f32;
         let size = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => Size::new(cross, main),
-            LazyStackAxisConfig::Horizontal { .. } => Size::new(main, cross),
+            LazyStackAxisConfig::Vertical { .. } => Size::new(sample.width, main),
+            LazyStackAxisConfig::Horizontal { .. } => Size::new(main, sample.height),
         };
         ViewDimensions::new(size)
     }
@@ -719,10 +803,11 @@ impl LazyStackNode {
             scope
         });
         let cross = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => ctx.bounds.width(),
-            LazyStackAxisConfig::Horizontal { .. } => ctx.bounds.height(),
+            LazyStackAxisConfig::Vertical { .. } => Some(ctx.bounds.width() as f32),
+            LazyStackAxisConfig::Horizontal { .. } => Some(ctx.bounds.height() as f32),
         };
-        self.ensure_estimate(&mut renderer.state, cross);
+        let theme = renderer.theme();
+        self.ensure_estimate(&mut renderer.state, &theme, cross);
         self.prepare_extent_index(count);
         let total_extent_before = self.extent_index.borrow().total_extent();
         self.item_cache.borrow_mut().begin_frame();
@@ -730,10 +815,14 @@ impl LazyStackNode {
             .lazy
             .lazy_viewport_stack
             .last()
-            .copied()
+            .map(|viewport| {
+                (ctx.transform.inverse() * viewport.transform).transform_rect_bbox(viewport.bounds)
+            })
             .unwrap_or(ctx.bounds);
         let (visible_start, visible_end) = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => (visible.y0, visible.y1),
+            LazyStackAxisConfig::Vertical { .. } => {
+                (visible.y0 - ctx.bounds.y0, visible.y1 - ctx.bounds.y0)
+            }
             LazyStackAxisConfig::Horizontal { .. }
                 if self.axis.direction().get().is_right_to_left() =>
             {
@@ -742,7 +831,9 @@ impl LazyStackNode {
                     ctx.bounds.x0 + ctx.bounds.x1 - visible.x0,
                 )
             }
-            LazyStackAxisConfig::Horizontal { .. } => (visible.x0, visible.x1),
+            LazyStackAxisConfig::Horizontal { .. } => {
+                (visible.x0 - ctx.bounds.x0, visible.x1 - ctx.bounds.x0)
+            }
         };
         let spacing = self.spacing();
         let window = self
@@ -786,7 +877,7 @@ impl LazyStackNode {
                     });
                     normalize_layout_view(view, env)
                 });
-                subview.flush_in_rect(renderer, ctx, env, child_rect);
+                subview.flush_in_rect(renderer, ctx, env, proposal, child_rect);
             }
             cursor += extent;
             if index + 1 < count {
@@ -808,6 +899,47 @@ impl LazyStackNode {
         let total_extent_after = self.extent_index.borrow().total_extent();
         if (total_extent_after - total_extent_before).abs() > 0.5 {
             renderer.request_refresh();
+        }
+    }
+
+    /// Emits every item's accessibility nodes for the semantic walk. There is
+    /// no viewport to bound emission against — the semantic tree contains the
+    /// whole collection, so every item materializes its node rather than only
+    /// the visible window.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn emit_accessibility(&self, renderer: &mut SemanticCore) {
+        let count = self.views.len().get();
+        if count == 0 {
+            return;
+        }
+        let container_scope = self.accessibility_container_env.as_ref().map(|env| {
+            renderer.push_accessibility_owner(&self.accessibility_identity);
+            let scope = renderer.begin_accessibility_container_semantic(env);
+            renderer.pop_accessibility_owner();
+            scope
+        });
+        self.item_cache.borrow_mut().begin_frame();
+        for index in 0..count {
+            let id = self
+                .views
+                .get_id(index)
+                .unwrap_or_else(|| panic!("hydrolysis LazyStack item {index} has no id"));
+            let env = &self.env;
+            let views = &self.views;
+            let mut cache = self.item_cache.borrow_mut();
+            let subview = cache.entry(id, || {
+                let view = views.get_view(index).unwrap_or_else(|| {
+                    panic!("hydrolysis LazyStack failed to materialize item {index}")
+                });
+                normalize_layout_view(view, env)
+            });
+            subview.emit_accessibility(renderer, env);
+        }
+        self.item_cache.borrow_mut().end_frame();
+        if let Some(container_scope) = container_scope {
+            renderer.push_accessibility_owner(&self.accessibility_identity);
+            renderer.end_accessibility_container(container_scope);
+            renderer.pop_accessibility_owner();
         }
     }
 }

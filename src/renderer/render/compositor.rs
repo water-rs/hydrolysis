@@ -233,6 +233,9 @@ struct EmbeddedGpuSurfaceSetup {
     shader_cache: Arc<WgslModuleCache>,
     scene_renderer: Arc<waterui_graphics::SharedSceneRenderer>,
     host_redraw_handle: Option<RedrawHandle>,
+    /// The outer context's handle, so a nested view's worker observes the same
+    /// device loss its host does.
+    device_loss: waterui_graphics::DeviceLoss,
 }
 
 #[derive(Clone)]
@@ -348,6 +351,8 @@ pub struct HydrolysisRenderTarget<'a> {
     pub adapter: &'a wgpu::Adapter,
     pub device: &'a wgpu::Device,
     pub queue: &'a wgpu::Queue,
+    /// Reports this device lost; taken when the device was opened.
+    pub device_loss: waterui_graphics::DeviceLoss,
     pub texture: Option<&'a wgpu::Texture>,
     pub view: &'a wgpu::TextureView,
     pub format: wgpu::TextureFormat,
@@ -1010,6 +1015,7 @@ impl EmbeddedGpuSurfaceRuntime {
                 &resources.scene_renderer,
                 msaa_samples,
                 redraw_handle,
+                resources.device_loss.clone(),
             );
             surface.setup(&context, &mut env).await;
         }
@@ -1368,6 +1374,7 @@ impl HydrolysisRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        device_loss: waterui_graphics::DeviceLoss,
     ) -> EmbeddedGpuSurfaceSetup {
         EmbeddedGpuSurfaceSetup {
             adapter: adapter.clone(),
@@ -1376,6 +1383,7 @@ impl HydrolysisRenderer {
             shader_cache: Arc::clone(&self.shader_cache),
             scene_renderer: Arc::clone(&self.scene_renderer),
             host_redraw_handle: self.host_redraw_handle.clone(),
+            device_loss,
         }
     }
 
@@ -1388,7 +1396,12 @@ impl HydrolysisRenderer {
             let surface_format = runtime.borrow().output_format_for(context.surface_format);
             EmbeddedGpuSurfaceRuntime::setup(
                 runtime,
-                self.embedded_gpu_surface_setup(context.adapter, context.device, context.queue),
+                self.embedded_gpu_surface_setup(
+                    context.adapter,
+                    context.device,
+                    context.queue,
+                    context.device_loss.clone(),
+                ),
                 surface_format,
             )
             .await;
@@ -1699,7 +1712,12 @@ impl HydrolysisRenderer {
             };
             if !EmbeddedGpuSurfaceRuntime::ensure_setup(
                 runtime,
-                self.embedded_gpu_surface_setup(target.adapter, target.device, target.queue),
+                self.embedded_gpu_surface_setup(
+                    target.adapter,
+                    target.device,
+                    target.queue,
+                    target.device_loss.clone(),
+                ),
                 self.frame_signals(),
                 target.format,
             ) {
@@ -1846,6 +1864,7 @@ impl HydrolysisRenderer {
                             target.adapter,
                             target.device,
                             target.queue,
+                            target.device_loss.clone(),
                         ),
                         self.frame_signals(),
                         output_format,

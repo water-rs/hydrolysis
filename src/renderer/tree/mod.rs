@@ -23,8 +23,10 @@
 //! re-dispatching the same screen from the `View` tree costs ~15ms.
 
 macro_rules! impl_widget_behavior {
-    ($state:ty, $render:path, $measure:expr) => {
+    ($state:ty, $render:path, $measure:expr $(, $priority:expr)? $(; prepare: $prepare:ident)? $(; a11y: $a11y:path)?) => {
         impl WidgetBehavior for RefCell<$state> {
+            $(fn priority(&self) -> i32 { $priority })?
+
             fn render(
                 self: Rc<Self>,
                 renderer: &mut HydrolysisRenderer,
@@ -40,9 +42,25 @@ macro_rules! impl_widget_behavior {
                 state: &mut HydroState,
                 proposal: ProposalSize,
                 env: &Environment,
+                theme: &Rc<dyn crate::engine::WidgetTheme>,
             ) -> ViewDimensions {
-                ($measure)(&self.borrow(), proposal, state, env)
+                ($measure)(&self.borrow(), proposal, state, env, theme)
             }
+
+            $(fn prepare(&self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+                self.borrow_mut().$prepare(renderer, env);
+            })?
+
+            $(
+                #[cfg(feature = "accessibility")]
+                fn emit_accessibility(
+                    self: Rc<Self>,
+                    renderer: &mut SemanticCore,
+                    env: &Environment,
+                ) {
+                    $a11y(renderer, &self, env);
+                }
+            )?
         }
     };
 }

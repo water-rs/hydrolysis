@@ -1,19 +1,26 @@
+use std::rc::Rc;
+
 use waterui::View;
 use waterui_core::layout::StretchAxis;
 use waterui_core::{AnyView, Environment};
-use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView, SceneViewMergeToParent};
+use waterui_graphics::{
+    DeviceLoss, GpuContext, GpuFrame, GpuSurface, GpuView, SceneViewMergeToParent,
+};
 
+use crate::engine::WidgetTheme;
 use crate::renderer::HydrolysisRenderer;
 use crate::time::Instant;
 
 /// A `GpuView` that renders any cloneable `View` through hydrolysis.
-#[derive(Debug)]
 pub struct HydrolysisGpuView<V>
 where
     V: View + Clone + 'static,
 {
     view: V,
+    theme: Rc<dyn WidgetTheme>,
     adapter: Option<wgpu::Adapter>,
+    /// Reports this device lost; taken when the device was opened.
+    device_loss: Option<DeviceLoss>,
     renderer: Option<HydrolysisRenderer>,
     env: Option<Environment>,
     needs_rebuild: bool,
@@ -25,15 +32,26 @@ where
     animation_epoch: Instant,
 }
 
+impl<V> core::fmt::Debug for HydrolysisGpuView<V>
+where
+    V: View + Clone + 'static,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HydrolysisGpuView").finish_non_exhaustive()
+    }
+}
+
 impl<V> HydrolysisGpuView<V>
 where
     V: View + Clone + 'static,
 {
     #[must_use]
-    pub fn new(view: V) -> Self {
+    pub fn new(view: V, theme: Rc<dyn WidgetTheme>) -> Self {
         Self {
             view,
+            theme,
             adapter: None,
+            device_loss: None,
             renderer: None,
             env: None,
             needs_rebuild: true,
@@ -48,13 +66,14 @@ where
 {
     async fn setup(&mut self, ctx: &GpuContext<'_>, env: &mut Environment) {
         let scoped_env = env.extending(SceneViewMergeToParent);
-        let mut renderer = HydrolysisRenderer::new(ctx.adapter, ctx.device);
+        let mut renderer = HydrolysisRenderer::new(ctx.adapter, ctx.device, Rc::clone(&self.theme));
         renderer.set_host_redraw_handle(ctx.redraw_handle.clone());
         renderer.prepare_window_tree(AnyView::new(self.view.clone()), &scoped_env);
         renderer.setup_embedded_gpu_surfaces(ctx).await;
         renderer.setup_embedded_effects(ctx).await;
 
         self.adapter = Some(ctx.adapter.clone());
+        self.device_loss = Some(ctx.device_loss.clone());
         self.renderer = Some(renderer);
         self.env = Some(scoped_env);
     }
@@ -65,6 +84,10 @@ where
             .adapter
             .as_ref()
             .expect("HydrolysisGpuView adapter missing");
+        let device_loss = self
+            .device_loss
+            .as_ref()
+            .expect("HydrolysisGpuView device_loss missing");
         let renderer = self
             .renderer
             .as_mut()
@@ -74,7 +97,7 @@ where
             .as_ref()
             .expect("HydrolysisGpuView environment missing");
 
-        renderer.set_frame_resources(adapter, frame.device, frame.queue);
+        renderer.set_frame_resources(adapter, frame.device, frame.queue, device_loss);
         renderer.poll_gpu_surface_redraw_handles();
 
         // Advance the embedded frame clock from the host's animation clock.
@@ -112,6 +135,7 @@ where
             adapter,
             device: frame.device,
             queue: frame.queue,
+            device_loss: device_loss.clone(),
             texture: Some(frame.texture),
             view: &frame.view,
             format: frame.format,
@@ -139,9 +163,11 @@ where
 
 /// Extension trait for rendering a view through hydrolysis into a `GpuSurface`.
 pub trait HydrolysisExt: View + Clone + Sized + 'static {
-    /// Wrap this view in a hydrolysis-powered `GpuSurface`.
-    fn hydrolysis(self) -> GpuSurface {
-        GpuSurface::new(HydrolysisGpuView::new(self))
+    /// Wrap this view in a hydrolysis-powered `GpuSurface`. The embedded
+    /// renderer is style-driven like the window runtime: `theme` is the same
+    /// `WidgetTheme` the `Style` the runtime was launched with supplies.
+    fn hydrolysis(self, theme: Rc<dyn WidgetTheme>) -> GpuSurface {
+        GpuSurface::new(HydrolysisGpuView::new(self, theme))
     }
 }
 

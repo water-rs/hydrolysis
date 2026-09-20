@@ -2,13 +2,12 @@ use super::*;
 use core::ops::RangeInclusive;
 use core::time::Duration;
 use waterui::form::Calendar;
-use waterui::shape::{RoundedRectangle, ShapeExt as _};
+use waterui::shape::{FixedRoundedRectangle, RoundedRectangle, ShapeExt as _};
 use waterui::theme::color::Surface;
 use waterui_backend_core::widget::PickerMetrics;
 use waterui_controls::label::LabelDisplayMode;
 use waterui_controls::{Stepper, button, stepper::stepper};
 use waterui_core::{SignalExt as _, id::Id};
-use waterui_form::picker::PickerStyle;
 use waterui_form::picker::date::{Date, DatePickerType, DateTime};
 use waterui_layout::frame::Frame;
 use waterui_layout::padding::EdgeInsets;
@@ -26,7 +25,6 @@ use waterui_text::text;
 pub(crate) struct PopupWindowManager(Rc<dyn Fn(Window)>);
 
 impl PopupWindowManager {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new(show: impl Fn(Window) + 'static) -> Self {
         Self(Rc::new(show))
     }
@@ -260,7 +258,7 @@ pub(crate) fn popup_menu_window(
                 .alignment(HorizontalAlignment::Leading)
                 .spacing(0.0)
                 .background(
-                    RoundedRectangle::new((metrics.corner_radius / metrics.min_width) as f32)
+                    FixedRoundedRectangle::new(metrics.corner_radius as f32)
                         .fill(waterui::Color::new(Surface)),
                 ),
             group_for_content.clone(),
@@ -279,6 +277,137 @@ pub(crate) fn popup_menu_window(
         origin,
         LayoutSize::new(width as f32, height as f32),
     ));
+    (popup, state)
+}
+
+/// The semantic counterpart of [`popup_menu_window`]: the same rows —
+/// borderless `Button` commands, dividers, and submenu items that open a
+/// deeper window — without the metrics-dependent chrome. A semantic window
+/// has no frame to size and no corner chrome to round, so none is built; the
+/// emitted accessibility tree is identical to the rendered popup's.
+#[cfg(feature = "accessibility")]
+pub(crate) fn semantic_popup_menu_window(
+    nodes: Vec<PopupMenuNode>,
+    group: PopupMenuStateGroup,
+    depth: usize,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let group_for_content = group.clone();
+    let state_for_content = state.clone();
+    let nodes_for_content = nodes.clone();
+    let popup_content = move || {
+        let mut rows = Vec::with_capacity(nodes_for_content.len());
+        for node in nodes_for_content.clone() {
+            match node {
+                PopupMenuNode::Command {
+                    label,
+                    action,
+                    disabled,
+                    ..
+                } => {
+                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                        move |group: PopupMenuStateGroup, env: Environment| {
+                            if disabled {
+                                return;
+                            }
+                            group.close_all();
+                            call_action_discarding_result(&action, &env);
+                        },
+                    );
+                    rows.push(AnyView::new(button));
+                }
+                PopupMenuNode::Divider => rows.push(AnyView::new(Divider)),
+                PopupMenuNode::Menu { label, items, .. } => {
+                    let next_depth = depth + 1;
+                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                        move |group: PopupMenuStateGroup, env: Environment| {
+                            if items.is_empty() {
+                                return;
+                            }
+                            group.truncate(next_depth);
+                            let (window, child_state) =
+                                semantic_popup_menu_window(items.clone(), group.clone(), next_depth);
+                            group.push(child_state);
+                            env.get::<PopupWindowManager>()
+                                .expect(
+                                    "hydrolysis popup menus require PopupWindowManager in environment",
+                                )
+                                .show(window);
+                        },
+                    );
+                    rows.push(AnyView::new(button));
+                }
+            }
+        }
+        let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
+            rows.into_iter().collect();
+        AnyView::new(
+            menu_content
+                .alignment(HorizontalAlignment::Leading)
+                .spacing(0.0)
+                .with(group_for_content.clone()),
+        )
+    };
+    let mut popup = Window::new(
+        TEXT_CONTEXT_MENU_WINDOW_TITLE,
+        state_for_content,
+        popup_content,
+    )
+    .style(WindowStyle::Borderless)
+    .resizable(false)
+    .background(Color::transparent());
+    popup.closable = false;
+    (popup, state)
+}
+
+/// The semantic counterpart of [`picker_menu_window`]: the same selection
+/// rows — borderless `Button`s that write the binding and close the menu —
+/// without the frame sizing or panel chrome.
+#[cfg(feature = "accessibility")]
+pub(crate) fn semantic_picker_menu_window(
+    entries: Vec<PickerMenuEntry>,
+    selection: Binding<Id>,
+    open: Rc<Cell<bool>>,
+    group: PopupMenuStateGroup,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let group_for_content = group.clone();
+    let state_for_content = state.clone();
+    let entries_for_content = entries.clone();
+    let popup_content = move || {
+        let mut rows = Vec::with_capacity(entries_for_content.len());
+        for entry in entries_for_content.clone() {
+            let label = entry.label.clone();
+            let target = entry.tag;
+            let row_selection = selection.clone();
+            let row_group = group_for_content.clone();
+            let row_open = Rc::clone(&open);
+            rows.push(AnyView::new(
+                button(label)
+                    .style(ButtonStyle::Borderless)
+                    .action(move || {
+                        if row_selection.get() != target {
+                            row_selection.set(target);
+                        }
+                        row_open.set(false);
+                        row_group.close_all();
+                    }),
+            ));
+        }
+        let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
+            rows.into_iter().collect();
+        AnyView::new(
+            menu_content
+                .alignment(HorizontalAlignment::Leading)
+                .spacing(0.0)
+                .with(group_for_content.clone()),
+        )
+    };
+    let mut popup = Window::new("WaterUI Picker Menu", state_for_content, popup_content)
+        .style(WindowStyle::Borderless)
+        .resizable(false)
+        .background(Color::transparent());
+    popup.closable = false;
     (popup, state)
 }
 
@@ -336,7 +465,7 @@ pub(crate) fn picker_menu_window(
                 .alignment(HorizontalAlignment::Leading)
                 .spacing(0.0)
                 .background(
-                    RoundedRectangle::new((metrics.popup_corner_radius / width) as f32)
+                    FixedRoundedRectangle::new(metrics.popup_corner_radius as f32)
                         .fill(Color::new(Surface).with_opacity(0.96)),
                 );
             AnyView::new(animated_popup_panel(panel, group_for_content.clone()))
@@ -370,15 +499,10 @@ fn color_picker_palette() -> [(&'static str, Color); 12] {
     ]
 }
 
-pub(crate) fn color_picker_window(
-    value: Binding<Color>,
-    support_alpha: bool,
-    support_hdr: bool,
-    origin: LayoutPoint,
-    group: PopupMenuStateGroup,
-    env: &Environment,
-) -> (Window, Binding<WindowState>) {
-    let state = Binding::container(WindowState::Normal);
+/// The color-picker panel's rendered extent — swatch grid plus the optional
+/// alpha/headroom rows. Placement is a rendered-frame concern; the semantic
+/// window carries no origin.
+fn color_picker_size(support_alpha: bool, support_hdr: bool) -> (f64, f64) {
     let width = 280.0;
     let swatch = 40.0;
     let gap = 8.0;
@@ -386,6 +510,24 @@ pub(crate) fn color_picker_window(
     let alpha_row_height = if support_alpha { 48.0 } else { 0.0 };
     let hdr_row_height = if support_hdr { 48.0 } else { 0.0 };
     let height = 16.0 + rows * swatch + 2.0 * gap + alpha_row_height + hdr_row_height + 16.0;
+    (width, height)
+}
+
+/// The color-picker window itself: palette swatches plus the optional
+/// alpha/headroom rows. Shared by the rendered popup path (which then sets a
+/// frame) and the semantic activation path (which mounts the window with no
+/// placement at all).
+fn color_picker_window_base(
+    value: Binding<Color>,
+    support_alpha: bool,
+    support_hdr: bool,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let state = Binding::container(WindowState::Normal);
+    let (width, _) = color_picker_size(support_alpha, support_hdr);
+    let swatch = 40.0;
+    let gap = 8.0;
     let group_for_content = group.clone();
     let state_for_content = state.clone();
     let popup_env = env.clone();
@@ -471,6 +613,22 @@ pub(crate) fn color_picker_window(
         .resizable(false)
         .background(Color::transparent());
     popup.closable = false;
+    (popup, state)
+}
+
+/// The rendered popup path: the shared color-picker window anchored at the
+/// trigger's resolved origin. The semantic activation path mounts
+/// [`color_picker_window_base`] directly and sets no frame.
+pub(crate) fn color_picker_window(
+    value: Binding<Color>,
+    support_alpha: bool,
+    support_hdr: bool,
+    origin: LayoutPoint,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let (popup, state) = color_picker_window_base(value, support_alpha, support_hdr, group, env);
+    let (width, height) = color_picker_size(support_alpha, support_hdr);
     popup.frame.set(LayoutRect::new(
         origin,
         LayoutSize::new(width as f32, height as f32),
@@ -503,11 +661,36 @@ fn apply_staged_date_time(
     value.set(next);
 }
 
-pub(crate) fn date_picker_window(
+/// The date-picker panel's rendered extent from the picker's field
+/// configuration — date calendar plus optional time rows. Placement is a
+/// rendered-frame concern; the semantic window carries no origin.
+fn date_picker_size(ty: DatePickerType) -> (f64, f64) {
+    let uses_date = matches!(
+        ty,
+        DatePickerType::Date
+            | DatePickerType::DateHourAndMinute
+            | DatePickerType::DateHourMinuteAndSecond
+    );
+    let uses_time = !matches!(ty, DatePickerType::Date);
+    let width = 360.0;
+    let height = if uses_date && uses_time {
+        520.0
+    } else if uses_date {
+        430.0
+    } else {
+        260.0
+    };
+    (width, height)
+}
+
+/// The date-picker window itself: calendar and time-stepper staging rows plus
+/// the cancel/apply bar. Shared by the rendered popup path (which then sets a
+/// frame) and the semantic activation path (which mounts the window with no
+/// placement at all).
+fn date_picker_window_base(
     value: Binding<DateTime>,
     range: RangeInclusive<DateTime>,
     ty: DatePickerType,
-    origin: LayoutPoint,
     group: PopupMenuStateGroup,
     env: &Environment,
 ) -> (Window, Binding<WindowState>) {
@@ -530,14 +713,6 @@ pub(crate) fn date_picker_window(
         ty,
         DatePickerType::HourMinuteAndSecond | DatePickerType::DateHourMinuteAndSecond
     );
-    let width = 360.0;
-    let height = if uses_date && uses_time {
-        520.0
-    } else if uses_date {
-        430.0
-    } else {
-        260.0
-    };
     let range_start = *range.start();
     let range_end = *range.end();
     let group_for_content = group.clone();
@@ -630,6 +805,22 @@ pub(crate) fn date_picker_window(
         .resizable(false)
         .background(Color::transparent());
     popup.closable = false;
+    (popup, state)
+}
+
+/// The rendered popup path: the shared date-picker window anchored at the
+/// trigger's resolved origin. The semantic activation path mounts
+/// [`date_picker_window_base`] directly and sets no frame.
+pub(crate) fn date_picker_window(
+    value: Binding<DateTime>,
+    range: RangeInclusive<DateTime>,
+    ty: DatePickerType,
+    origin: LayoutPoint,
+    group: PopupMenuStateGroup,
+    env: &Environment,
+) -> (Window, Binding<WindowState>) {
+    let (popup, state) = date_picker_window_base(value, range, ty, group, env);
+    let (width, height) = date_picker_size(ty);
     popup.frame.set(LayoutRect::new(
         origin,
         LayoutSize::new(width as f32, height as f32),
@@ -637,7 +828,7 @@ pub(crate) fn date_picker_window(
     (popup, state)
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn active_popup_menu_visible(&self) -> bool {
         self.popup_menu.active_popup_menu_group.is_some()
     }
@@ -724,6 +915,7 @@ impl HydrolysisRenderer {
         &mut self,
         nodes: Vec<PopupMenuNode>,
         origin: LayoutPoint,
+        metrics: TextContextMenuMetrics,
         env: &Environment,
     ) -> bool {
         if nodes.is_empty() {
@@ -731,7 +923,6 @@ impl HydrolysisRenderer {
         }
         self.dismiss_active_popup_menu();
         let group = PopupMenuStateGroup::new();
-        let metrics = widget_theme(env).text_context_menu_metrics();
         let popup_origin = popup_window_origin(origin, env);
         let (window, state) = popup_menu_window(nodes, popup_origin, group.clone(), 0, metrics);
         group.push(state);
@@ -742,9 +933,63 @@ impl HydrolysisRenderer {
         true
     }
 
+    /// The semantic half of showing a popup menu: the same window the rendered
+    /// runtime opens, minus the metrics-dependent chrome. It mounts through
+    /// `PopupWindowManager` as a semantic window, so the items appear in the
+    /// merged accessibility tree exactly as they do in the rendered runtime —
+    /// the semantic runtime has no pointer to open it and no frame to place.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_popup_menu_nodes(
+        &mut self,
+        nodes: Vec<PopupMenuNode>,
+        env: &Environment,
+    ) -> bool {
+        if nodes.is_empty() {
+            return false;
+        }
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) = semantic_popup_menu_window(nodes, group.clone(), 0);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis popup menus require PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
+    /// The semantic half of showing a picker menu: the same selection window
+    /// the rendered runtime opens, without frame metrics.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_picker_menu(
+        &mut self,
+        entries: Vec<PickerMenuEntry>,
+        selection: Binding<Id>,
+        open: &Rc<Cell<bool>>,
+        env: &Environment,
+    ) -> bool {
+        if entries.is_empty() {
+            return false;
+        }
+        self.dismiss_active_popup_menu();
+        open.set(true);
+        let group = PopupMenuStateGroup::new();
+        let (window, state) =
+            semantic_picker_menu_window(entries, selection, Rc::clone(open), group.clone());
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis picker menus require PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
     pub(crate) fn show_picker_menu(
         &mut self,
         request: PickerMenuRequest,
+        metrics: PickerMetrics,
         env: &Environment,
     ) -> bool {
         if request.entries.is_empty() {
@@ -753,7 +998,6 @@ impl HydrolysisRenderer {
         self.dismiss_active_popup_menu();
         request.open.set(true);
         let group = PopupMenuStateGroup::new();
-        let metrics = widget_theme(env).picker_metrics(PickerStyle::Menu);
         let popup_origin = popup_window_origin(request.origin, env);
         let (window, state) = picker_menu_window(
             request.entries,
@@ -820,6 +1064,52 @@ impl HydrolysisRenderer {
             .expect("hydrolysis date picker requires PopupWindowManager in environment")
             .show(window);
         self.popup_menu.active_popup_menu_group = Some(group);
+        true
+    }
+
+    /// The semantic half of showing a color picker: the same panel window the
+    /// rendered runtime opens, mounted with no placement — a semantic popup
+    /// has no frame to anchor and no pointer origin to anchor it to.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_color_picker(
+        &mut self,
+        value: Binding<Color>,
+        support_alpha: bool,
+        support_hdr: bool,
+        env: &Environment,
+    ) -> bool {
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) =
+            color_picker_window_base(value, support_alpha, support_hdr, group.clone(), env);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis color picker requires PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
+        true
+    }
+
+    /// The semantic half of showing a date picker: the same staging window
+    /// the rendered runtime opens, mounted with no placement.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn activate_date_picker(
+        &mut self,
+        value: Binding<DateTime>,
+        range: RangeInclusive<DateTime>,
+        ty: DatePickerType,
+        env: &Environment,
+    ) -> bool {
+        self.dismiss_active_popup_menu();
+        let group = PopupMenuStateGroup::new();
+        let (window, state) = date_picker_window_base(value, range, ty, group.clone(), env);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis date picker requires PopupWindowManager in environment")
+            .show(window);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
         true
     }
 

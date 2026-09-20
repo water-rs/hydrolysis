@@ -448,12 +448,13 @@ pub(crate) fn estimate_layout_intrinsic<'a>(
     children: impl IntoIterator<Item = &'a AnyView>,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let state = RefCell::new(state);
     let children: Vec<&AnyView> = children.into_iter().collect();
     let mut subviews = Vec::new();
     for child in children {
-        subviews.push(HydroSubview::from_view(child, &state, env));
+        subviews.push(HydroSubview::from_view(child, &state, env, theme));
     }
     let refs: Vec<&dyn SubView> = subviews.iter().map(|view| view as &dyn SubView).collect();
     layout.size_that_fits(ProposalSize::UNSPECIFIED, &refs)
@@ -555,11 +556,14 @@ pub(crate) fn shape_kind_path(
 ) -> Option<vello::kurbo::BezPath> {
     use vello::kurbo::Shape as _;
     const PATH_TOLERANCE: f64 = 0.05;
+    let min_side = bounds.width().min(bounds.height()).max(0.0) as f32;
     match kind {
         ShapeKind::Rect
         | ShapeKind::RoundedRect { .. }
         | ShapeKind::UnevenRoundedRect { .. }
-        | ShapeKind::Capsule => Some(rounded_rect_path(bounds, shape_kind_radii(kind))),
+        | ShapeKind::FixedRoundedRect { .. }
+        | ShapeKind::FixedUnevenRoundedRect { .. }
+        | ShapeKind::Capsule => Some(rounded_rect_path(bounds, shape_kind_radii(kind, min_side))),
         ShapeKind::Circle => {
             let radius = bounds.width().min(bounds.height()).max(0.0) / 2.0;
             Some(vello::kurbo::Circle::new(bounds.center(), radius).into_path(PATH_TOLERANCE))
@@ -576,8 +580,9 @@ pub(crate) fn resolved_morph_shape_to_path(
     progress: f32,
     bounds: vello::kurbo::Rect,
 ) -> vello::kurbo::BezPath {
-    let from = shape_kind_radii(shape.from);
-    let to = shape_kind_radii(shape.to);
+    let min_side = bounds.width().min(bounds.height()).max(0.0) as f32;
+    let from = shape_kind_radii(shape.from, min_side);
+    let to = shape_kind_radii(shape.to, min_side);
     let progress = progress.clamp(0.0, 1.0);
     let radii = [
         lerp(from[0], to[0], progress),
@@ -588,21 +593,40 @@ pub(crate) fn resolved_morph_shape_to_path(
     rounded_rect_path(bounds, radii)
 }
 
-fn shape_kind_radii(kind: ShapeKind) -> [f32; 4] {
+/// Per-corner radii in points, in top-left/top-right/bottom-right/bottom-left
+/// order. A normalized kind resolves its fraction of the shorter side; a fixed
+/// kind carries its own length. Both clamp to half the shorter side, the
+/// ceiling a normalized `0.5` lands on, so radii stay absolute under `lerp`.
+fn shape_kind_radii(kind: ShapeKind, min_side: f32) -> [f32; 4] {
+    let limit = min_side / 2.0;
+    let normalized = |radius: f32| radius.clamp(0.0, 0.5) * min_side;
+    let fixed = |radius: f32| radius.max(0.0).min(limit);
     match kind {
         ShapeKind::Rect => [0.0; 4],
-        ShapeKind::Circle | ShapeKind::Ellipse | ShapeKind::Capsule => [0.5; 4],
-        ShapeKind::RoundedRect { corner_radius } => [corner_radius.clamp(0.0, 0.5); 4],
+        ShapeKind::Circle | ShapeKind::Ellipse | ShapeKind::Capsule => [limit; 4],
+        ShapeKind::RoundedRect { corner_radius } => [normalized(corner_radius); 4],
         ShapeKind::UnevenRoundedRect {
             top_left,
             top_right,
             bottom_left,
             bottom_right,
         } => [
-            top_left.clamp(0.0, 0.5),
-            top_right.clamp(0.0, 0.5),
-            bottom_right.clamp(0.0, 0.5),
-            bottom_left.clamp(0.0, 0.5),
+            normalized(top_left),
+            normalized(top_right),
+            normalized(bottom_right),
+            normalized(bottom_left),
+        ],
+        ShapeKind::FixedRoundedRect { corner_radius } => [fixed(corner_radius); 4],
+        ShapeKind::FixedUnevenRoundedRect {
+            top_left,
+            top_right,
+            bottom_left,
+            bottom_right,
+        } => [
+            fixed(top_left),
+            fixed(top_right),
+            fixed(bottom_right),
+            fixed(bottom_left),
         ],
         ShapeKind::CustomPath => {
             panic!("hydrolysis morph shape rendering requires built-in shape kinds")
@@ -612,8 +636,8 @@ fn shape_kind_radii(kind: ShapeKind) -> [f32; 4] {
 
 fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurbo::BezPath {
     const KAPPA: f64 = 0.552_284_749_830_793_6;
-    let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let [tl, tr, br, bl] = radii.map(|radius| f64::from(radius.clamp(0.0, 0.5)) * min_side);
+    let limit = bounds.width().min(bounds.height()).max(0.0) / 2.0;
+    let [tl, tr, br, bl] = radii.map(|radius| f64::from(radius.max(0.0)).min(limit));
     let mut path = vello::kurbo::BezPath::new();
 
     path.move_to((bounds.x0 + tl, bounds.y0));

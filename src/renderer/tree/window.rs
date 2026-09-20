@@ -11,7 +11,7 @@ impl RenderNode {
     /// when so, which lets a size-changing swap reflow its ancestors without
     /// resetting the scene and re-dispatching, which is visible as a flash.
     /// Walks the whole tree.
-    pub(crate) fn patch(&mut self, renderer: &mut HydrolysisRenderer) -> bool {
+    pub(crate) fn patch(&mut self, renderer: &mut SemanticCore) -> bool {
         // No environment is threaded through: a rebuild uses the node's own captured
         // environment (`Dynamic`/`Collection`/`Env` carry it), so the walk only needs
         // the renderer.
@@ -131,6 +131,97 @@ impl RenderNode {
     }
 }
 
+impl SemanticCore {
+    /// The emit-pass equivalent of `HydrolysisRenderer::reset_scene`: clears
+    /// every pure-emission registry the accessibility walk re-pushes — input
+    /// targets, gesture targets, text-input targets and the accessibility
+    /// builder's node/action state — so each walk re-registers exactly what is
+    /// live. Callers then roll the frame boundaries the walk's signal reads
+    /// and retained-state bindings live under.
+    fn begin_semantic_emit_frame(&mut self) {
+        self.lifecycle.begin_rebuild_frame();
+        self.hit_test.begin_rebuild_frame();
+        self.hit_test.reset_scene();
+        self.gesture_engine.clear_targets();
+        self.text_editing.text_input_targets.clear();
+        self.lazy.begin_rebuild_frame();
+        self.navigation.begin_rebuild_frame();
+        #[cfg(feature = "accessibility")]
+        self.accessibility.begin_rebuild_frame();
+    }
+
+    /// The emit-pass equivalent of the non-scene half of
+    /// `HydrolysisRenderer::finish_rebuild_frame`: Retain watcher rollover, the
+    /// measurement-cache and animation-slot prunes, focus validation, and the
+    /// accessibility tree's publication. `signals.finish_rebuild` stays with
+    /// the caller — only a build entered one.
+    fn finish_semantic_emit_frame(&mut self, live_dynamics: &FxHashSet<usize>) {
+        self.lifecycle.finish_rebuild_frame();
+        self.prune_dynamic_measurements(live_dynamics);
+        self.validate_focused_text_input_after_flush();
+        self.animation_controller
+            .finish_rebuild_frame_with_inactive_slot_retention(false);
+        self.hit_test
+            .finish_rebuild_frame(&self.text_editing.text_input_targets);
+        self.navigation.finish_rebuild_frame();
+        #[cfg(feature = "accessibility")]
+        self.finalize_accessibility_tree_update();
+    }
+
+    /// Build the retained window tree from `content` and emit its
+    /// accessibility tree — the semantic analogue of
+    /// [`HydrolysisRenderer::capture_window_tree`]: dispatch and emission only,
+    /// with no layout, no encode and no theme.
+    ///
+    /// Like the rendered path, a call made with a tree already built applies
+    /// the pending patch and re-emits instead of re-dispatching.
+    pub(crate) fn capture_window_semantics(&mut self, content: AnyView, env: &Environment) {
+        if self.render_tree.is_some() {
+            assert!(
+                self.flush_window_semantics(env),
+                "hydrolysis renderer: retained window tree vanished during semantics capture"
+            );
+            return;
+        }
+        self.signals.begin_rebuild();
+        self.begin_semantic_emit_frame();
+        self.render_depth = 0;
+        let tree = RenderNode::build(content, env, self);
+        let live_dynamics = tree.collect_dynamic_identities();
+        #[cfg(feature = "accessibility")]
+        tree.emit_accessibility(self, env);
+        self.render_tree = Some(tree);
+        self.finish_semantic_emit_frame(&live_dynamics);
+        self.signals.finish_rebuild();
+    }
+
+    /// Apply pending structural changes and re-emit the retained tree's
+    /// accessibility tree without laying out or encoding — the semantic
+    /// analogue of [`HydrolysisRenderer::flush_window_tree`]. Returns `false`
+    /// if no tree is built.
+    ///
+    /// A `Dynamic` can reconnect (its initial update is gated on the rebuild
+    /// generation), so patching is the only structural path here: a rebuild
+    /// request would be a programmer error — re-dispatching `body()` is the
+    /// one-time build's job.
+    pub(crate) fn flush_window_semantics(&mut self, _env: &Environment) -> bool {
+        let Some(mut tree) = self.render_tree.take() else {
+            return false;
+        };
+        self.begin_semantic_emit_frame();
+        let structural_change = self.take_subview_structural_change() | tree.patch(self);
+        if structural_change {
+            self.animation_controller.begin_rebuild_frame();
+        }
+        #[cfg(feature = "accessibility")]
+        tree.emit_accessibility(self, _env);
+        let live_dynamics = tree.collect_dynamic_identities();
+        self.render_tree = Some(tree);
+        self.finish_semantic_emit_frame(&live_dynamics);
+        true
+    }
+}
+
 impl HydrolysisRenderer {
     /// Build the retained tree before its first sized frame. Embedded GPU hosts
     /// use this during async setup so every statically reachable `GpuSurface`
@@ -160,6 +251,7 @@ impl HydrolysisRenderer {
         hit_transform: vello::kurbo::Affine,
     ) {
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
         // The viewport is recorded here rather than by each caller: every host
         // that builds a window tree — the runner, and a `HydrolysisGpuView`
         // embedding one in someone else's surface — has to agree on where the
@@ -174,7 +266,8 @@ impl HydrolysisRenderer {
         // frame, so scene/layer flushing is handled by the caller.
         if let Some(mut tree) = self.render_tree.take() {
             tree.patch(self);
-            tree.layout(self, env, size);
+            tree.prepare_for_measure(self);
+            tree.layout(self, env, proposal, size);
             tree.flush(self, ctx, env);
             self.flush_subtree_captures(0);
             self.render_tree = Some(tree);
@@ -182,7 +275,8 @@ impl HydrolysisRenderer {
         }
         self.render_depth = 0;
         let mut node = RenderNode::build(content, env, self);
-        node.layout(self, env, size);
+        node.prepare_for_measure(self);
+        node.layout(self, env, proposal, size);
         node.flush(self, ctx, env);
         self.flush_subtree_captures(0);
         self.render_tree = Some(node);
@@ -225,7 +319,9 @@ impl HydrolysisRenderer {
         // Layout runs every frame: geometry can never go stale against the
         // scene encoded right after it.
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
-        tree.layout(self, env, size);
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        tree.prepare_for_measure(self);
+        tree.layout(self, env, proposal, size);
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         tree.flush(self, ctx, env);
         // Every filtered subtree captured during the flush is rendered and
@@ -236,13 +332,15 @@ impl HydrolysisRenderer {
         // for a single frame.
         self.render_active_text_context_menu_overlay(env, transform);
         self.flush_vello_scene_layer();
-        self.hit_test
-            .finish_rebuild_frame(&self.text_editing.text_input_targets);
-        self.navigation.finish_rebuild_frame();
+        self.core
+            .hit_test
+            .finish_rebuild_frame(&self.core.text_editing.text_input_targets);
+        self.core.navigation.finish_rebuild_frame();
         if structural_change {
             // The flush re-bound every live animation. Drop slots and cached
             // Dynamic measurements belonging to subtrees removed by the patch.
-            self.animation_controller
+            self.core
+                .animation_controller
                 .finish_rebuild_frame_with_inactive_slot_retention(false);
             self.prune_dynamic_measurements(&tree.collect_dynamic_identities());
         }
@@ -256,10 +354,10 @@ impl HydrolysisRenderer {
         true
     }
 
-    /// Measures the window content's per-axis minimum and maximum sizes, or
-    /// `None` before the tree is built.
+    /// Measures the window content's minimum and maximum sizes, or `None`
+    /// before the tree is built.
     ///
-    /// This is four whole-tree measure passes at proposals the frame's own
+    /// These are whole-tree measure passes at proposals the frame's own
     /// layout never uses, so it is demand-driven rather than run on every
     /// refresh: only the runner calls it, and only once it knows the answer will
     /// reach a window that acts on it (see `apply_window_size_limits`).
@@ -273,58 +371,39 @@ impl HydrolysisRenderer {
         Some(limits)
     }
 
-    /// Each axis is negotiated independently: a zero proposal asks for the hard
-    /// minimum and an infinite proposal asks for the hard maximum. The other axis
-    /// stays unspecified so cross-axis layout does not turn one dimension's
-    /// constraint into the other dimension's result.
+    /// Both axes are probed together, not independently: what a view answers on
+    /// one axis depends on what the other was offered — text re-wraps at the
+    /// minimum width and then needs more height than its single-line ideal —
+    /// so a per-axis probe with the cross axis unspecified returns a box the
+    /// content can never actually occupy. `ProposalSize::ZERO` asks for the
+    /// smallest self-consistent box the content can occupy; `INFINITY` asks for
+    /// the largest it ever wants.
     fn content_size_limits_of(
         &mut self,
         tree: &RenderNode,
         env: &Environment,
     ) -> ContentSizeLimits {
-        let min_width = tree
-            .measure(&mut self.state, env, ProposalSize::new(Some(0.0), None))
-            .size
-            .width;
-        let min_height = tree
-            .measure(&mut self.state, env, ProposalSize::new(None, Some(0.0)))
-            .size
-            .height;
-        let max_width = tree
-            .measure(
-                &mut self.state,
-                env,
-                ProposalSize::new(Some(f32::INFINITY), None),
-            )
-            .size
-            .width;
-        let max_height = tree
-            .measure(
-                &mut self.state,
-                env,
-                ProposalSize::new(None, Some(f32::INFINITY)),
-            )
-            .size
-            .height;
-
+        let theme = self.theme();
+        let min_box = tree
+            .measure(&mut self.state, env, &theme, ProposalSize::ZERO)
+            .size;
         let minimum = Size::new(
-            validated_minimum_axis(min_width, "width"),
-            validated_minimum_axis(min_height, "height"),
+            validated_minimum_axis(min_box.width, "width"),
+            validated_minimum_axis(min_box.height, "height"),
         );
-        let maximum = content_maximum_size(max_width, max_height);
-        if let Some(maximum) = maximum
-            && !(maximum.width >= minimum.width && maximum.height >= minimum.height)
-        {
-            // The root's two numbers say the tree contradicted itself, but not
-            // which view did. Walk it and let the offending nodes name themselves,
-            // otherwise this is only reproducible by guesswork.
-            let culprits = probe_contract_violations(tree, &mut self.state, env);
-            panic!(
-                "hydrolysis window layout reported maximum {maximum:?} below minimum \
-                 {minimum:?}.\nA view answered a larger proposal with a smaller size. \
-                 Offending nodes (deepest first):\n{culprits}"
-            );
-        }
+        let max_box = tree
+            .measure(&mut self.state, env, &theme, ProposalSize::INFINITY)
+            .size;
+        let maximum = content_maximum_size(max_box.width, max_box.height).map(|size| {
+            // A finite maximum may legitimately fall below the coupled minimum:
+            // the box at unbounded width is shorter than the box the same
+            // wrapping content needs at its narrowest. Floor each axis at the
+            // minimum so the allowed box is never empty.
+            Size::new(
+                size.width.max(minimum.width),
+                size.height.max(minimum.height),
+            )
+        });
         ContentSizeLimits { minimum, maximum }
     }
 }
@@ -355,69 +434,4 @@ fn content_maximum_size(width: f32, height: f32) -> Option<Size> {
         width.unwrap_or(f32::MAX),
         height.unwrap_or(f32::MAX),
     ))
-}
-
-/// Reports every node whose own probe answers contradict each other, deepest
-/// first, so the innermost cause is read before the containers that inherited it.
-///
-/// Only runs when the window's own check has already failed, so the cost of
-/// re-measuring the tree four times per node does not matter.
-fn probe_contract_violations(
-    tree: &RenderNode,
-    state: &mut HydroState,
-    env: &Environment,
-) -> String {
-    let mut report = String::new();
-    walk_probe_contract(tree, state, env, 0, &mut report);
-    if report.is_empty() {
-        report.push_str(
-            "  (no single node contradicts itself; the disagreement is produced by a              container combining its children)\n",
-        );
-    }
-    report
-}
-
-fn walk_probe_contract(
-    node: &RenderNode,
-    state: &mut HydroState,
-    env: &Environment,
-    depth: usize,
-    report: &mut String,
-) {
-    for child in node.child_nodes() {
-        walk_probe_contract(child, state, env, depth + 1, report);
-    }
-
-    let min_width = node
-        .measure(state, env, ProposalSize::new(Some(0.0), None))
-        .size
-        .width;
-    let max_width = node
-        .measure(state, env, ProposalSize::new(Some(f32::INFINITY), None))
-        .size
-        .width;
-    let min_height = node
-        .measure(state, env, ProposalSize::new(None, Some(0.0)))
-        .size
-        .height;
-    let max_height = node
-        .measure(state, env, ProposalSize::new(None, Some(f32::INFINITY)))
-        .size
-        .height;
-
-    for (axis, min, max) in [
-        ("width", min_width, max_width),
-        ("height", min_height, max_height),
-    ] {
-        if min > max {
-            use core::fmt::Write as _;
-            let _ = writeln!(
-                report,
-                "  {:indent$}{} {axis}: minimum {min} exceeds maximum {max}",
-                "",
-                node.kind(),
-                indent = depth * 2
-            );
-        }
-    }
 }

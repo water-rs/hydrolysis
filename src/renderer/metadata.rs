@@ -149,6 +149,7 @@ impl HydrolysisRenderer {
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let blur = f64::from(shadow.radius.max(0.0));
+        let corner_radius = f64::from(shadow.corner_radius.max(0.0));
         let offset_x = f64::from(shadow.offset.x);
         let offset_y = f64::from(shadow.offset.y);
         let shadow_rect = vello::kurbo::Rect::new(
@@ -163,7 +164,7 @@ impl HydrolysisRenderer {
             ctx.transform,
             shadow_rect,
             shadow_color,
-            blur,
+            corner_radius,
             blur,
         );
         render_content(renderer);
@@ -183,29 +184,22 @@ impl HydrolysisRenderer {
         let should_focus = renderer.read_signal(&value.0);
         let start = renderer.text_editing.text_input_targets.len();
         render_content(renderer);
-        let end = renderer.text_editing.text_input_targets.len();
-        let focus_target_count = end - start;
-        assert!(
-            focus_target_count == 1,
-            "hydrolysis .focused() requires exactly one TextField or SecureField in the wrapped subtree, found {focus_target_count}"
-        );
-        let target = renderer
-            .text_editing
-            .text_input_targets
-            .get_mut(start)
-            .expect("hydrolysis focused metadata missing registered text input target");
-        assert!(
-            target.focus_binding.is_none(),
-            "hydrolysis does not allow multiple .focused() modifiers to target the same control"
-        );
-        target.focus_binding = Some(value.0.clone());
-        let target_key = target.interaction_key.clone();
+        renderer.wire_focused_target(value, should_focus, start);
+    }
 
-        if should_focus {
-            renderer.set_focused_text_input_key(Some(target_key));
-        } else if renderer.text_editing.is_focused(&target_key) {
-            renderer.set_focused_text_input_key(None);
-        }
+    /// The semantic counterpart of [`Self::apply_focused`]: the same focus
+    /// wiring over the text-input targets the semantic walk registered, with
+    /// no renderer in hand.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn apply_focused_semantic(
+        renderer: &mut SemanticCore,
+        value: &Focused,
+        render_content: impl FnOnce(&mut SemanticCore),
+    ) {
+        let should_focus = renderer.read_signal(&value.0);
+        let start = renderer.text_editing.text_input_targets.len();
+        render_content(renderer);
+        renderer.wire_focused_target(value, should_focus, start);
     }
 
     /// Render the given content and, when hit-testing is disabled, truncate every
@@ -317,9 +311,19 @@ impl HydrolysisRenderer {
                 None
             } else {
                 node.add_action(AccessibilityAction::Click);
-                let activation_point = accessibility_activation_point(bounds);
-                Some(AccessibilityActionTarget::PointerPrimaryClick {
-                    point: activation_point,
+                // Direct semantic activation: invoke the gesture's own action
+                // with the same layered environment the pointer path uses.
+                let captured_env = env.clone();
+                let action = Rc::clone(&effect.action);
+                Some(AccessibilityActionTarget::Activate {
+                    action: Rc::new(RefCell::new(
+                        move |_renderer: &mut crate::renderer::SemanticCore,
+                              runtime_env: &Environment| {
+                            let action_env = captured_env.layered_on(runtime_env);
+                            action.borrow_mut()(&action_env);
+                            true
+                        },
+                    )),
                 })
             };
             let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
@@ -345,7 +349,7 @@ impl HydrolysisRenderer {
             let color_signal = style.state_layer_color.resolve(env);
             let color = resolved_color_to_peniko(renderer.read_signal(&color_signal));
             let interaction = local_interaction_state(interaction, ctx.hit_transform);
-            let theme = crate::widgets::util::widget_theme(env);
+            let theme = renderer.theme();
             let mut draw = renderer.draw_context(ctx);
             theme.draw_interaction_state_layer(
                 &mut draw,
@@ -391,6 +395,52 @@ impl HydrolysisRenderer {
             return;
         }
         render_content(renderer);
+    }
+
+    /// The semantic counterpart of [`Self::apply_gesture_observer`]: the tap's
+    /// own accessibility node — role, label, `Click` → [`AccessibilityActionTarget::Activate`],
+    /// or `disabled` — with no bounds, no pointer or gesture targets, and no
+    /// interaction state layer. The content walk stays the caller's, wrapped
+    /// in the same descendant-exclusion suppression the rendered path applies.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn emit_gesture_observer_accessibility(
+        renderer: &mut SemanticCore,
+        env: &Environment,
+        effect: &GestureObserverEffect,
+    ) {
+        let disabled = env
+            .get::<waterui_core::interaction::Disabled>()
+            .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
+        if matches!(effect.gesture, Gesture::Tap(_)) && env.get::<AccessibilityRole>().is_some() {
+            let mut node = AccessibilityNode::new(
+                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+            );
+            if let Some(label) =
+                renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+            {
+                node.set_label(label);
+            }
+            node.add_action(AccessibilityAction::Focus);
+            let action_target = if disabled {
+                node.set_disabled();
+                None
+            } else {
+                node.add_action(AccessibilityAction::Click);
+                let captured_env = env.clone();
+                let action = Rc::clone(&effect.action);
+                Some(AccessibilityActionTarget::Activate {
+                    action: Rc::new(RefCell::new(
+                        move |_renderer: &mut crate::renderer::SemanticCore,
+                              runtime_env: &Environment| {
+                            let action_env = captured_env.layered_on(runtime_env);
+                            action.borrow_mut()(&action_env);
+                            true
+                        },
+                    )),
+                })
+            };
+            let _ = renderer.register_accessibility_node_semantic(node, env, action_target);
+        }
     }
 
     /// Register the hover-enter/move/exit target for `handler`, then render the
@@ -505,17 +555,21 @@ enum RegularClipShape {
 /// circular and a fully-rounded shape is a stadium rather than an ellipse.
 fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
     let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let uniform = |radius: f32| {
-        let corner = f64::from(radius.clamp(0.0, 0.5)) * min_side;
+    let rounded = |corner: f64| {
         Some(RegularClipShape::RoundedRect {
             rect: bounds,
             corner_width: corner,
             corner_height: corner,
         })
     };
+    let uniform = |radius: f32| rounded(f64::from(radius.clamp(0.0, 0.5)) * min_side);
+    // A fixed radius is already a length in points; only the
+    // half-shorter-side ceiling applies.
+    let fixed = |radius: f32| rounded(f64::from(radius.max(0.0)).min(min_side / 2.0));
     match kind {
         ShapeKind::Rect => Some(RegularClipShape::Rect(bounds)),
         ShapeKind::RoundedRect { corner_radius } => uniform(corner_radius),
+        ShapeKind::FixedRoundedRect { corner_radius } => fixed(corner_radius),
         ShapeKind::Capsule => uniform(0.5),
         // A circle is *inscribed* in the bounds, so only a square one is a
         // rounded rect: elsewhere `uniform(0.5)` describes a stadium filling
@@ -528,6 +582,7 @@ fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<Regula
         ShapeKind::Circle
         | ShapeKind::Ellipse
         | ShapeKind::UnevenRoundedRect { .. }
+        | ShapeKind::FixedUnevenRoundedRect { .. }
         | ShapeKind::CustomPath => None,
     }
 }
@@ -577,6 +632,59 @@ mod clip_shape_tests {
             kind_clip_shape(ShapeKind::Capsule, bounds),
             Some(RegularClipShape::RoundedRect { .. })
         ));
+    }
+
+    /// A fixed radius is a length in points: 12 stays 12 on a wide bar, and
+    /// only the half-shorter-side ceiling cuts it down.
+    #[test]
+    fn a_fixed_radius_clips_at_its_own_length_up_to_the_ceiling() {
+        let wide = Rect::new(0.0, 0.0, 200.0, 50.0);
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 12.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 12.0).abs() < f64::EPSILON
+                && (corner_height - 12.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 40.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 25.0).abs() < f64::EPSILON
+                && (corner_height - 25.0).abs() < f64::EPSILON
+        ));
+    }
+
+    /// Per-corner radii cannot be a uniform `RoundedRect` clip.
+    #[test]
+    fn a_fixed_uneven_kind_stays_on_the_path_mask() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert!(
+            kind_clip_shape(
+                ShapeKind::FixedUnevenRoundedRect {
+                    top_left: 0.0,
+                    top_right: 16.0,
+                    bottom_left: 0.0,
+                    bottom_right: 16.0,
+                },
+                bounds
+            )
+            .is_none()
+        );
     }
 }
 

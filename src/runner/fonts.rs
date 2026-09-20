@@ -15,8 +15,6 @@
 use parley::fontique::{Collection, FallbackKey, FamilyId, FontInfo, GenericFamily, Script};
 use waterui_text::FontCollection;
 
-use crate::renderer::HydrolysisRenderer;
-
 /// Font-family buckets recognized from WaterUI's bundled resource fonts.
 #[derive(Default)]
 pub(super) struct ResourceFontFamilies {
@@ -252,14 +250,14 @@ pub(super) fn native_resource_fonts() -> parley::FontContext {
     font_cx
 }
 
-/// Gives `renderer` the application's fonts to shape with.
+/// Gives `core` the application's fonts to shape with.
 ///
 /// Every window shapes against the one collection the runner installed, so a
 /// popup opened later measures text exactly as the window that opened it does.
 /// The renderer keeps its own copy because it shapes across worker threads and
 /// `parley`'s contexts are not `Sync`; the faces in it are the same ones.
-pub(super) fn seed_renderer(renderer: &mut HydrolysisRenderer, fonts: &FontCollection) {
-    *renderer.state_mut().text_fonts_mut() = fonts.use_fonts(|fonts| fonts.clone());
+pub(super) fn seed_core(core: &mut crate::renderer::SemanticCore, fonts: &FontCollection) {
+    *core.state_mut().text_fonts_mut() = fonts.use_fonts(|fonts| fonts.clone());
 }
 
 #[cfg(test)]

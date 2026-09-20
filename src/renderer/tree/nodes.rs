@@ -17,6 +17,8 @@ pub(crate) struct RetainedSubview {
     node: Option<RenderNode>,
     /// The size the node was last laid out at, so layout re-runs only on a change.
     laid_out: Size,
+    /// The selected offer, independent of the cached frame size.
+    laid_out_proposal: Option<ProposalSize>,
     /// A structural patch replaced content inside the retained node, so the new
     /// subtree must be laid out even when its outer rect did not change.
     needs_layout: bool,
@@ -32,6 +34,7 @@ impl RetainedSubview {
             source: Some(source),
             node: None,
             laid_out: Size::zero(),
+            laid_out_proposal: None,
             needs_layout: true,
             default_a11y_label: None,
         }
@@ -40,7 +43,7 @@ impl RetainedSubview {
     /// Eagerly build the sub-view's node now (the caller has the renderer). Used
     /// at tree-build time so the later measure path — which only has `&mut
     /// HydroState`, not the renderer — can measure the already-built node.
-    pub(crate) fn ensure_built(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn ensure_built(&mut self, renderer: &mut SemanticCore, env: &Environment) {
         if self.node.is_none()
             && let Some(view) = self.source.take()
         {
@@ -72,6 +75,11 @@ impl RetainedSubview {
         self.source = Some(f(source));
     }
 
+    /// Whether the sub-view's node has been built.
+    pub(crate) fn is_built(&self) -> bool {
+        self.node.is_some()
+    }
+
     /// Measure the sub-view's intrinsic size (building it once if needed), the
     /// node analogue of [`measure_view_intrinsic`] at the unspecified proposal.
     /// For the render path, which has the renderer to build on first use.
@@ -81,18 +89,28 @@ impl RetainedSubview {
         env: &Environment,
     ) -> Size {
         self.ensure_built(renderer, env);
-        self.measure_built(&mut renderer.state, env)
+        if let Some(node) = &mut self.node {
+            node.prepare_for_measure(renderer);
+        }
+        let theme = renderer.theme();
+        self.measure_built(&mut renderer.state, env, &theme)
     }
 
     /// Measure an already-built sub-view's intrinsic size with only `&mut
     /// HydroState` — the measure-path analogue (no renderer to build on). The node
     /// must already be built (via [`Self::ensure_built`]); an unbuilt one measures
     /// as zero, matching an empty label.
-    pub(crate) fn measure_built(&self, state: &mut HydroState, env: &Environment) -> Size {
+    pub(crate) fn measure_built(
+        &self,
+        state: &mut HydroState,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> Size {
         let Some(node) = &self.node else {
             return Size::zero();
         };
-        node.measure(state, env, ProposalSize::UNSPECIFIED).size
+        node.measure(state, env, theme, ProposalSize::UNSPECIFIED)
+            .size
     }
 
     /// Measure an already-built sub-view at a concrete proposal — the variant for
@@ -103,12 +121,13 @@ impl RetainedSubview {
         &self,
         state: &mut HydroState,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> Size {
         let Some(node) = &self.node else {
             return Size::zero();
         };
-        node.measure(state, env, proposal).size
+        node.measure(state, env, theme, proposal).size
     }
 
     /// Patch and measure a retained sub-view under a proposal, returning its
@@ -127,10 +146,22 @@ impl RetainedSubview {
             return (Size::zero(), StretchAxis::None);
         };
         self.needs_layout |= Self::patch_built(node, renderer);
+        node.prepare_for_measure(renderer);
+        let theme = renderer.theme();
         (
-            node.measure(&mut renderer.state, env, proposal).size,
+            node.measure(&mut renderer.state, env, &theme, proposal)
+                .size,
             node.stretch(),
         )
+    }
+
+    /// Run the layout-time prepare pass over the sub-view's built node, if any.
+    /// Forwards to [`RenderNode::prepare_for_measure`]; an unbuilt sub-view has
+    /// nothing to prepare.
+    pub(crate) fn prepare_for_measure(&mut self, renderer: &mut HydrolysisRenderer) {
+        if let Some(node) = &mut self.node {
+            node.prepare_for_measure(renderer);
+        }
     }
 
     /// Stretch contract of an already-built retained sub-view.
@@ -146,6 +177,21 @@ impl RetainedSubview {
         }
     }
 
+    /// Emit this sub-view's accessibility nodes for the semantic walk: builds
+    /// the node on first use, applies pending structural patches (a `Dynamic`
+    /// inside a widget label is its own retained tree), then walks it. No
+    /// layout and no encode — the sub-view emits exactly the nodes it would
+    /// under a rendered flush, minus bounds.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn emit_accessibility(&mut self, renderer: &mut SemanticCore, env: &Environment) {
+        self.ensure_built(renderer, env);
+        let Some(node) = &mut self.node else {
+            return;
+        };
+        let _ = Self::patch_built(node, renderer);
+        node.emit_accessibility(renderer, env);
+    }
+
     /// Apply pending reactive structural changes (`Dynamic` content, collection
     /// membership) inside a built sub-view tree. The window refresh pump only
     /// patches the window's own node tree — a widget-owned sub-view is its own
@@ -154,7 +200,7 @@ impl RetainedSubview {
     /// navigation split's sidebar) never applies its pending update. A structural
     /// change is reported to the renderer so the next refresh frame runs the
     /// full prune cycle for the dropped subtrees' animation/measurement slots.
-    fn patch_built(node: &mut RenderNode, renderer: &mut HydrolysisRenderer) -> bool {
+    fn patch_built(node: &mut RenderNode, renderer: &mut SemanticCore) -> bool {
         let structural = node.patch(renderer);
         if structural {
             renderer.note_subview_structural_change();
@@ -168,7 +214,7 @@ impl RetainedSubview {
     /// Unlike [`Self::patch_built`], this does not carry the change into another
     /// frame: the parent tree's current patch result already owns the structural
     /// bookkeeping and will lay out the updated child immediately.
-    fn patch_for_parent(&mut self, renderer: &mut HydrolysisRenderer) -> bool {
+    fn patch_for_parent(&mut self, renderer: &mut SemanticCore) -> bool {
         let structural = self.node.as_mut().is_some_and(|node| node.patch(renderer));
         self.needs_layout |= structural;
         structural
@@ -182,6 +228,7 @@ impl RetainedSubview {
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
         env: &Environment,
+        proposal: ProposalSize,
         rect: vello::kurbo::Rect,
     ) {
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -192,12 +239,14 @@ impl RetainedSubview {
             return;
         };
         let structural = Self::patch_built(node, renderer);
+        node.prepare_for_measure(renderer);
         #[allow(clippy::cast_possible_truncation)]
         let size = Size::new(rect.width() as f32, rect.height() as f32);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         let child_ctx = ctx.child(
@@ -218,6 +267,7 @@ impl RetainedSubview {
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
         env: &Environment,
+        proposal: ProposalSize,
         size: Size,
     ) {
         if size.width <= 0.0 || size.height <= 0.0 {
@@ -228,10 +278,12 @@ impl RetainedSubview {
             return;
         };
         let structural = Self::patch_built(node, renderer);
+        node.prepare_for_measure(renderer);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         node.flush(renderer, ctx, env);
@@ -256,10 +308,13 @@ impl RetainedSubview {
             return NavigationCapturedScene::default();
         };
         let structural = Self::patch_built(node, renderer);
+        node.prepare_for_measure(renderer);
         self.needs_layout |= structural;
-        if self.needs_layout || size != self.laid_out {
-            node.layout(renderer, env, size);
+        let proposal = ProposalSize::new(Some(size.width), Some(size.height));
+        if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
+            node.layout(renderer, env, proposal, size);
             self.laid_out = size;
+            self.laid_out_proposal = Some(proposal);
             self.needs_layout = false;
         }
         let local_ctx = RenderContext::with_transforms(
@@ -268,9 +323,14 @@ impl RetainedSubview {
             vello::kurbo::Affine::IDENTITY,
         );
         renderer.begin_navigation_scene_capture();
+        renderer.push_lazy_viewport(LazyViewport {
+            bounds: local_ctx.bounds,
+            transform: local_ctx.transform,
+        });
         core::mem::swap(renderer.scene_mut(), &mut scene);
         node.flush(renderer, local_ctx, env);
         core::mem::swap(renderer.scene_mut(), &mut scene);
+        renderer.pop_lazy_viewport("retained scene capture");
         renderer.finish_navigation_scene_capture(scene)
     }
 
@@ -340,9 +400,16 @@ impl<K: Eq + core::hash::Hash + Clone> VisibleSubviewCache<K> {
         self.entries.get(key)
     }
 
+    /// Run the layout-time prepare pass over every currently retained item.
+    pub(crate) fn prepare_for_measure(&mut self, renderer: &mut HydrolysisRenderer) {
+        for entry in self.entries.values_mut() {
+            entry.prepare_for_measure(renderer);
+        }
+    }
+
     /// Patches every currently retained (therefore visible) item before its
     /// virtualized parent is measured.
-    pub(crate) fn patch_for_parent(&mut self, renderer: &mut HydrolysisRenderer) -> bool {
+    pub(crate) fn patch_for_parent(&mut self, renderer: &mut SemanticCore) -> bool {
         self.entries.values_mut().fold(false, |changed, entry| {
             entry.patch_for_parent(renderer) | changed
         })
@@ -375,6 +442,11 @@ pub(crate) struct WrapperNode {
 
 /// The type-erased behavior of one retained native widget state allocation.
 pub(crate) trait WidgetBehavior {
+    /// The default layout priority of this native leaf.
+    fn priority(&self) -> i32 {
+        0
+    }
+
     /// Re-renders the leaf from its retained state.
     fn render(
         self: Rc<Self>,
@@ -389,7 +461,24 @@ pub(crate) trait WidgetBehavior {
         state: &mut HydroState,
         proposal: ProposalSize,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> ViewDimensions;
+
+    /// Runs the leaf's layout-time prepare step: applying theme paint that
+    /// could not be resolved at tree-build time (build contexts carry no
+    /// theme) and building the retained sub-views the measure path then reads.
+    /// [`RenderNode::prepare_for_measure`] runs this over a subtree once per
+    /// layout or measure entry, while a `&mut HydrolysisRenderer` — hence the
+    /// theme — is in hand, before any node below it is measured. A semantic
+    /// runtime never runs this pass, so no paint reaches it.
+    fn prepare(&self, _renderer: &mut HydrolysisRenderer, _env: &Environment) {}
+
+    /// Emits this leaf's accessibility node(s) for the semantic walk — the
+    /// same tree `render` produces under a `RenderContext`, with no bounds and
+    /// no draw or hit-target work. The default emits nothing: leaves with no
+    /// semantics (spacer, divider, gradient, …) need no override.
+    #[cfg(feature = "accessibility")]
+    fn emit_accessibility(self: Rc<Self>, _renderer: &mut SemanticCore, _env: &Environment) {}
 }
 
 /// A native widget leaf rendered every flush from one retained state allocation.
@@ -535,8 +624,9 @@ pub(crate) struct ScrollNode {
     pub(super) controller: Option<ScrollController<Point>>,
     pub(super) applied_scroll_generation: Cell<i32>,
     /// Scroll handle bound at layout (offset persists across frames; scroll
-    /// events mutate it via the registered scroll target).
-    pub(super) handle: Option<ScrollHandle>,
+    /// events mutate it via the registered scroll target). `RefCell` because
+    /// the semantic accessibility walk also (re)binds it — a walk takes `&self`.
+    pub(super) handle: RefCell<Option<ScrollHandle>>,
     /// Full content extent the child is laid out at.
     pub(super) content_size: Size,
     /// The scroll viewport (the node's own bounds).
@@ -593,8 +683,6 @@ pub(crate) struct ViewEffectNode {
     /// The effect's content, built once as a persistent node (recursed into, not
     /// baked), re-rendered into the input texture each flush.
     pub(super) child: RefCell<RenderNode>,
-    /// The size `child` was last laid out at, so layout re-runs only on a change.
-    pub(super) laid_out: Cell<Size>,
     pub(super) env: Environment,
 }
 
@@ -823,8 +911,8 @@ impl TextNode {
     #[cfg(feature = "accessibility")]
     pub(super) fn emit_accessibility(
         &self,
-        renderer: &mut HydrolysisRenderer,
-        ctx: RenderContext,
+        renderer: &mut crate::renderer::SemanticCore,
+        ctx: Option<RenderContext>,
         styled: &StyledStr,
         env: &Environment,
     ) {
@@ -843,12 +931,7 @@ impl TextNode {
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
         );
         node.set_label(label);
-        let _ = renderer.register_accessibility_node(
-            node,
-            transformed_rect(ctx.hit_transform, ctx.bounds),
-            env,
-            None,
-        );
+        let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
     }
 
     #[cfg(not(feature = "accessibility"))]
@@ -858,8 +941,8 @@ impl TextNode {
     )]
     pub(super) fn emit_accessibility(
         &self,
-        _renderer: &mut HydrolysisRenderer,
-        _ctx: RenderContext,
+        _renderer: &mut crate::renderer::SemanticCore,
+        _ctx: Option<RenderContext>,
         _styled: &StyledStr,
         _env: &Environment,
     ) {
@@ -879,8 +962,8 @@ impl TextNode {
 /// nothing, so `.a11y_label(…)` still wins.
 #[cfg(feature = "accessibility")]
 pub(super) fn emit_graphics_image_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     env: &Environment,
     default_label: Option<String>,
 ) {
@@ -896,18 +979,13 @@ pub(super) fn emit_graphics_image_accessibility(
     if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
         node.set_label(label);
     }
-    let _ = renderer.register_accessibility_node(
-        node,
-        transformed_rect(ctx.hit_transform, ctx.bounds),
-        env,
-        None,
-    );
+    let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
 }
 
 #[cfg(not(feature = "accessibility"))]
 pub(super) fn emit_graphics_image_accessibility(
-    _renderer: &mut HydrolysisRenderer,
-    _ctx: RenderContext,
+    _renderer: &mut crate::renderer::SemanticCore,
+    _ctx: Option<RenderContext>,
     _env: &Environment,
     _default_label: Option<String>,
 ) {

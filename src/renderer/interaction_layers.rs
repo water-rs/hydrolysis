@@ -311,7 +311,7 @@ impl InteractionLayerHandles {
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     /// Applies any deferred press fade-outs and reports whether more
     /// animation frames are needed for pending releases.
     pub(crate) fn flush_interaction_releases(&mut self, now: Instant) -> bool {

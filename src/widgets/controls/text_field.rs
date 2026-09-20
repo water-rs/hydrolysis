@@ -42,7 +42,11 @@ impl TextFieldRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
@@ -69,7 +73,11 @@ impl SecureFieldRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
@@ -82,7 +90,7 @@ use accesskit::{
 };
 
 use crate::renderer::local_interaction_state;
-use crate::widgets::util::{widget_disabled, widget_theme};
+use crate::widgets::util::widget_disabled;
 
 const FLOATING_LABEL_SCALE: f64 = 0.75;
 const CONTENT_VISIBLE_PORTION: f32 = 5.0 / 9.0;
@@ -91,14 +99,24 @@ const TEXT_FIELD_LABEL_ANIMATION_KEY: usize = 1;
 const SECURE_FIELD_LABEL_ANIMATION_KEY: usize = 2;
 
 impl HydroNativeView for Native<ResolvedTextFieldConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_text_field_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_text_field_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
 impl HydroNativeView for Native<SecureFieldConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_secure_field_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_secure_field_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -132,7 +150,7 @@ pub(crate) fn render_text_field_parts(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let input_metrics = theme.input_field_metrics();
     ctx.renderer_mut()
         .set_text_caret_motion(theme.text_caret_motion());
@@ -445,7 +463,7 @@ pub(crate) fn render_secure_field_parts(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let input_metrics = theme.input_field_metrics();
     let disabled = {
         let signal = widget_disabled(env);
@@ -690,13 +708,15 @@ pub(crate) fn measure_text_field_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     ViewDimensions::new(measure_text_field_intrinsic_with_label_size(
         &render_state.config,
         label_size,
         state,
         env,
+        theme,
     ))
 }
 
@@ -708,13 +728,15 @@ pub(crate) fn measure_secure_field_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     ViewDimensions::new(measure_secure_field_intrinsic_with_label_size(
         &render_state.config,
         label_size,
         state,
         env,
+        theme,
     ))
 }
 
@@ -783,7 +805,7 @@ fn flush_material_label(
     // the floating label sub-view flushes visual-only.
     ctx.renderer_mut()
         .with_suppressed_accessibility(|renderer| {
-            label_view.flush_in_ctx(renderer, child, env, size);
+            label_view.flush_in_ctx(renderer, child, env, ProposalSize::UNSPECIFIED, size);
         });
 }
 
@@ -843,6 +865,202 @@ fn material_input_cursor_rect(
         (text_rect.y0, text_rect.y0 + fallback_height)
     };
     vello::kurbo::Rect::new(x0, y0, x1, y1.min(text_rect.y1))
+}
+
+/// Emits a retained text field's accessibility node and text-input target for
+/// the semantic walk — the same node `render_text_field_parts` registers, with
+/// no bounds. The input target gets a real text layout (shaped from the
+/// environment's font settings — text shaping needs no theme and no GPU) so
+/// keyboard events reaching the focused field edit against a live selection,
+/// and zero rects where the rendered path takes its layout's.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_text_field_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<TextFieldRenderState>>,
+    env: &Environment,
+) {
+    if env
+        .get::<waterui::accessibility::AccessibilityHidden>()
+        .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden)
+    {
+        return;
+    }
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
+    let disabled = {
+        let signal = widget_disabled(env);
+        renderer.read_signal(&signal)
+    };
+    let mut state = state.borrow_mut();
+    let (label, value_binding, prompt_signal, selection_menu, line_limit_raw) = {
+        let text_field = &state.config;
+        (
+            text_field.label.clone(),
+            text_field.value.clone(),
+            text_field.prompt.content.clone(),
+            text_field.selection_menu.clone(),
+            text_field.line_limit,
+        )
+    };
+    let default_accessibility_label = renderer.accessibility_label_from_label(&label, env);
+    let line_limit = line_limit_raw.map(NonZeroUsize::get);
+    {
+        let prompt = renderer.read_signal(&prompt_signal).to_plain().to_string();
+        let value = renderer.read_signal(&value_binding).to_plain().to_string();
+        let default_label =
+            default_accessibility_label.or_else(|| (!prompt.is_empty()).then_some(prompt.clone()));
+        let mut node = AccessibilityNode::new(renderer.resolve_accessibility_role(
+            env,
+            if line_limit == Some(1) {
+                AccessibilityNodeRole::TextInput
+            } else {
+                AccessibilityNodeRole::MultilineTextInput
+            },
+        ));
+        let label = renderer.resolve_accessibility_label(env, default_label);
+        if let Some(label) = label {
+            node.set_label(label);
+        }
+        if !prompt.is_empty() {
+            node.set_placeholder(prompt);
+        }
+        if !value.is_empty() {
+            node.set_value(value.clone());
+        }
+        if disabled {
+            node.set_disabled();
+        } else {
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            node.add_action(AccessibilityAction::SetValue);
+        }
+        if let Some(node_id) = renderer.register_accessibility_node_semantic(
+            node,
+            env,
+            (!disabled).then_some(AccessibilityActionTarget::TextField {
+                value: value_binding.clone(),
+                line_limit,
+            }),
+        ) {
+            renderer.push_pending_text_input_accessibility_node(node_id);
+        }
+        if !disabled {
+            let layout = HydrolysisRenderer::build_text_layout(
+                renderer.state_mut(),
+                StyledStr::plain(value),
+                HorizontalAlignment::Leading,
+                env,
+                None,
+            );
+            renderer.register_text_input_target(TextInputTargetRegistration {
+                interaction_key,
+                modal: env
+                    .get::<ModalInteraction>()
+                    .is_some_and(ModalInteraction::is_active),
+                bounds: vello::kurbo::Rect::ZERO,
+                cursor_area: vello::kurbo::Rect::ZERO,
+                text_bounds: vello::kurbo::Rect::ZERO,
+                text_clip_bounds: vello::kurbo::Rect::ZERO,
+                content_alpha: 1.0,
+                layout,
+                purpose: TextInputPurpose::Normal,
+                model: TextInputModel::TextField {
+                    value: value_binding.clone(),
+                    line_limit,
+                    selection_menu,
+                },
+                selection: Rc::clone(&state.selection_slot),
+            });
+        }
+    }
+    // The floating label is a real node subtree in the retained tree — emit
+    // its semantics exactly as the unsuppressed rendered flush does.
+    state.label_view.emit_accessibility(renderer, env);
+}
+
+/// Emits a retained secure field's accessibility node and text-input target
+/// for the semantic walk — the same node `render_secure_field_parts`
+/// registers, with no bounds.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_secure_field_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<SecureFieldRenderState>>,
+    env: &Environment,
+) {
+    if env
+        .get::<waterui::accessibility::AccessibilityHidden>()
+        .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden)
+    {
+        return;
+    }
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
+    let disabled = {
+        let signal = widget_disabled(env);
+        renderer.read_signal(&signal)
+    };
+    let mut state = state.borrow_mut();
+    let (label, value_binding) = {
+        let secure_field = &state.config;
+        (secure_field.label.clone(), secure_field.value.clone())
+    };
+    let default_accessibility_label = renderer.accessibility_label_from_label(&label, env);
+    {
+        let secure_len = renderer
+            .read_signal(&value_binding)
+            .expose()
+            .chars()
+            .count();
+        let mut node = AccessibilityNode::new(
+            renderer.resolve_accessibility_role(env, AccessibilityNodeRole::PasswordInput),
+        );
+        let label = renderer.resolve_accessibility_label(env, default_accessibility_label);
+        if let Some(label) = label {
+            node.set_label(label);
+        }
+        node.set_value("*".repeat(secure_len));
+        if disabled {
+            node.set_disabled();
+        } else {
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            node.add_action(AccessibilityAction::SetValue);
+        }
+        if let Some(node_id) = renderer.register_accessibility_node_semantic(
+            node,
+            env,
+            (!disabled).then_some(AccessibilityActionTarget::SecureField {
+                value: value_binding.clone(),
+            }),
+        ) {
+            renderer.push_pending_text_input_accessibility_node(node_id);
+        }
+        if !disabled {
+            let layout = HydrolysisRenderer::build_text_layout(
+                renderer.state_mut(),
+                StyledStr::plain("*".repeat(secure_len)),
+                HorizontalAlignment::Leading,
+                env,
+                None,
+            );
+            renderer.register_text_input_target(TextInputTargetRegistration {
+                interaction_key,
+                modal: env
+                    .get::<ModalInteraction>()
+                    .is_some_and(ModalInteraction::is_active),
+                bounds: vello::kurbo::Rect::ZERO,
+                cursor_area: vello::kurbo::Rect::ZERO,
+                text_bounds: vello::kurbo::Rect::ZERO,
+                text_clip_bounds: vello::kurbo::Rect::ZERO,
+                content_alpha: 1.0,
+                layout,
+                purpose: TextInputPurpose::Password,
+                model: TextInputModel::SecureField {
+                    value: value_binding.clone(),
+                },
+                selection: Rc::clone(&state.selection_slot),
+            });
+        }
+    }
+    state.label_view.emit_accessibility(renderer, env);
 }
 
 #[cfg(test)]

@@ -7,51 +7,39 @@
 //! - [`fonts`]: resource font registration and CJK fallbacks
 //! - [`diagnostics`]: opt-in frame timing reports
 
-use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::{
-    cell::{Cell, RefCell},
-    collections::VecDeque,
-    rc::Rc,
-    sync::atomic::{AtomicUsize, Ordering},
-    sync::{Arc, mpsc},
-};
+use std::cell::Cell;
+use std::time::Duration;
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 #[cfg(feature = "winit")]
 #[cfg(target_os = "linux")]
 use std::{process::Command, str};
 
-#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+#[cfg(feature = "accessibility")]
 use accesskit::{
     ActionRequest as AccessibilityActionRequest, TreeUpdate as AccessibilityTreeUpdate,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use executor_core::{
-    LocalExecutor,
-    async_task::{AsyncTask, Runnable},
-    try_init_local_executor,
-};
+use executor_core::try_init_local_executor;
 use nami::Signal as _;
 use waterui::app::App;
 use waterui::component::table::TableConfig;
 use waterui::graphics::Color;
 use waterui::theme;
-#[cfg(not(target_arch = "wasm32"))]
 use waterui::window::WindowManager;
 use waterui::window::{Window, WindowBackground};
-#[cfg(not(target_arch = "wasm32"))]
 use waterui_core::AnyView;
 use waterui_core::Environment;
 use waterui_core::Native;
-#[cfg(not(target_arch = "wasm32"))]
 use waterui_core::handler::AnyViewBuilder;
 use waterui_core::view::Hook;
-#[cfg(not(target_arch = "wasm32"))]
 use waterui_text::FontCollection;
 
 mod diagnostics;
+mod executor;
 mod fonts;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
+mod semantic;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
@@ -64,9 +52,11 @@ mod winit_runner;
 
 use diagnostics::*;
 #[cfg(not(target_arch = "wasm32"))]
+use executor::*;
 use fonts::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use headless::{HeadlessPumpResult, HeadlessRuntime};
+pub use semantic::{SemanticPumpResult, SemanticRuntime};
 use window::*;
 // Frame and tree profiles are published to the inspector endpoint, which exists
 // only where `waterui::inspector` does.
@@ -74,7 +64,8 @@ use window::*;
 mod inspector;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use window::{FrameCounters, FramePhases, FrameProfile, HeadlessSnapshot};
+pub use window::HeadlessSnapshot;
+pub use window::{FrameCounters, FramePhases, FrameProfile};
 
 use crate::env::{parse_bool_env, parse_positive_u64_env};
 use crate::platform::{InputEvent, KeyState, PlatformWindow};
@@ -83,7 +74,6 @@ use crate::platform::{OffscreenGpuContext, OffscreenWindow};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::readback::readback_texture_rgba8;
 use crate::renderer::{HydrolysisRenderer, HydrolysisWindowOrigin, KeyDelivery};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::renderer::{HydrolysisTextContextMenuMode, PopupWindowManager};
 use crate::time::Instant;
 
@@ -147,7 +137,6 @@ fn install_native_component_hooks(env: &mut Environment) {
     }));
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn install_headless_window_managers(
     env: &mut Environment,
     pending_windows: Rc<RefCell<Vec<Window>>>,
@@ -164,7 +153,7 @@ fn install_headless_window_managers(
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "winit")))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     let inspector = init_main_thread_executors();
     let inspector_probe = inspector
         .as_ref()
@@ -174,7 +163,7 @@ pub fn run(app: App) {
     // Keep a handle on the executor: the render loop below has to drive it, or
     // any async work a view starts (a `GpuView`'s `setup`, above all) never
     // completes and the frame is rendered against uninitialized state.
-    let local_executor = headless::HeadlessMainThreadExecutor::thread_shared();
+    let local_executor = executor::HeadlessMainThreadExecutor::thread_shared();
     let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
         local_executor.clone(),
         inspector_probe,
@@ -191,8 +180,11 @@ pub fn run(app: App) {
     install_native_component_hooks(&mut env);
     install_headless_window_managers(&mut env, Rc::clone(&pending_window_queue));
     env.insert(HydrolysisTextContextMenuMode::Overlay);
+    crate::theme::install_default_tokens(&mut env);
+    style.install_tokens(&mut env);
+    let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
     env.insert(waterui_core::ViewRenderer::new(
-        crate::view_renderer::HydrolysisViewRenderer::default(),
+        crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
     ));
     // The application's fonts, discovered once. Every window's renderer is
     // seeded from this collection, and a self-drawn component that typesets
@@ -210,9 +202,9 @@ pub fn run(app: App) {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
         };
-        seed_renderer(&mut renderer, &fonts);
+        seed_core(&mut renderer, &fonts);
         let mut runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);
         render_window(&mut runtime, &env, &mut || local_executor.drain());
         pending_windows.extend(pending_window_queue.borrow_mut().drain(..));
@@ -220,15 +212,15 @@ pub fn run(app: App) {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     init_global_executor();
-    web_runner::run(app);
+    web_runner::run(app, style);
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "winit"))]
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     initialize_tracing_from_env();
-    winit_runner::run(app, init_main_thread_executors());
+    winit_runner::run(app, style, init_main_thread_executors());
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "winit"))]

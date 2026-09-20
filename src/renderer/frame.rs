@@ -32,6 +32,183 @@ pub(crate) fn scene_has_content(scene: &vello::Scene) -> bool {
     !encoding.is_empty() || !encoding.resources.glyph_runs.is_empty()
 }
 
+impl SemanticCore {
+    /// Whether the persistent render tree has been built. The view tree's `body()`
+    /// is dispatched recursively exactly once — on the first frame, when this is
+    /// `false`. Afterwards every change (reactive value, structural patch, scroll,
+    /// resize, interaction) is reflected by refreshing this retained tree, so the
+    /// runner routes any later rebuild request through the refresh pump instead of
+    /// re-running `build_content`.
+    #[must_use]
+    pub fn has_render_tree(&self) -> bool {
+        self.render_tree.is_some()
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &HydroState {
+        &self.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut HydroState {
+        &mut self.state
+    }
+
+    /// Drop cached `Dynamic` measurements whose node has left the retained tree.
+    ///
+    /// Shared by the two frames that can remove nodes: the one-time build and any
+    /// refresh that applied a structural patch.
+    pub(crate) fn prune_dynamic_measurements(&mut self, live: &FxHashSet<usize>) {
+        self.state
+            .measurement
+            .retain_dynamic_identities(|identity| live.contains(&identity));
+    }
+
+    /// Drop text-input focus / the selection drag when the target they name is
+    /// no longer emitted. Targets are pure-emission (rebuilt in flush order every
+    /// frame), so after any flush — rebuild or refresh — a previously focused
+    /// field may be gone. Both are held by stable identity, so this only asks
+    /// whether that identity still resolves; it can never mistake a different
+    /// field that moved into the old position for the focused one. Shared by both
+    /// frame paths.
+    pub(crate) fn validate_focused_text_input_after_flush(&mut self) {
+        let modal_active = self.hit_test.modal_interaction.is_some();
+        let focus_is_live = !self.text_editing.has_focus()
+            || self
+                .text_editing
+                .focused_target()
+                .is_some_and(|target| !modal_active || target.modal);
+        if !focus_is_live {
+            self.set_focused_text_input_key(None);
+        }
+        let keyboard_focus_is_live =
+            self.hit_test.keyboard_focus.as_ref().is_none_or(|focused| {
+                self.hit_test.pointer_targets.iter().any(|target| {
+                    (!modal_active || target.modal)
+                        && target
+                            .press_slot
+                            .as_ref()
+                            .is_some_and(|slot| &slot.key == focused)
+                }) || self.text_editing.text_input_targets.iter().any(|target| {
+                    (!modal_active || target.modal) && &target.interaction_key == focused
+                }) || {
+                    // A key resolved through the semantic focus link stays
+                    // live while its node emits — the semantic runtime
+                    // registers no pointer targets at all.
+                    #[cfg(feature = "accessibility")]
+                    {
+                        self.focus_node_for_key(focused).is_some()
+                    }
+                    #[cfg(not(feature = "accessibility"))]
+                    {
+                        false
+                    }
+                }
+            });
+        if !keyboard_focus_is_live {
+            self.set_keyboard_focus(None, false);
+        }
+        let selection_drag_is_live = self
+            .text_editing
+            .active_text_selection_drag
+            .as_ref()
+            .is_none_or(|drag| self.text_editing.index_of(&drag.target).is_some());
+        if !selection_drag_is_live {
+            self.text_editing.active_text_selection_drag = None;
+        }
+    }
+
+    /// The shared frame-trigger handle for closures that outlive a borrow of
+    /// the renderer (navigation controllers, GPU-surface invalidators, …).
+    pub(crate) fn frame_signals(&self) -> FrameSignals {
+        self.signals.clone()
+    }
+
+    pub fn request_redraw(&self) {
+        self.signals.request_redraw();
+    }
+
+    /// Schedules a full frame: every awake frame re-reads signals, runs
+    /// layout, and re-encodes the retained tree. Reactive updates and visual
+    /// values outside the reactive graph (a scroll offset, a scrollbar drag)
+    /// share this one path.
+    pub fn request_refresh(&self) {
+        self.signals.request_refresh();
+    }
+
+    pub fn take_redraw_request(&self) -> bool {
+        self.signals.take_redraw_request()
+    }
+
+    pub fn request_rebuild(&self) {
+        self.signals.request_rebuild();
+    }
+
+    #[must_use]
+    pub fn has_rebuild_request(&self) -> bool {
+        self.signals.has_rebuild_request()
+    }
+
+    pub fn request_next_frame_rebuild(&self) {
+        self.signals.request_next_frame_rebuild();
+    }
+
+    pub fn take_rebuild_request(&self) -> bool {
+        self.signals.take_rebuild_request()
+    }
+
+    #[must_use]
+    pub fn has_patch_request(&self) -> bool {
+        self.signals.has_patch_request()
+    }
+
+    pub fn take_patch_request(&self) -> bool {
+        self.signals.take_patch_request()
+    }
+
+    pub fn take_next_frame_rebuild_request(&self) -> bool {
+        self.signals.take_next_frame_rebuild_request()
+    }
+
+    /// Whether a state change has already been requested but not yet applied,
+    /// so the semantics the last flush produced are stale.
+    ///
+    /// This is the *unapplied* half of [`Self::has_scheduled_semantic_work`]:
+    /// a signal fired and asked for a patch or a rebuild, and the next flush
+    /// will show a different tree. It deliberately excludes work that merely
+    /// continues over future frames — animations, gesture deadlines, gliding
+    /// scrolls — because those never stop asking, so a caller that waits on
+    /// them waits forever. An observer that needs to see the current state
+    /// waits on this; one that needs the app to come fully to rest waits on
+    /// `has_scheduled_semantic_work`.
+    #[must_use]
+    pub fn has_pending_semantic_update(&self) -> bool {
+        self.signals.has_patch_request()
+            || self.signals.has_rebuild_request()
+            || self.signals.has_next_frame_rebuild_request()
+    }
+
+    /// Whether the renderer has scheduled work that will still change layout,
+    /// semantics, or reactive state on a future frame: pending patches or
+    /// rebuilds, active animations, armed gesture deadlines, or gliding smooth
+    /// scrolls.
+    ///
+    /// Visual-only redraw requests (caret blink, the visible-window present
+    /// cadence) are deliberately excluded: they repaint pixels without moving
+    /// semantic state, and a focused text caret blinks forever — including it
+    /// would make an app with a focused field never count as settled.
+    #[must_use]
+    pub fn has_scheduled_semantic_work(&self) -> bool {
+        self.has_pending_semantic_update()
+            || self.animations_active()
+            || self.next_gesture_deadline().is_some()
+            || self.has_gliding_smooth_scrolls()
+    }
+
+    pub(crate) fn measurement_cache_stats(&self) -> (u32, u32) {
+        self.state.measurement.stats()
+    }
+}
+
 impl HydrolysisRenderer {
     /// Records the window's logical bounds and the root transform that maps
     /// them onto the target's physical pixel grid.
@@ -56,28 +233,8 @@ impl HydrolysisRenderer {
             .transform_rect_bbox(self.window_bounds)
     }
 
-    /// Whether the persistent render tree has been built. The view tree's `body()`
-    /// is dispatched recursively exactly once — on the first frame, when this is
-    /// `false`. Afterwards every change (reactive value, structural patch, scroll,
-    /// resize, interaction) is reflected by refreshing this retained tree, so the
-    /// runner routes any later rebuild request through the refresh pump instead of
-    /// re-running `build_content`.
-    #[must_use]
-    pub fn has_render_tree(&self) -> bool {
-        self.render_tree.is_some()
-    }
-
-    #[must_use]
-    pub fn state(&self) -> &HydroState {
-        &self.state
-    }
-
-    pub fn state_mut(&mut self) -> &mut HydroState {
-        &mut self.state
-    }
-
     pub(crate) fn state_and_scene_mut(&mut self) -> (&mut HydroState, &mut vello::Scene) {
-        (&mut self.state, &mut self.scene)
+        (&mut self.core.state, &mut self.scene)
     }
 
     #[must_use]
@@ -130,16 +287,6 @@ impl HydrolysisRenderer {
         self.accessibility.begin_rebuild_frame();
     }
 
-    /// Drop cached `Dynamic` measurements whose node has left the retained tree.
-    ///
-    /// Shared by the two frames that can remove nodes: the one-time build and any
-    /// refresh that applied a structural patch.
-    pub(crate) fn prune_dynamic_measurements(&mut self, live: &FxHashSet<usize>) {
-        self.state
-            .measurement
-            .retain_dynamic_identities(|identity| live.contains(&identity));
-    }
-
     pub(crate) fn begin_redraw_frame(&mut self) {
         // Clear the per-frame `stable_ptr`-keyed view-dimension cache, not just the
         // counters: the refresh path now runs full layout every frame, so it measures
@@ -154,48 +301,6 @@ impl HydrolysisRenderer {
         self.frame_applied_filter_count = 0;
         self.frame_applied_filter_capture = Duration::ZERO;
         self.frame_applied_filter_effect = Duration::ZERO;
-    }
-
-    /// Drop text-input focus / the selection drag when the target they name is
-    /// no longer emitted. Targets are pure-emission (rebuilt in flush order every
-    /// frame), so after any flush — rebuild or refresh — a previously focused
-    /// field may be gone. Both are held by stable identity, so this only asks
-    /// whether that identity still resolves; it can never mistake a different
-    /// field that moved into the old position for the focused one. Shared by both
-    /// frame paths.
-    pub(crate) fn validate_focused_text_input_after_flush(&mut self) {
-        let modal_active = self.hit_test.modal_interaction.is_some();
-        let focus_is_live = !self.text_editing.has_focus()
-            || self
-                .text_editing
-                .focused_target()
-                .is_some_and(|target| !modal_active || target.modal);
-        if !focus_is_live {
-            self.set_focused_text_input_key(None);
-        }
-        let keyboard_focus_is_live =
-            self.hit_test.keyboard_focus.as_ref().is_none_or(|focused| {
-                self.hit_test.pointer_targets.iter().any(|target| {
-                    (!modal_active || target.modal)
-                        && target
-                            .press_slot
-                            .as_ref()
-                            .is_some_and(|slot| &slot.key == focused)
-                }) || self.text_editing.text_input_targets.iter().any(|target| {
-                    (!modal_active || target.modal) && &target.interaction_key == focused
-                })
-            });
-        if !keyboard_focus_is_live {
-            self.set_keyboard_focus(None, false);
-        }
-        let selection_drag_is_live = self
-            .text_editing
-            .active_text_selection_drag
-            .as_ref()
-            .is_none_or(|key| self.text_editing.index_of(key).is_some());
-        if !selection_drag_is_live {
-            self.text_editing.active_text_selection_drag = None;
-        }
     }
 
     pub fn finish_rebuild_frame(&mut self) {
@@ -220,12 +325,14 @@ impl HydrolysisRenderer {
 
         self.validate_focused_text_input_after_flush();
 
-        self.animation_controller
+        self.core
+            .animation_controller
             .finish_rebuild_frame_with_inactive_slot_retention(false);
-        self.hit_test
-            .finish_rebuild_frame(&self.text_editing.text_input_targets);
-        self.navigation.finish_rebuild_frame();
-        self.signals.finish_rebuild();
+        self.core
+            .hit_test
+            .finish_rebuild_frame(&self.core.text_editing.text_input_targets);
+        self.core.navigation.finish_rebuild_frame();
+        self.core.signals.finish_rebuild();
         #[cfg(feature = "accessibility")]
         self.finalize_accessibility_tree_update();
     }
@@ -247,8 +354,10 @@ impl HydrolysisRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        device_loss: &waterui_graphics::DeviceLoss,
     ) {
-        self.state.set_frame_resources(adapter, device, queue);
+        self.state
+            .set_frame_resources(adapter, device, queue, device_loss);
     }
 
     pub fn clear_frame_resources(&mut self) {
@@ -393,99 +502,8 @@ impl HydrolysisRenderer {
             }));
     }
 
-    /// The shared frame-trigger handle for closures that outlive a borrow of
-    /// the renderer (navigation controllers, GPU-surface invalidators, …).
-    pub(crate) fn frame_signals(&self) -> FrameSignals {
-        self.signals.clone()
-    }
-
     pub(crate) fn set_host_redraw_handle(&mut self, handle: RedrawHandle) {
         self.host_redraw_handle = Some(handle);
-    }
-
-    pub fn request_redraw(&self) {
-        self.signals.request_redraw();
-    }
-
-    /// Schedules a full frame: every awake frame re-reads signals, runs
-    /// layout, and re-encodes the retained tree. Reactive updates and visual
-    /// values outside the reactive graph (a scroll offset, a scrollbar drag)
-    /// share this one path.
-    pub fn request_refresh(&self) {
-        self.signals.request_refresh();
-    }
-
-    pub fn take_redraw_request(&self) -> bool {
-        self.signals.take_redraw_request()
-    }
-
-    pub fn request_rebuild(&self) {
-        self.signals.request_rebuild();
-    }
-
-    #[must_use]
-    pub fn has_rebuild_request(&self) -> bool {
-        self.signals.has_rebuild_request()
-    }
-
-    pub fn request_next_frame_rebuild(&self) {
-        self.signals.request_next_frame_rebuild();
-    }
-
-    pub fn take_rebuild_request(&self) -> bool {
-        self.signals.take_rebuild_request()
-    }
-
-    #[must_use]
-    pub fn has_patch_request(&self) -> bool {
-        self.signals.has_patch_request()
-    }
-
-    pub fn take_patch_request(&self) -> bool {
-        self.signals.take_patch_request()
-    }
-
-    pub fn take_next_frame_rebuild_request(&self) -> bool {
-        self.signals.take_next_frame_rebuild_request()
-    }
-
-    /// Whether a state change has already been requested but not yet applied,
-    /// so the semantics the last flush produced are stale.
-    ///
-    /// This is the *unapplied* half of [`Self::has_scheduled_semantic_work`]:
-    /// a signal fired and asked for a patch or a rebuild, and the next flush
-    /// will show a different tree. It deliberately excludes work that merely
-    /// continues over future frames — animations, gesture deadlines, gliding
-    /// scrolls — because those never stop asking, so a caller that waits on
-    /// them waits forever. An observer that needs to see the current state
-    /// waits on this; one that needs the app to come fully to rest waits on
-    /// `has_scheduled_semantic_work`.
-    #[must_use]
-    pub fn has_pending_semantic_update(&self) -> bool {
-        self.signals.has_patch_request()
-            || self.signals.has_rebuild_request()
-            || self.signals.has_next_frame_rebuild_request()
-    }
-
-    /// Whether the renderer has scheduled work that will still change layout,
-    /// semantics, or reactive state on a future frame: pending patches or
-    /// rebuilds, active animations, armed gesture deadlines, or gliding smooth
-    /// scrolls.
-    ///
-    /// Visual-only redraw requests (caret blink, the visible-window present
-    /// cadence) are deliberately excluded: they repaint pixels without moving
-    /// semantic state, and a focused text caret blinks forever — including it
-    /// would make an app with a focused field never count as settled.
-    #[must_use]
-    pub fn has_scheduled_semantic_work(&self) -> bool {
-        self.has_pending_semantic_update()
-            || self.animations_active()
-            || self.next_gesture_deadline().is_some()
-            || self.has_gliding_smooth_scrolls()
-    }
-
-    pub(crate) fn measurement_cache_stats(&self) -> (u32, u32) {
-        self.state.measurement.stats()
     }
 
     pub(crate) fn render_layer_stats(&self) -> RenderLayerStats {
