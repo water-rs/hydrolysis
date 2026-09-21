@@ -21,3 +21,21 @@ pub(crate) fn inset_rect(rect: vello::kurbo::Rect, dx: f64, dy: f64) -> vello::k
         (rect.y1 - dy).max(rect.y0 + dy),
     )
 }
+
+/// The rect for a label that sits beside its control on a row — a toggle's
+/// label next to its switch or checkbox, a stepper's label next to its
+/// buttons. The label keeps the horizontal extent the widget picked for it,
+/// but vertically it takes its own height (capped to `row`) centred on the
+/// control's centre line: a single-line label shares the control's centre
+/// instead of riding the row's top edge.
+pub(crate) fn label_beside_control_bounds(
+    x0: f64,
+    x1: f64,
+    row: vello::kurbo::Rect,
+    control: vello::kurbo::Rect,
+    label_height: f64,
+) -> vello::kurbo::Rect {
+    let height = label_height.min(row.height());
+    let y0 = (control.y0 + control.y1 - height) * 0.5;
+    vello::kurbo::Rect::new(x0, y0, x1, y0 + height)
+}

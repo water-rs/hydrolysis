@@ -24,7 +24,7 @@ use waterui_core::layout::{ProposalSize, ViewDimensions};
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
-use crate::widgets::util::widget_disabled;
+use crate::widgets::util::{label_beside_control_bounds, widget_disabled};
 
 /// The retained render state of a slider. A `SliderConfig`'s value-end labels are
 /// move-only `AnyView`s (they cannot be re-dispatched twice), so the persistent
@@ -289,10 +289,34 @@ pub(crate) fn render_slider_parts(
     let control_top = ctx.bounds.y0 + label_height;
     let control_bottom = ctx.bounds.y1;
     let control_height = control_bottom - control_top;
+    let controls_row =
+        vello::kurbo::Rect::new(ctx.bounds.x0, control_top, ctx.bounds.x1, control_bottom);
+    let track_left = if min_label_width > 0.0 {
+        min_label_x1 + metrics.horizontal_spacing
+    } else {
+        ctx.bounds.x0 + metrics.horizontal_inset
+    };
+    let track_right = if max_label_width > 0.0 {
+        max_label_x0 - metrics.horizontal_spacing
+    } else {
+        ctx.bounds.x1 - metrics.horizontal_inset
+    };
+    let track_center_y = control_top + control_height / 2.0;
+    let track_rect = vello::kurbo::Rect::new(
+        track_left,
+        track_center_y - metrics.track_height / 2.0,
+        track_right,
+        track_center_y + metrics.track_height / 2.0,
+    );
 
     if min_label_width > 0.0 && control_height > 0.0 {
-        let min_label_rect =
-            vello::kurbo::Rect::new(min_label_x0, control_top, min_label_x1, control_bottom);
+        let min_label_rect = label_beside_control_bounds(
+            min_label_x0,
+            min_label_x1,
+            controls_row,
+            track_rect,
+            f64::from(min_label_size.height),
+        );
         if disabled {
             ctx.push_layer_rect(theme.disabled_content_alpha(), min_label_rect);
         }
@@ -309,8 +333,13 @@ pub(crate) fn render_slider_parts(
         }
     }
     if max_label_width > 0.0 && control_height > 0.0 {
-        let max_label_rect =
-            vello::kurbo::Rect::new(max_label_x0, control_top, max_label_x1, control_bottom);
+        let max_label_rect = label_beside_control_bounds(
+            max_label_x0,
+            max_label_x1,
+            controls_row,
+            track_rect,
+            f64::from(max_label_size.height),
+        );
         if disabled {
             ctx.push_layer_rect(theme.disabled_content_alpha(), max_label_rect);
         }
@@ -331,24 +360,6 @@ pub(crate) fn render_slider_parts(
     let range_end = *state.range.end();
     let span = range_end - range_start;
     assert!(span > 0.0, "hydrolysis slider requires range start < end");
-
-    let track_left = if min_label_width > 0.0 {
-        min_label_x1 + metrics.horizontal_spacing
-    } else {
-        ctx.bounds.x0 + metrics.horizontal_inset
-    };
-    let track_right = if max_label_width > 0.0 {
-        max_label_x0 - metrics.horizontal_spacing
-    } else {
-        ctx.bounds.x1 - metrics.horizontal_inset
-    };
-    let track_center_y = control_top + control_height / 2.0;
-    let track_rect = vello::kurbo::Rect::new(
-        track_left,
-        track_center_y - metrics.track_height / 2.0,
-        track_right,
-        track_center_y + metrics.track_height / 2.0,
-    );
 
     // Reading the value through `read_signal` watches it (registers a
     // retained-refresh watcher), so a value change schedules a frame and this
