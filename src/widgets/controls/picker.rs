@@ -22,6 +22,7 @@ use waterui_form::picker::{PickerConfig, PickerStyle};
 use waterui_text::styled::StyledStr;
 
 use crate::renderer::local_interaction_state;
+use crate::widgets::util::label_beside_control_bounds;
 #[cfg(feature = "accessibility")]
 use crate::widgets::util::widget_disabled;
 use waterui_backend_core::widget::PickerMetrics;
@@ -657,11 +658,18 @@ pub(crate) fn render_radio_picker(
             );
         }
 
-        let label_rect = vello::kurbo::Rect::new(
+        let indicator_rect = vello::kurbo::Rect::new(
+            indicator_center.x - indicator_radius,
+            indicator_center.y - indicator_radius,
+            indicator_center.x + indicator_radius,
+            indicator_center.y + indicator_radius,
+        );
+        let label_rect = label_beside_control_bounds(
             indicator_center.x + indicator_radius + metrics.radio_label_spacing,
-            row_rect.y0,
             row_rect.x1 - metrics.horizontal_inset,
-            row_rect.y1,
+            row_rect,
+            indicator_rect,
+            f64::from(label_size.height),
         );
         ctx.render_styled_text(label, HorizontalAlignment::Leading, env, label_rect);
 
