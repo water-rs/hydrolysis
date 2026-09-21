@@ -18,7 +18,7 @@ use waterui_core::{AnyView, Environment, Native};
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
-use crate::widgets::util::widget_disabled;
+use crate::widgets::util::{label_beside_control_bounds, widget_disabled};
 
 /// The retained render state of a toggle: the cloneable [`ToggleConfig`] drives the
 /// control + accessibility, and its main label is held as a [`RetainedSubview`]
@@ -326,6 +326,7 @@ fn toggle_control_and_label_bounds(
         ToggleStyle::Checkbox => {
             let control_x0 = bounds.x0;
             let control_x1 = control_x0 + metrics.width;
+            let control = vello::kurbo::Rect::new(control_x0, control_y0, control_x1, control_y1);
             let label_x0 = if has_label {
                 (control_x1 + metrics.label_spacing).min(bounds.x1)
             } else {
@@ -333,33 +334,39 @@ fn toggle_control_and_label_bounds(
             };
             let max_label_width = (bounds.x1 - label_x0).max(0.0);
             let label_width = f64::from(label_size.width).min(max_label_width);
-            let label_height = f64::from(label_size.height).min(bounds.height());
-            let label_y0 = bounds.y0 + (bounds.height() - label_height) * 0.5;
             (
-                vello::kurbo::Rect::new(control_x0, control_y0, control_x1, control_y1),
-                vello::kurbo::Rect::new(
+                control,
+                label_beside_control_bounds(
                     label_x0,
-                    label_y0,
                     label_x0 + label_width,
-                    label_y0 + label_height,
+                    bounds,
+                    control,
+                    f64::from(label_size.height),
                 ),
             )
         }
         ToggleStyle::Automatic | ToggleStyle::Switch => {
             let control_x0 = (bounds.x1 - metrics.width).max(bounds.x0);
+            let control = vello::kurbo::Rect::new(
+                control_x0,
+                control_y0,
+                control_x0 + metrics.width,
+                control_y1,
+            );
             let label_x1 = if has_label {
                 (control_x0 - metrics.label_spacing).max(bounds.x0)
             } else {
                 bounds.x0
             };
             (
-                vello::kurbo::Rect::new(
-                    control_x0,
-                    control_y0,
-                    control_x0 + metrics.width,
-                    control_y1,
+                control,
+                label_beside_control_bounds(
+                    bounds.x0,
+                    label_x1,
+                    bounds,
+                    control,
+                    f64::from(label_size.height),
                 ),
-                vello::kurbo::Rect::new(bounds.x0, bounds.y0, label_x1, bounds.y1),
             )
         }
         _ => panic!("hydrolysis ToggleStyle variant is not implemented"),
@@ -417,6 +424,30 @@ mod tests {
         );
 
         assert_eq!(control, Rect::new(268.0, 24.0, 320.0, 56.0));
-        assert_eq!(label, Rect::new(16.0, 20.0, 260.0, 60.0));
+        assert_eq!(label, Rect::new(16.0, 32.0, 260.0, 48.0));
+    }
+
+    #[test]
+    fn label_shares_the_control_centre_line() {
+        let metrics = ToggleMetrics::new(52.0, 32.0, 8.0);
+        let bounds = Rect::new(16.0, 20.0, 320.0, 60.0);
+        for style in [
+            ToggleStyle::Automatic,
+            ToggleStyle::Switch,
+            ToggleStyle::Checkbox,
+        ] {
+            let metrics = match style {
+                ToggleStyle::Checkbox => ToggleMetrics::new(18.0, 18.0, 8.0),
+                _ => metrics,
+            };
+            let (control, label) =
+                toggle_control_and_label_bounds(bounds, style, metrics, Size::new(64.0, 16.0));
+            assert!(
+                (label.center().y - control.center().y).abs() < 1e-9,
+                "{style:?}: label centre {} != control centre {}",
+                label.center().y,
+                control.center().y,
+            );
+        }
     }
 }
