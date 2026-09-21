@@ -18,7 +18,7 @@ use waterui_core::layout::{ProposalSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native};
 
 use crate::renderer::RetainedSubview;
-use crate::widgets::util::widget_disabled;
+use crate::widgets::util::{label_beside_control_bounds, widget_disabled};
 
 /// The retained render state of a stepper: the cloneable [`StepperConfig`] drives the
 /// +/- buttons + accessibility, and its main label is held as a [`RetainedSubview`]
@@ -200,20 +200,10 @@ pub(crate) fn render_stepper_parts(
         ctx.renderer_mut().read_signal(&signal)
     };
     let theme_metrics = theme.stepper_metrics();
-    let button_size = ctx
-        .bounds
-        .height()
-        .clamp(theme_metrics.button_min_size, theme_metrics.button_max_size);
-    let spacing = theme_metrics.button_spacing;
-    let controls_width = button_size * 2.0 + spacing;
-    let controls_x0 = (ctx.bounds.x1 - controls_width).max(ctx.bounds.x0);
-
-    let label_bounds = vello::kurbo::Rect::new(
-        ctx.bounds.x0,
-        ctx.bounds.y0,
-        (controls_x0 - theme_metrics.label_spacing).max(ctx.bounds.x0),
-        ctx.bounds.y1,
-    );
+    let label_size = state.label_view.measure_intrinsic(ctx.renderer_mut(), env);
+    let (controls_bounds, label_bounds) =
+        stepper_control_and_label_bounds(ctx.bounds, theme_metrics, f64::from(label_size.height));
+    let button_size = controls_bounds.height();
     // The label is a retained node sub-view re-flushed at its rect; reactive
     // content stays live through the node's own per-frame re-flush, with no dispatch.
     // Its semantics are merged into the stepper's own node by
@@ -241,18 +231,17 @@ pub(crate) fn render_stepper_parts(
         }
     }
 
-    let button_y0 = ctx.bounds.y0 + ((ctx.bounds.height() - button_size) / 2.0).max(0.0);
     let minus_bounds = vello::kurbo::Rect::new(
-        controls_x0,
-        button_y0,
-        controls_x0 + button_size,
-        button_y0 + button_size,
+        controls_bounds.x0,
+        controls_bounds.y0,
+        controls_bounds.x0 + button_size,
+        controls_bounds.y1,
     );
     let plus_bounds = vello::kurbo::Rect::new(
-        controls_x0 + button_size + spacing,
-        button_y0,
-        controls_x0 + controls_width,
-        button_y0 + button_size,
+        controls_bounds.x1 - button_size,
+        controls_bounds.y0,
+        controls_bounds.x1,
+        controls_bounds.y1,
     );
     let hit_transform = ctx.hit_transform;
     let minus_hit_bounds = transformed_rect(hit_transform, minus_bounds);
@@ -266,7 +255,6 @@ pub(crate) fn render_stepper_parts(
     let minus_interaction = local_interaction_state(minus_interaction, hit_transform);
     let plus_interaction = local_interaction_state(plus_interaction, hit_transform);
     {
-        let controls_bounds = minus_bounds.union(plus_bounds);
         if disabled {
             ctx.push_layer_rect(theme.disabled_content_alpha(), controls_bounds);
         }
@@ -387,4 +375,51 @@ pub(crate) fn emit_stepper_accessibility(
             crate::renderer::InteractionKey::for_rc(state, 1),
         ],
     );
+}
+
+/// The strip the `-`/`+` buttons occupy and the label's rect beside them. The
+/// buttons keep their size, vertically centred in the row; the label keeps its
+/// own height on the buttons' centre line — see [`label_beside_control_bounds`].
+fn stepper_control_and_label_bounds(
+    bounds: vello::kurbo::Rect,
+    metrics: waterui_backend_core::widget::StepperMetrics,
+    label_height: f64,
+) -> (vello::kurbo::Rect, vello::kurbo::Rect) {
+    let button_size = bounds
+        .height()
+        .clamp(metrics.button_min_size, metrics.button_max_size);
+    let controls_width = button_size * 2.0 + metrics.button_spacing;
+    let controls_x0 = (bounds.x1 - controls_width).max(bounds.x0);
+    let button_y0 = bounds.y0 + ((bounds.height() - button_size) / 2.0).max(0.0);
+    let controls = vello::kurbo::Rect::new(
+        controls_x0,
+        button_y0,
+        controls_x0 + controls_width,
+        button_y0 + button_size,
+    );
+    let label = label_beside_control_bounds(
+        bounds.x0,
+        (controls_x0 - metrics.label_spacing).max(bounds.x0),
+        bounds,
+        controls,
+        label_height,
+    );
+    (controls, label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stepper_control_and_label_bounds;
+    use vello::kurbo::Rect;
+    use waterui_backend_core::widget::StepperMetrics;
+
+    #[test]
+    fn label_shares_the_controls_centre_line() {
+        let metrics = StepperMetrics::new(24.0, 32.0, 28.0, 8.0, 8.0);
+        let (controls, label) =
+            stepper_control_and_label_bounds(Rect::new(16.0, 20.0, 320.0, 60.0), metrics, 16.0);
+        assert_eq!(controls, Rect::new(248.0, 24.0, 320.0, 56.0));
+        assert_eq!(label, Rect::new(16.0, 32.0, 240.0, 48.0));
+        assert_eq!(label.center().y, controls.center().y);
+    }
 }
