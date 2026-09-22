@@ -18,6 +18,7 @@ use waterui::ViewExt as _;
 use waterui::component::list::{List, ListItem};
 use waterui::component::progress::progress;
 use waterui::component::table::{col, table};
+use waterui::theme::color::Error;
 use waterui_controls::button::button;
 use waterui_controls::menu::{CommandExt as _, Menu};
 use waterui_controls::slider::slider;
@@ -180,6 +181,22 @@ fn text_and_button_emit_and_click_fires() {
     assert!(fired.get(), "the button action did not fire");
     let update = pumped(&mut runtime);
     assert_rooted(&update);
+}
+
+/// A view coloured with the `Error` token mounts on the bare semantic runtime:
+/// the framework defaults install the token, so resolving it needs no `Style`
+/// backfill.
+#[test]
+fn error_token_foreground_resolves_against_framework_defaults() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((text("something failed").foreground(Error),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (_, text_node) = find_by_label(&update, Role::Label, "something failed")
+        .expect("the Error-foreground text must emit");
+    assert_eq!(text_node.label(), Some("something failed"));
 }
 
 #[test]

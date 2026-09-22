@@ -42,7 +42,9 @@ pub fn install_default_tokens(env: &mut Environment) {
                 .tertiary(color(0x7C_3A_ED))
                 .tertiary_container(color(0xED_E9_FE))
                 .selection_container(color(0x25_63_EB))
-                .selection_foreground(color(0xFF_FF_FF)),
+                .selection_foreground(color(0xFF_FF_FF))
+                .error(color(0xDC_26_26))
+                .error_foreground(color(0xFF_FF_FF)),
         )
         .fonts(FontSettings::default_scale())
         .install(env);
