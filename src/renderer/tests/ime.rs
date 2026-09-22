@@ -1065,3 +1065,156 @@ fn keys_after_a_composition_commit_in_one_batch_are_ordinary_input() {
         );
     }
 }
+
+/// Fast direct-commit typing: every unmarked key arrives beside its own
+/// commit, and a Backspace lands between two of them. Each commit claims
+/// only the press it answers, so the Backspace stays ordinary input and
+/// deletes the earlier commit — the field reads `i`, never `hi`.
+#[test]
+fn a_key_between_direct_commits_stays_ordinary_input() {
+    for multiline in [false, true] {
+        let value = Binding::container(Str::default());
+        let view = {
+            let value_for_view = value.clone();
+            let field_view = field("Name", &value_for_view);
+            let field_view = if multiline {
+                field_view.disable_line_limit()
+            } else {
+                field_view
+            };
+            AnyView::new(vstack((field_view.size(
+                FIELD_WIDTH,
+                if multiline {
+                    EDITOR_HEIGHT
+                } else {
+                    FIELD_HEIGHT
+                },
+            ),)))
+        };
+        let mut runtime = runtime_with(view);
+        let start = Instant::now();
+        settled(&mut runtime, start);
+        press_text_input(&mut runtime, 0);
+        let mut now = start + Duration::from_millis(16);
+        let _ = runtime.pump_at(false, now);
+
+        for event in [
+            key_event(
+                Key::Character("h".into()),
+                Code::KeyH,
+                KeyState::Pressed,
+                Modifiers::default(),
+            ),
+            InputEvent::ImeCommit {
+                text: "h".to_owned(),
+            },
+            key_event(
+                Key::Character("h".into()),
+                Code::KeyH,
+                KeyState::Released,
+                Modifiers::default(),
+            ),
+            key_event(
+                Key::Named(NamedKey::Backspace),
+                Code::Backspace,
+                KeyState::Pressed,
+                Modifiers::default(),
+            ),
+            key_event(
+                Key::Named(NamedKey::Backspace),
+                Code::Backspace,
+                KeyState::Released,
+                Modifiers::default(),
+            ),
+            key_event(
+                Key::Character("i".into()),
+                Code::KeyI,
+                KeyState::Pressed,
+                Modifiers::default(),
+            ),
+            InputEvent::ImeCommit {
+                text: "i".to_owned(),
+            },
+            key_event(
+                Key::Character("i".into()),
+                Code::KeyI,
+                KeyState::Released,
+                Modifiers::default(),
+            ),
+        ] {
+            runtime.push_input_event(event);
+        }
+        now += Duration::from_millis(16);
+        let _ = runtime.pump_at(false, now);
+        assert_eq!(
+            value.get().to_string().as_str(),
+            "i",
+            "multiline={multiline}: the Backspace is not the commit `i`'s \
+             producer, so it is ordinary input and must erase `h`"
+        );
+    }
+}
+
+/// A key before the press a commit answers is not that commit's producer:
+/// `[Enter, a, Commit "a"]` types `a` and the earlier Enter is ordinary
+/// input, activating the keyboard-focused control.
+#[test]
+fn a_commit_claims_only_the_nearest_press() {
+    let (mut runtime, value, submitted) = form_runtime();
+    let mut now = Instant::now() + Duration::from_millis(200);
+    // Tab moves keyboard focus to the button; the field keeps text focus.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "traversing to the button must not steal the field's text focus"
+    );
+
+    for event in [
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        InputEvent::ImeCommit {
+            text: "a".to_owned(),
+        },
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+    ] {
+        runtime.push_input_event(event);
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(value.get().to_string().as_str(), "a");
+    assert!(
+        submitted.get(),
+        "the Enter the commit cannot be answering is ordinary input and \
+         must activate the focused control"
+    );
+}
