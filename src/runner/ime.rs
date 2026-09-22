@@ -38,15 +38,22 @@
 //!   IME's only while a composition is live, never claimed as a commit's
 //!   producer, and it stops the backward claim so a commit cannot reach
 //!   past it to an earlier press.
+//!
+//! - `ImeDisabled` is the platform acknowledging that the app turned IME
+//!   off — focus left a text target — not the answer to a keystroke, so it
+//!   claims nothing: a Tab that moved focus out of the field in the same
+//!   batch is ordinary input and the traversal still happens. It still
+//!   ends `composing`, since a dead IME cannot hold a live composition.
 
 use crate::platform::{InputEvent, KeyState};
 
-/// Whether an event is a composition boundary the ownership walk tracks —
-/// any `Ime*` variant.
-fn is_ime_boundary(event: &InputEvent) -> bool {
+/// Whether an event can be a keystroke's product — preedit and commit are
+/// what an IME emits for the keys it consumed; `ImeDisabled` answers the
+/// app's own "IME off" request, so it claims nothing.
+fn is_keystroke_product(event: &InputEvent) -> bool {
     matches!(
         event,
-        InputEvent::ImePreedit { .. } | InputEvent::ImeCommit { .. } | InputEvent::ImeDisabled
+        InputEvent::ImePreedit { .. } | InputEvent::ImeCommit { .. }
     )
 }
 
@@ -63,7 +70,7 @@ pub(crate) fn ime_owned_events(events: &[InputEvent], composing: bool) -> Vec<bo
     // owns it below.
     let mut claimed = vec![false; events.len()];
     for (index, event) in events.iter().enumerate() {
-        if !is_ime_boundary(event) {
+        if !is_keystroke_product(event) {
             continue;
         }
         for behind in (0..index).rev() {
