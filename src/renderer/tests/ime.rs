@@ -1218,3 +1218,52 @@ fn a_commit_claims_only_the_nearest_press() {
          must activate the focused control"
     );
 }
+
+/// `ImeDisabled` is the platform acknowledging that the app turned IME
+/// off — not the answer to a keystroke — so the Tab that moved focus out
+/// of the field in the same batch stays ordinary input and still
+/// traverses.
+#[test]
+fn a_tab_beside_ime_disabled_still_moves_focus() {
+    let (mut runtime, _value, submitted) = form_runtime();
+    let mut now = Instant::now() + Duration::from_millis(200);
+    for event in [
+        key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        InputEvent::ImeDisabled,
+        key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+    ] {
+        runtime.push_input_event(event);
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "traversing to the button must not steal the field's text focus"
+    );
+
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        submitted.get(),
+        "the Tab beside ImeDisabled is ordinary input: keyboard focus \
+         moved to the button, so Enter submits the form"
+    );
+}
