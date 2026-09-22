@@ -285,7 +285,6 @@ pub fn run(
         gpu_context: None,
         accesskit_adapters: HashMap::new(),
         last_accessibility_updates: HashMap::new(),
-        accessibility_enabled: super::probe_accessibility_runtime(),
         local_runnable_rx,
         event_proxy,
         render_diagnostics_config,
@@ -316,7 +315,6 @@ struct WinitRunner {
     gpu_context: Option<WinitGpuContext>,
     accesskit_adapters: HashMap<WindowId, AccessKitAdapter>,
     last_accessibility_updates: HashMap<WindowId, accesskit::TreeUpdate>,
-    accessibility_enabled: bool,
     local_runnable_rx: mpsc::Receiver<Runnable>,
     event_proxy: winit::event_loop::EventLoopProxy<RunnerEvent>,
     render_diagnostics_config: RenderDiagnosticsConfig,
@@ -432,7 +430,7 @@ impl WinitRunner {
         &mut self,
         event_loop: &ActiveEventLoop,
         pending: PendingWindow,
-    ) -> (RuntimeWindow<WinitWindow>, Option<AccessKitAdapter>) {
+    ) -> (RuntimeWindow<WinitWindow>, AccessKitAdapter) {
         let PendingWindow { window, activates } = pending;
         let attributes =
             native_window_attributes(&window, &self.env, activates, self.window_icon.clone());
@@ -458,7 +456,10 @@ impl WinitRunner {
         let mut runtime =
             RuntimeWindow::new(window, platform, renderer, self.render_diagnostics_config);
         let _ = pump_window_semantics(&mut runtime, &self.env);
-        let adapter = if self.accessibility_enabled {
+        // The adapter is created unconditionally: accesskit resolves the
+        // platform accessibility bus itself, lazily, so a missing org.a11y.Bus
+        // is its concern — probing it up front only raced the bus's startup.
+        let adapter = {
             let initial_tree_update = runtime.renderer.take_accessibility_tree_update().expect(
                 "hydrolysis winit accessibility: initial tree update missing after initial semantic rebuild",
             );
@@ -479,15 +480,7 @@ impl WinitRunner {
             );
             self.last_accessibility_updates
                 .insert(runtime.platform.id(), last_tree_update);
-            Some(adapter)
-        } else {
-            tracing::warn!(
-                target: "waterui::hydrolysis::a11y",
-                window_id = ?runtime.platform.id(),
-                title = runtime.window.title.get().as_str(),
-                "accessibility adapter disabled: org.a11y.Bus is unavailable"
-            );
-            None
+            adapter
         };
         runtime.platform.native_window().set_visible(true);
         if activates {
@@ -503,9 +496,7 @@ impl WinitRunner {
             let (runtime, adapter) = self.create_runtime_window(event_loop, pending);
             let id = runtime.platform.id();
             self.windows.insert(id, runtime);
-            if let Some(adapter) = adapter {
-                self.accesskit_adapters.insert(id, adapter);
-            }
+            self.accesskit_adapters.insert(id, adapter);
         }
     }
 
