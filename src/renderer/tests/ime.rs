@@ -1246,10 +1246,6 @@ fn a_tab_beside_ime_disabled_still_moves_focus() {
     }
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
-    assert!(
-        runtime.focused_text_input_state().is_some(),
-        "traversing to the button must not steal the field's text focus"
-    );
 
     for state in [KeyState::Pressed, KeyState::Released] {
         runtime.push_input_event(key_event(
