@@ -988,7 +988,15 @@ where
     if !events.is_empty() {
         refresh_pending_input_geometry(runtime, env);
     }
-    for event in events {
+    // Platform IMEs mark their own keystrokes by what they emit: ownership
+    // follows the event order inside the batch (see `ime_owned_events`), so
+    // a confirming keystroke that arrives before its commit is the
+    // composition's while a key after the commit is ordinary input again.
+    // Those owned keys must never reach ordinary key handling or an
+    // embedded sink — the committing Enter/Backspace in particular must not
+    // activate a form or delete committed text.
+    let ime_owned = ime::ime_owned_events(&events, runtime.renderer.ime_composition_active());
+    for (event, ime_owned) in events.into_iter().zip(ime_owned) {
         match event {
             InputEvent::CloseRequested => {
                 runtime
@@ -1162,8 +1170,9 @@ where
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::TextInput { text } => {
-                let changed = runtime.renderer.handle_embedded_text_input(text.as_str())
-                    || runtime.renderer.handle_text_input(text.as_str());
+                let changed = !ime_owned
+                    && (runtime.renderer.handle_embedded_text_input(text.as_str())
+                        || runtime.renderer.handle_text_input(text.as_str()));
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "text_input",
@@ -1181,16 +1190,24 @@ where
                 state: KeyState::Pressed,
                 modifiers,
             } => {
-                let key_env = input_env(runtime, env);
-                let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
-                    pressed: true,
-                    logical: &logical_key,
-                    code: physical_code,
-                    repeat,
-                    modifiers,
-                }) || runtime
-                    .renderer
-                    .handle_key_with_env(&key, modifiers, &key_env);
+                let changed = if ime_owned {
+                    // The press was consumed by the composition; record it so
+                    // its release — which wl_keyboard may deliver in a later
+                    // batch, after the commit — is swallowed too.
+                    runtime.renderer.swallow_ime_key_press(physical_code);
+                    false
+                } else {
+                    let key_env = input_env(runtime, env);
+                    runtime.renderer.handle_embedded_key(&KeyDelivery {
+                        pressed: true,
+                        logical: &logical_key,
+                        code: physical_code,
+                        repeat,
+                        modifiers,
+                    }) || runtime
+                        .renderer
+                        .handle_key_with_env(&key, modifiers, &key_env)
+                };
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "key_pressed",
@@ -1205,7 +1222,7 @@ where
                 let changed = runtime
                     .renderer
                     .handle_embedded_ime_preedit(text.as_str(), caret)
-                    || runtime.renderer.handle_ime_preedit(text.as_str());
+                    || runtime.renderer.handle_ime_preedit(text.as_str(), caret);
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "ime_preedit",
@@ -1246,14 +1263,17 @@ where
                 state: KeyState::Released,
                 modifiers,
             } => {
-                let key_env = input_env(runtime, env);
-                let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
-                    pressed: false,
-                    logical: &logical_key,
-                    code: physical_code,
-                    repeat,
-                    modifiers,
-                }) || runtime.renderer.handle_key_release_with_env(&key, &key_env);
+                let changed =
+                    !runtime.renderer.take_ime_swallowed_release(physical_code) && !ime_owned && {
+                        let key_env = input_env(runtime, env);
+                        runtime.renderer.handle_embedded_key(&KeyDelivery {
+                            pressed: false,
+                            logical: &logical_key,
+                            code: physical_code,
+                            repeat,
+                            modifiers,
+                        }) || runtime.renderer.handle_key_release_with_env(&key, &key_env)
+                    };
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::ModifiersChanged(modifiers) => {

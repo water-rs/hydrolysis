@@ -263,6 +263,11 @@ pub struct SemanticCore {
     /// frame, which then runs the full animation-slot / measurement-cache prune
     /// cycle for the dropped subtrees.
     subview_structural_change: bool,
+    /// Physical codes of key presses the IME consumed while it owned input.
+    /// Their releases must be swallowed too — wl_keyboard delivers the release
+    /// of an IME-consumed press in a later batch, after the commit that ended
+    /// the composition.
+    ime_swallowed_codes: Vec<keyboard_types::Code>,
 }
 
 /// Core hydrolysis renderer state: a [`SemanticCore`] plus the GPU-side scene,
@@ -352,6 +357,7 @@ impl SemanticCore {
             accessibility: AccessibilityBuilder::default(),
             render_tree: None,
             subview_structural_change: false,
+            ime_swallowed_codes: Vec::new(),
         }
     }
 
