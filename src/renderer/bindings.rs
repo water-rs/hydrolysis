@@ -74,6 +74,36 @@ impl SemanticCore {
         self.text_editing.ime_preedit.clone()
     }
 
+    /// The platform-reported caret inside [`Self::current_ime_preedit`], so a
+    /// field can map it onto the composed text's layout.
+    pub(crate) fn current_ime_preedit_caret(&self) -> Option<usize> {
+        self.text_editing.ime_preedit.as_ref()?;
+        self.text_editing.ime_preedit_caret
+    }
+
+    /// Whether an IME composition currently owns keyboard input — either a
+    /// widget field holding marked text or an embedded surface's session.
+    pub(crate) fn ime_composition_active(&self) -> bool {
+        self.text_editing.ime_preedit.is_some() || self.hit_test.embedded_composing
+    }
+
+    /// Records a key press the IME consumed while it owned input; the press's
+    /// release must be swallowed when it arrives, however many batches later.
+    pub(crate) fn swallow_ime_key_press(&mut self, code: keyboard_types::Code) {
+        self.ime_swallowed_codes.push(code);
+    }
+
+    /// True once for a release matching a swallowed press: wl_keyboard (and
+    /// X11's filtered-key quirk) still deliver it, but it belongs to the
+    /// composition, not to the application.
+    pub(crate) fn take_ime_swallowed_release(&mut self, code: keyboard_types::Code) -> bool {
+        let Some(index) = self.ime_swallowed_codes.iter().position(|c| *c == code) else {
+            return false;
+        };
+        self.ime_swallowed_codes.swap_remove(index);
+        true
+    }
+
     /// Where the platform should anchor the input-method panel.
     ///
     /// A focused embedded surface draws its own caret, so it answers first:

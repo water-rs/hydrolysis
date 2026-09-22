@@ -416,7 +416,10 @@ fn semantic_window_origin(window: &SemanticWindow) -> HydrolysisWindowOrigin {
 fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) -> bool {
     let mut should_close = window.window.state.get() == waterui::window::WindowState::Closed;
     let events: Vec<InputEvent> = window.pending_events.drain(..).collect();
-    for event in events {
+    // Same ordered IME keystroke ownership as the rendered runner
+    // (`ime::ime_owned_events` tracks the composition through the batch).
+    let ime_owned = ime::ime_owned_events(&events, window.core.ime_composition_active());
+    for (event, ime_owned) in events.into_iter().zip(ime_owned) {
         let changed = match event {
             InputEvent::CloseRequested => {
                 window
@@ -442,25 +445,41 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
                 ));
                 false
             }
-            InputEvent::TextInput { text } => window.core.handle_text_input(text.as_str()),
+            InputEvent::TextInput { text } => {
+                !ime_owned && window.core.handle_text_input(text.as_str())
+            }
             InputEvent::Key {
                 key,
+                physical_code,
                 state: KeyState::Pressed,
                 modifiers,
                 ..
             } => {
-                let key_env = env.extending(semantic_window_origin(window));
-                window.core.handle_key_with_env(&key, modifiers, &key_env)
+                if ime_owned {
+                    // Same swallowed-press tracking as the rendered runner:
+                    // the release can arrive in a later batch, after the
+                    // commit that ended the composition.
+                    window.core.swallow_ime_key_press(physical_code);
+                    false
+                } else {
+                    let key_env = env.extending(semantic_window_origin(window));
+                    window.core.handle_key_with_env(&key, modifiers, &key_env)
+                }
             }
             InputEvent::Key {
                 key,
+                physical_code,
                 state: KeyState::Released,
                 ..
             } => {
                 let key_env = env.extending(semantic_window_origin(window));
-                window.core.handle_key_release_with_env(&key, &key_env)
+                !window.core.take_ime_swallowed_release(physical_code)
+                    && !ime_owned
+                    && window.core.handle_key_release_with_env(&key, &key_env)
             }
-            InputEvent::ImePreedit { text, .. } => window.core.handle_ime_preedit(text.as_str()),
+            InputEvent::ImePreedit { text, caret } => {
+                window.core.handle_ime_preedit(text.as_str(), caret)
+            }
             InputEvent::ImeCommit { text } => window.core.handle_ime_commit(text.as_str()),
             InputEvent::ImeDisabled => window.core.handle_ime_disabled(),
             geometric => {

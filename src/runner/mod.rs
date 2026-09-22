@@ -35,6 +35,7 @@ mod executor;
 mod fonts;
 #[cfg(not(target_arch = "wasm32"))]
 mod headless;
+pub(crate) mod ime;
 mod semantic;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
