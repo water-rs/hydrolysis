@@ -199,6 +199,20 @@ pub enum InputEvent {
     CloseRequested,
 }
 
+impl InputEvent {
+    /// Whether the event carries IME composition data — a live preedit or a
+    /// commit. When any event in a platform batch qualifies, the plain
+    /// key/text events in that batch are the IME's own composing keystrokes,
+    /// not application input.
+    pub(crate) fn is_composition_event(&self) -> bool {
+        match self {
+            Self::ImePreedit { text, .. } => !text.is_empty(),
+            Self::ImeCommit { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 /// Errors raised by surface acquisition/presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceError {
@@ -1884,6 +1898,64 @@ mod winit_impl {
         }
     }
 
+    /// The platform IME calls behind [`PlatformWindow::sync_text_input_state`],
+    /// computed without a window: tracks the last state applied so a repeat
+    /// sync is a no-op, `set_ime_allowed` fires only across a focus
+    /// transition, and the cursor area is reported in physical pixels.
+    #[derive(Debug, Default)]
+    pub(crate) struct TextInputSync {
+        applied: Option<TextInputState>,
+    }
+
+    /// One winit IME call [`TextInputSync::sync`] asks the window to make.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub(crate) enum TextInputSyncOp {
+        Allowed(bool),
+        Purpose(TextInputPurpose),
+        CursorArea {
+            x: i32,
+            y: i32,
+            width: u32,
+            height: u32,
+        },
+    }
+
+    impl TextInputSync {
+        /// The winit calls needed to bring the platform IME to `state`, in
+        /// order. An unchanged state returns nothing — including when only
+        /// the caret moved: a moved caret changes the state, so it is never
+        /// swallowed by the equality early-return.
+        pub(crate) fn sync(
+            &mut self,
+            state: Option<TextInputState>,
+            scale_factor: f64,
+        ) -> Vec<TextInputSyncOp> {
+            if self.applied == state {
+                return Vec::new();
+            }
+            let mut ops = Vec::with_capacity(3);
+            if self.applied.is_some() != state.is_some() {
+                ops.push(TextInputSyncOp::Allowed(state.is_some()));
+            }
+            self.applied = state;
+            let Some(state) = state else {
+                return ops;
+            };
+            ops.push(TextInputSyncOp::Purpose(state.purpose));
+            assert!(
+                scale_factor.is_finite() && scale_factor > 0.0,
+                "hydrolysis winit backend received invalid scale factor {scale_factor}"
+            );
+            ops.push(TextInputSyncOp::CursorArea {
+                x: (state.x * scale_factor).round() as i32,
+                y: (state.y * scale_factor).round() as i32,
+                width: (state.width.max(1.0) * scale_factor).ceil() as u32,
+                height: (state.height.max(1.0) * scale_factor).ceil() as u32,
+            });
+            ops
+        }
+    }
+
     #[derive(Debug)]
     pub struct WinitWindow {
         window: Arc<NativeWindow>,
@@ -1892,7 +1964,7 @@ mod winit_impl {
         pending_events: Vec<InputEvent>,
         pointer_position: (f32, f32),
         modifiers: Modifiers,
-        applied_text_input_state: Option<TextInputState>,
+        text_input_sync: TextInputSync,
         current_cursor_style: CursorStyle,
         /// Last applied (min, max) content-size limits, so per-frame application
         /// only reaches winit when the effective limits actually change.
@@ -1933,7 +2005,7 @@ mod winit_impl {
                     pending_events: Vec::new(),
                     pointer_position: (0.0, 0.0),
                     modifiers: Modifiers::default(),
-                    applied_text_input_state: None,
+                    text_input_sync: TextInputSync::default(),
                     current_cursor_style: CursorStyle::Arrow,
                     applied_size_limits: None,
                 },
@@ -2359,42 +2431,32 @@ mod winit_impl {
         }
 
         fn sync_text_input_state(&mut self, state: Option<TextInputState>) {
-            if self.applied_text_input_state == state {
-                return;
-            }
-            if self.applied_text_input_state.is_some() != state.is_some() {
-                self.window.set_ime_allowed(state.is_some());
-            }
-            self.applied_text_input_state = state;
-
-            let Some(state) = state else {
-                return;
-            };
-
-            let purpose = match state.purpose {
-                TextInputPurpose::Normal => ImePurpose::Normal,
-                TextInputPurpose::Password => ImePurpose::Password,
-            };
-            self.window.set_ime_purpose(purpose);
             let scale_factor = self.window.scale_factor();
-            assert!(
-                scale_factor.is_finite() && scale_factor > 0.0,
-                "hydrolysis winit backend received invalid scale factor {scale_factor}"
-            );
-            let cursor_origin =
-                LogicalPosition::new(state.x, state.y).to_physical::<f64>(scale_factor);
-            let cursor_size = LogicalSize::new(state.width.max(1.0), state.height.max(1.0))
-                .to_physical::<f64>(scale_factor);
-            self.window.set_ime_cursor_area(
-                PhysicalPosition::new(
-                    cursor_origin.x.round() as i32,
-                    cursor_origin.y.round() as i32,
-                ),
-                PhysicalSize::new(
-                    cursor_size.width.ceil() as u32,
-                    cursor_size.height.ceil() as u32,
-                ),
-            );
+            for op in self.text_input_sync.sync(state, scale_factor) {
+                match op {
+                    TextInputSyncOp::Allowed(allowed) => {
+                        self.window.set_ime_allowed(allowed);
+                    }
+                    TextInputSyncOp::Purpose(purpose) => {
+                        let purpose = match purpose {
+                            TextInputPurpose::Normal => ImePurpose::Normal,
+                            TextInputPurpose::Password => ImePurpose::Password,
+                        };
+                        self.window.set_ime_purpose(purpose);
+                    }
+                    TextInputSyncOp::CursorArea {
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        self.window.set_ime_cursor_area(
+                            PhysicalPosition::new(x, y),
+                            PhysicalSize::new(width, height),
+                        );
+                    }
+                }
+            }
         }
 
         fn set_cursor_style(&mut self, style: CursorStyle) {
@@ -2498,8 +2560,117 @@ mod winit_impl {
         use winit::dpi::PhysicalPosition;
         use winit::event::MouseScrollDelta;
 
-        use super::{map_cursor_position, map_scroll_delta, should_emit_keyboard_text};
-        use crate::platform::Modifiers;
+        use super::{
+            TextInputSync, TextInputSyncOp, map_cursor_position, map_scroll_delta,
+            should_emit_keyboard_text,
+        };
+        use crate::platform::{Modifiers, TextInputPurpose, TextInputState};
+
+        fn input_state(x: f64, y: f64, purpose: TextInputPurpose) -> TextInputState {
+            TextInputState {
+                x,
+                y,
+                width: 2.0,
+                height: 14.0,
+                purpose,
+            }
+        }
+
+        #[test]
+        fn sync_reports_allowed_only_across_focus_transitions() {
+            let mut sync = TextInputSync::default();
+            let state = input_state(10.0, 20.0, TextInputPurpose::Normal);
+            assert_eq!(
+                sync.sync(Some(state), 1.0),
+                vec![
+                    TextInputSyncOp::Allowed(true),
+                    TextInputSyncOp::Purpose(TextInputPurpose::Normal),
+                    TextInputSyncOp::CursorArea {
+                        x: 10,
+                        y: 20,
+                        width: 2,
+                        height: 14,
+                    },
+                ]
+            );
+            // Same state again: nothing to do.
+            assert_eq!(sync.sync(Some(state), 1.0), Vec::new());
+            // Losing focus disables the IME once and reports nothing else.
+            assert_eq!(sync.sync(None, 1.0), vec![TextInputSyncOp::Allowed(false)]);
+            assert_eq!(sync.sync(None, 1.0), Vec::new());
+            // Refocusing re-enables it.
+            assert_eq!(
+                sync.sync(Some(state), 1.0),
+                vec![
+                    TextInputSyncOp::Allowed(true),
+                    TextInputSyncOp::Purpose(TextInputPurpose::Normal),
+                    TextInputSyncOp::CursorArea {
+                        x: 10,
+                        y: 20,
+                        width: 2,
+                        height: 14,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn sync_reports_purpose_transitions() {
+            let mut sync = TextInputSync::default();
+            let normal = input_state(10.0, 20.0, TextInputPurpose::Normal);
+            let password = input_state(10.0, 20.0, TextInputPurpose::Password);
+            let _ = sync.sync(Some(normal), 1.0);
+            // Purpose changed while staying allowed: no Allowed op, but the
+            // new purpose and cursor area are reported.
+            assert_eq!(
+                sync.sync(Some(password), 1.0),
+                vec![
+                    TextInputSyncOp::Purpose(TextInputPurpose::Password),
+                    TextInputSyncOp::CursorArea {
+                        x: 10,
+                        y: 20,
+                        width: 2,
+                        height: 14,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn sync_converts_logical_geometry_to_physical_pixels() {
+            let mut sync = TextInputSync::default();
+            let ops = sync.sync(Some(input_state(10.4, 20.5, TextInputPurpose::Normal)), 2.0);
+            assert_eq!(
+                ops.last(),
+                Some(&TextInputSyncOp::CursorArea {
+                    x: 21,      // 10.4 * 2.0 rounded
+                    y: 41,      // 20.5 * 2.0 rounded
+                    width: 4,   // max(2,1) * 2.0 ceiled
+                    height: 28, // max(14,1) * 2.0 ceiled
+                })
+            );
+        }
+
+        #[test]
+        fn sync_never_swallows_a_moving_caret() {
+            let mut sync = TextInputSync::default();
+            let _ = sync.sync(Some(input_state(10.0, 20.0, TextInputPurpose::Normal)), 1.0);
+            // Only the caret x moves: the state differs, so the equality
+            // early-return must not drop the update.
+            let ops = sync.sync(Some(input_state(12.0, 20.0, TextInputPurpose::Normal)), 1.0);
+            assert_eq!(
+                ops,
+                vec![
+                    TextInputSyncOp::Purpose(TextInputPurpose::Normal),
+                    TextInputSyncOp::CursorArea {
+                        x: 12,
+                        y: 20,
+                        width: 2,
+                        height: 14,
+                    },
+                ]
+            );
+        }
 
         #[test]
         fn cursor_position_is_converted_to_logical_coordinates() {

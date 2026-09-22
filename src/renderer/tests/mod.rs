@@ -10,6 +10,7 @@ use executor_core::async_task::{self, AsyncTask, Runnable};
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
+mod ime;
 mod layout_contract;
 mod perf_full_rebuild;
 mod perf_scroll;
@@ -2319,7 +2320,7 @@ fn ime_preedit_commit_and_disable_update_focused_text_target() {
         !renderer.take_rebuild_request(),
         "text input focus changes must not rebuild the view body"
     );
-    assert!(renderer.handle_ime_preedit("拼音"));
+    assert!(renderer.handle_ime_preedit("拼音", Some(0)));
     assert_eq!(renderer.text_editing.ime_preedit.as_deref(), Some("拼音"));
     assert!(renderer.handle_ime_commit("中"));
     assert_eq!(renderer.text_editing.ime_preedit, None);
@@ -2334,7 +2335,7 @@ fn ime_preedit_commit_and_disable_update_focused_text_target() {
         ("中".len(), "中".len())
     );
 
-    assert!(renderer.handle_ime_preedit("候选"));
+    assert!(renderer.handle_ime_preedit("候选", Some(0)));
     assert!(renderer.handle_ime_disabled());
     assert_eq!(renderer.text_editing.ime_preedit, None);
     assert_eq!(
