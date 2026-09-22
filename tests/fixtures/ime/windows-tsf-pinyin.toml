@@ -4,6 +4,8 @@
 # GCS_COMPSTR in the same message — so the commit lands BEFORE the preedit is
 # cleared. Every keystroke is consumed by the IME before it reaches the
 # application: no plain key or text events are ever delivered.
+# Order derived from the documented TSF/IMM message flow above; not an
+# observed platform trace.
 final_text = "你好"
 selection = [6, 6]
 committing_key_swallowed = true

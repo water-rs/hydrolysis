@@ -5,6 +5,8 @@
 # `Ime::Commit(syllable)`, and `Ime::Disabled`; the next syllable's
 # WM_IME_STARTCOMPOSITION then starts a fresh composition. Keys never reach
 # the application.
+# Order derived from the documented IMM message flow above; not an
+# observed platform trace.
 final_text = "한글"
 # Byte-offset selection: "한글" is two 3-byte jamo-syllable characters.
 selection = [6, 6]

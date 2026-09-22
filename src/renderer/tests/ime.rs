@@ -179,6 +179,48 @@ fn push_step(runtime: &mut HeadlessRuntime, step: &FixtureStep) {
     }
 }
 
+/// One key event as a platform would deliver it — the same construction the
+/// fixture parser applies, for tests that write their batches in code.
+fn key_event(key: Key, code: Code, state: KeyState, modifiers: Modifiers) -> InputEvent {
+    let key_code = match &key {
+        Key::Named(named) => KeyCode::Named(format!("{named:?}")),
+        Key::Character(value) => KeyCode::Character(value.clone()),
+    };
+    InputEvent::Key {
+        key: key_code,
+        logical_key: key,
+        physical_code: code,
+        repeat: false,
+        state,
+        modifiers,
+    }
+}
+
+/// Mounts a single-line field plus a Submit button — the form proves which
+/// keys reached ordinary handling.
+fn form_runtime() -> (HeadlessRuntime, Binding<Str>, Binding<bool>) {
+    let value = Binding::container(Str::default());
+    let submitted = Binding::bool(false);
+    let view = {
+        let value_for_view = value.clone();
+        let submitted_for_action = submitted.clone();
+        AnyView::new(vstack((
+            field("Name", &value_for_view).size(FIELD_WIDTH, FIELD_HEIGHT),
+            button("Submit").action(move || submitted_for_action.set(true)),
+        )))
+    };
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    press_text_input(&mut runtime, 0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(16));
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "pressing the field must focus it"
+    );
+    (runtime, value, submitted)
+}
+
 fn runtime_with(view: AnyView) -> HeadlessRuntime {
     let view = RefCell::new(Some(view));
     let builder = AnyViewBuilder::<AnyView>::new(move || {
@@ -558,45 +600,89 @@ fn surface_view(scene: bool, log: ProbeLog) -> AnyView {
     )))
 }
 
-/// The composition session a surface should observe, derived mechanically
-/// from the fixture's IME events — never from its key/text events: those are
-/// the platform's composing keystrokes and stay inside the IME.
+/// The input a surface should observe, derived mechanically from the
+/// fixture through the same ordered ownership the runner applies: IME
+/// events map onto the composition session, while a key/text event reaches
+/// the sink only when it is ordinary input at that point in the batch —
+/// the platform's composing and co-delivered keystrokes stay inside the
+/// IME.
 fn expected_surface_events(fixture: &Fixture) -> Vec<SurfaceInputEvent> {
     let mut composing = false;
     let mut expected = Vec::new();
+    // The codes of presses the IME consumed: their releases are swallowed
+    // whenever they arrive, even in a later batch after the commit.
+    let mut swallowed: Vec<Code> = Vec::new();
     for step in &fixture.steps {
-        for event in &step.events {
+        let events: Vec<InputEvent> = step.events.iter().map(to_input_event).collect();
+        let owned = crate::runner::ime::ime_owned_events(&events, composing);
+        for (event, owned) in events.into_iter().zip(owned) {
             match event {
-                FixtureEvent::Preedit { preedit } if preedit.text.is_empty() => {
-                    if composing {
-                        composing = false;
-                        expected.push(SurfaceInputEvent::CompositionCancel);
+                InputEvent::ImePreedit { text, caret } => {
+                    if text.is_empty() {
+                        if composing {
+                            composing = false;
+                            expected.push(SurfaceInputEvent::CompositionCancel);
+                        }
+                    } else {
+                        if !composing {
+                            composing = true;
+                            expected.push(SurfaceInputEvent::CompositionStart);
+                        }
+                        expected.push(SurfaceInputEvent::CompositionUpdate {
+                            text: text.into(),
+                            caret,
+                        });
                     }
                 }
-                FixtureEvent::Preedit { preedit } => {
-                    if !composing {
-                        composing = true;
-                        expected.push(SurfaceInputEvent::CompositionStart);
-                    }
-                    expected.push(SurfaceInputEvent::CompositionUpdate {
-                        text: preedit.text.clone().into(),
-                        caret: preedit.caret,
-                    });
-                }
-                FixtureEvent::Commit { commit } => {
+                InputEvent::ImeCommit { text } => {
                     if !composing {
                         expected.push(SurfaceInputEvent::CompositionStart);
                     }
                     composing = false;
-                    expected.push(SurfaceInputEvent::CompositionCommit(commit.clone().into()));
+                    expected.push(SurfaceInputEvent::CompositionCommit(text.into()));
                 }
-                FixtureEvent::Disabled { .. } => {
+                InputEvent::ImeDisabled => {
                     if composing {
                         composing = false;
                         expected.push(SurfaceInputEvent::CompositionCancel);
                     }
                 }
-                FixtureEvent::Key { .. } | FixtureEvent::Text { .. } => {}
+                InputEvent::Key {
+                    logical_key,
+                    physical_code,
+                    repeat,
+                    state,
+                    modifiers,
+                    ..
+                } => {
+                    let pressed = state == KeyState::Pressed;
+                    let consumed = if pressed {
+                        owned
+                    } else if let Some(index) =
+                        swallowed.iter().position(|code| *code == physical_code)
+                    {
+                        swallowed.swap_remove(index);
+                        true
+                    } else {
+                        owned
+                    };
+                    if pressed && owned {
+                        swallowed.push(physical_code);
+                    }
+                    if !consumed {
+                        expected.push(SurfaceInputEvent::Key {
+                            pressed,
+                            key: logical_key,
+                            code: physical_code,
+                            modifiers: modifiers.into(),
+                            repeat,
+                        });
+                    }
+                }
+                InputEvent::TextInput { text } if !owned => {
+                    expected.push(SurfaceInputEvent::TextInput(text.into()));
+                }
+                _ => {}
             }
         }
     }
@@ -733,4 +819,249 @@ fn focus_move_or_window_unfocus_cancels_the_composition() {
         "window unfocus must cancel the composition"
     );
     assert!(second.get().to_string().is_empty());
+}
+
+/// A key press immediately followed by a commit is that keystroke delivered
+/// twice — once as a key, once as the commit's text. The commit is the
+/// authoritative text, so the press must not insert a second copy.
+#[test]
+fn a_key_co_delivered_with_its_commit_inserts_text_once() {
+    let (mut runtime, value, _submitted) = form_runtime();
+    let mut now = Instant::now() + Duration::from_millis(200);
+    for event in [
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        InputEvent::ImeCommit {
+            text: "a".to_owned(),
+        },
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+    ] {
+        runtime.push_input_event(event);
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        value.get().to_string().as_str(),
+        "a",
+        "the commit carries the keystroke's text; its key press must not \
+         insert a second copy"
+    );
+}
+
+/// Direct-commit mode: a plain key delivered with its commit, then Enter in
+/// the same batch. The commit ends nothing, so the Enter is ordinary input
+/// and must activate the keyboard-focused control.
+#[test]
+fn enter_after_a_direct_commit_still_reaches_the_form() {
+    let (mut runtime, value, submitted) = form_runtime();
+    let mut now = Instant::now() + Duration::from_millis(200);
+    // Tab moves keyboard focus to the button; the field keeps text focus.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "traversing to the button must not steal the field's text focus"
+    );
+
+    for event in [
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        InputEvent::ImeCommit {
+            text: "a".to_owned(),
+        },
+        key_event(
+            Key::Character("a".into()),
+            Code::KeyA,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Pressed,
+            Modifiers::default(),
+        ),
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Released,
+            Modifiers::default(),
+        ),
+    ] {
+        runtime.push_input_event(event);
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(value.get().to_string().as_str(), "a");
+    assert!(
+        submitted.get(),
+        "the Enter after a commit is ordinary input and must activate the \
+         focused control — batch-level ownership would have swallowed it"
+    );
+}
+
+/// A shortcut pressed right after a commit — in the same batch — is not the
+/// composition's: the chord reaches the application.
+#[test]
+fn a_shortcut_after_a_commit_reaches_the_application() {
+    let log = ProbeLog::default();
+    let mut runtime = runtime_with(surface_view(false, log.clone()));
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    let _ = log.drain();
+    press(
+        &mut runtime,
+        (SURFACE_ORIGIN_X + 20.0) as f32,
+        (SURFACE_ORIGIN_Y + 20.0) as f32,
+    );
+    let mut now = start + Duration::from_millis(100);
+    let _ = runtime.pump_at(false, now);
+    let _ = log.drain();
+
+    let chord = Modifiers {
+        control: true,
+        ..Modifiers::default()
+    };
+    for event in [
+        InputEvent::ImeCommit {
+            text: "x".to_owned(),
+        },
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Pressed,
+            chord,
+        ),
+        key_event(
+            Key::Named(NamedKey::Enter),
+            Code::Enter,
+            KeyState::Released,
+            chord,
+        ),
+    ] {
+        runtime.push_input_event(event);
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::CompositionStart,
+            SurfaceInputEvent::CompositionCommit("x".into()),
+            SurfaceInputEvent::Key {
+                pressed: true,
+                key: Key::Named(NamedKey::Enter),
+                code: Code::Enter,
+                modifiers: keyboard_types::Modifiers::CONTROL,
+                repeat: false,
+            },
+            SurfaceInputEvent::Key {
+                pressed: false,
+                key: Key::Named(NamedKey::Enter),
+                code: Code::Enter,
+                modifiers: keyboard_types::Modifiers::CONTROL,
+                repeat: false,
+            },
+        ],
+        "the chord after a direct commit must reach the embedded sink"
+    );
+}
+
+/// One batch holding a whole composition lifecycle: the confirming Enter is
+/// swallowed (no stray newline), the commit lands, and the key events after
+/// it are ordinary input again.
+#[test]
+fn keys_after_a_composition_commit_in_one_batch_are_ordinary_input() {
+    for multiline in [false, true] {
+        let value = Binding::container(Str::default());
+        let view = {
+            let value_for_view = value.clone();
+            let field_view = field("Name", &value_for_view);
+            let field_view = if multiline {
+                field_view.disable_line_limit()
+            } else {
+                field_view
+            };
+            AnyView::new(vstack((field_view.size(
+                FIELD_WIDTH,
+                if multiline {
+                    EDITOR_HEIGHT
+                } else {
+                    FIELD_HEIGHT
+                },
+            ),)))
+        };
+        let mut runtime = runtime_with(view);
+        let start = Instant::now();
+        settled(&mut runtime, start);
+        press_text_input(&mut runtime, 0);
+        let mut now = start + Duration::from_millis(16);
+        let _ = runtime.pump_at(false, now);
+
+        for event in [
+            InputEvent::ImePreedit {
+                text: "n".to_owned(),
+                caret: Some(1),
+            },
+            key_event(
+                Key::Named(NamedKey::Enter),
+                Code::Enter,
+                KeyState::Pressed,
+                Modifiers::default(),
+            ),
+            InputEvent::ImeCommit {
+                text: "你".to_owned(),
+            },
+            key_event(
+                Key::Named(NamedKey::Enter),
+                Code::Enter,
+                KeyState::Released,
+                Modifiers::default(),
+            ),
+            key_event(
+                Key::Character("x".into()),
+                Code::KeyX,
+                KeyState::Pressed,
+                Modifiers::default(),
+            ),
+            key_event(
+                Key::Character("x".into()),
+                Code::KeyX,
+                KeyState::Released,
+                Modifiers::default(),
+            ),
+        ] {
+            runtime.push_input_event(event);
+        }
+        now += Duration::from_millis(16);
+        let _ = runtime.pump_at(false, now);
+        assert_eq!(
+            value.get().to_string().as_str(),
+            "你x",
+            "multiline={multiline}: the confirming Enter must stay inside \
+             the composition — a leaked newline would read `你\nx` — while \
+             the later `x` is ordinary input"
+        );
+    }
 }

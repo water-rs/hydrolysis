@@ -3,6 +3,9 @@
 # keystroke (including the tone letter the IME consumes) arrives as a plain
 # key event with keysym-derived text, in the same flush as the preedit it
 # produced. IBus commits before clearing the preedit.
+# Order derived from the documented flow above (winit source and
+# text-input-v3 semantics); the wl_keyboard co-delivery is not an observed
+# platform trace.
 final_text = "hoàn"
 selection = [5, 5]
 committing_key_swallowed = true

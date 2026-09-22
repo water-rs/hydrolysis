@@ -199,20 +199,6 @@ pub enum InputEvent {
     CloseRequested,
 }
 
-impl InputEvent {
-    /// Whether the event carries IME composition data — a live preedit or a
-    /// commit. When any event in a platform batch qualifies, the plain
-    /// key/text events in that batch are the IME's own composing keystrokes,
-    /// not application input.
-    pub(crate) fn is_composition_event(&self) -> bool {
-        match self {
-            Self::ImePreedit { text, .. } => !text.is_empty(),
-            Self::ImeCommit { .. } => true,
-            _ => false,
-        }
-    }
-}
-
 /// Errors raised by surface acquisition/presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceError {

@@ -5,6 +5,8 @@
 # kana-to-kanji conversion commits one clause at a time while the rest keeps
 # composing, and GCS_CURSORPOS reports the conversion caret INSIDE the
 # marked string. Keys are consumed by the IME entirely.
+# Order derived from the documented IMM message flow above; not an
+# observed platform trace.
 final_text = "今日は"
 selection = [9, 9]
 committing_key_swallowed = true
