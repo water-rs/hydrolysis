@@ -298,6 +298,16 @@ impl RenderNode {
                 if needs_next {
                     renderer.request_refresh();
                 }
+                // Content that handles its own input receives the pointer,
+                // keyboard, IME and scroll events landing on its bounds, through
+                // the same routing an interactive `GpuSurface` uses.
+                if node.content.borrow().wants_input_events() {
+                    renderer.register_surface_input_target(
+                        ctx.bounds,
+                        ctx.hit_transform,
+                        Rc::clone(&node.content),
+                    );
+                }
             }
             RenderNode::GpuSurface(node) => {
                 #[cfg(feature = "accessibility")]
