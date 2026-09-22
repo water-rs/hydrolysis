@@ -268,12 +268,21 @@ impl RenderNode {
                 renderer.pop_accessibility_owner();
             }
             RenderNode::SceneView(node) => {
-                // The drawing's own name, read every flush: content that follows
-                // a signal answers with what it currently draws.
-                let content_label = node.content.borrow().accessibility_label();
+                // The drawing's own name and content, read every flush: content
+                // that follows a signal answers with what it currently draws.
+                let (content_label, content_value) = {
+                    let content = node.content.borrow();
+                    (content.accessibility_label(), content.accessibility_value())
+                };
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, Some(ctx), env, content_label);
+                emit_graphics_image_accessibility(
+                    renderer,
+                    Some(ctx),
+                    env,
+                    content_label,
+                    content_value,
+                );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 let mut scene = vello::Scene::new();
@@ -310,9 +319,21 @@ impl RenderNode {
                 }
             }
             RenderNode::GpuSurface(node) => {
+                // The surface view's own name and content, read every flush —
+                // it is re-asked after each frame it draws.
+                let (content_label, content_value) = {
+                    let runtime = node.runtime.borrow();
+                    (runtime.accessibility_label(), runtime.accessibility_value())
+                };
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, Some(ctx), env, None);
+                emit_graphics_image_accessibility(
+                    renderer,
+                    Some(ctx),
+                    env,
+                    content_label,
+                    content_value,
+                );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
                 node.flush(renderer, ctx);
@@ -503,14 +524,33 @@ impl RenderNode {
                 renderer.pop_accessibility_owner();
             }
             RenderNode::SceneView(node) => {
-                let content_label = node.content.borrow().accessibility_label();
+                let (content_label, content_value) = {
+                    let content = node.content.borrow();
+                    (content.accessibility_label(), content.accessibility_value())
+                };
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, None, env, content_label);
+                emit_graphics_image_accessibility(
+                    renderer,
+                    None,
+                    env,
+                    content_label,
+                    content_value,
+                );
                 renderer.pop_accessibility_owner();
             }
             RenderNode::GpuSurface(node) => {
+                let (content_label, content_value) = {
+                    let runtime = node.runtime.borrow();
+                    (runtime.accessibility_label(), runtime.accessibility_value())
+                };
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(renderer, None, env, None);
+                emit_graphics_image_accessibility(
+                    renderer,
+                    None,
+                    env,
+                    content_label,
+                    content_value,
+                );
                 renderer.pop_accessibility_owner();
             }
             RenderNode::ViewEffect(node) => {
