@@ -35,6 +35,11 @@ pub(crate) struct TextEditingState {
     pub(crate) active_text_context_menu: Option<ActiveTextContextMenu>,
     focused_text_input: RefCell<Option<InteractionKey>>,
     pub(crate) ime_preedit: Option<Str>,
+    /// Byte offset of the caret inside `ime_preedit`, as the platform
+    /// reported it — the live composition caret the candidate window must
+    /// follow. `None` when the platform did not report one, or whenever
+    /// `ime_preedit` is `None`.
+    pub(crate) ime_preedit_caret: Option<usize>,
     pub(crate) text_caret_fade_started_at: Option<Instant>,
     pub(crate) text_caret_next_frame_at: Option<Instant>,
     pub(crate) text_caret_motion: Option<TextCaretMotion>,
@@ -90,6 +95,12 @@ impl TextEditingState {
     /// This frame's position of the drag-selected input, if it is still emitted.
     pub(crate) fn selection_drag_index(&self) -> Option<usize> {
         self.index_of(&self.active_text_selection_drag.as_ref()?.target)
+    }
+
+    /// Drops the stored composition, keeping its caret consistent.
+    fn take_ime_preedit(&mut self) -> Option<Str> {
+        self.ime_preedit_caret = None;
+        self.ime_preedit.take()
     }
 }
 
@@ -1048,7 +1059,7 @@ impl SemanticCore {
             binding.set(true);
         }
         self.text_editing.active_text_selection_drag = None;
-        self.text_editing.ime_preedit = None;
+        self.text_editing.take_ime_preedit();
         if focused_something {
             self.reset_text_caret_animation(self.frame_instant());
         } else {
@@ -1675,7 +1686,7 @@ impl HydrolysisRenderer {
 
 impl SemanticCore {
     pub fn handle_text_input(&mut self, text: &str) -> bool {
-        let preedit_cleared = self.text_editing.ime_preedit.take().is_some();
+        let preedit_cleared = self.text_editing.take_ime_preedit().is_some();
         if text.is_empty() {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
@@ -1699,29 +1710,40 @@ impl SemanticCore {
         changed
     }
 
-    pub fn handle_ime_preedit(&mut self, text: &str) -> bool {
-        if !self.text_editing.has_focus() {
+    pub fn handle_ime_preedit(&mut self, text: &str, caret: Option<usize>) -> bool {
+        // A password-purpose field is not IME-allowed: the platform should
+        // never mark one up, and a stray preedit must not draw extra mask
+        // glyphs that leak the composition's length.
+        let ime_allowed = self
+            .text_editing
+            .focused_target()
+            .is_some_and(|target| target.purpose != TextInputPurpose::Password);
+        if !ime_allowed {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
                 text = text,
-                "ime preedit dropped without focused text input"
+                "ime preedit dropped without an ime-allowed focused text input"
             );
             return false;
         }
-        let next = if text.is_empty() {
-            None
+        let (next, next_caret) = if text.is_empty() {
+            (None, None)
         } else {
-            Some(Str::from(text.to_owned()))
+            (Some(Str::from(text.to_owned())), caret)
         };
-        if self.text_editing.ime_preedit == next {
+        if self.text_editing.ime_preedit == next
+            && self.text_editing.ime_preedit_caret == next_caret
+        {
             return false;
         }
         self.text_editing.ime_preedit = next;
+        self.text_editing.ime_preedit_caret = next_caret;
         self.reset_text_caret_animation(self.frame_instant());
         tracing::trace!(
             target: "waterui::hydrolysis::input",
             focused = ?self.text_editing.focused_key(),
             preedit = ?self.text_editing.ime_preedit,
+            caret = ?self.text_editing.ime_preedit_caret,
             "ime preedit updated"
         );
         true
@@ -1732,7 +1754,7 @@ impl SemanticCore {
     }
 
     pub fn handle_ime_disabled(&mut self) -> bool {
-        let changed = self.text_editing.ime_preedit.take().is_some();
+        let changed = self.text_editing.take_ime_preedit().is_some();
         tracing::trace!(
             target: "waterui::hydrolysis::input",
             changed,
@@ -1794,14 +1816,14 @@ impl SemanticCore {
         } else {
             match key {
                 KeyCode::Named(value) if value == "Backspace" => {
-                    if self.text_editing.ime_preedit.take().is_some() {
+                    if self.text_editing.take_ime_preedit().is_some() {
                         true
                     } else {
                         self.delete_backward_in_focused_target()
                     }
                 }
                 KeyCode::Named(value) if value == "Delete" => {
-                    if self.text_editing.ime_preedit.take().is_some() {
+                    if self.text_editing.take_ime_preedit().is_some() {
                         true
                     } else {
                         self.delete_forward_in_focused_target()

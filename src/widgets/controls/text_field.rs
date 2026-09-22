@@ -265,19 +265,45 @@ pub(crate) fn render_text_field_parts(
         line_limit,
         selection_menu,
     };
-    let (prompt, value, preedit) = {
-        let preedit = if is_focused {
-            ctx.renderer_mut().current_ime_preedit().unwrap_or_default()
+    let (prompt, value, preedit, preedit_caret) = {
+        let (preedit, preedit_caret) = if is_focused {
+            (
+                ctx.renderer_mut().current_ime_preedit().unwrap_or_default(),
+                ctx.renderer_mut().current_ime_preedit_caret(),
+            )
         } else {
-            Str::new()
+            (Str::new(), None)
         };
         (
             ctx.renderer_mut().read_signal(&prompt_signal).to_plain(),
             ctx.renderer_mut().read_signal(&value_binding).to_plain(),
             preedit,
+            preedit_caret,
         )
     };
-    let committed_with_preedit = value.clone() + preedit.as_str();
+    // Normalize the selection first: the composition is inserted at — and
+    // replaces — the live selection, so the display string and the caret
+    // mapping below both need the clamped range.
+    let (selection_start, selection_end) = {
+        let mut slot = selection_slot.borrow_mut();
+        if !slot.initialized {
+            slot.anchor = value.len();
+            slot.focus = value.len();
+            slot.initialized = true;
+        }
+        slot.anchor = clamp_to_char_boundary(value.as_str(), slot.anchor);
+        slot.focus = clamp_to_char_boundary(value.as_str(), slot.focus);
+        (slot.anchor.min(slot.focus), slot.anchor.max(slot.focus))
+    };
+    let committed_with_preedit = if preedit.is_empty() {
+        value.clone()
+    } else {
+        let mut text = String::with_capacity(value.len() + preedit.len());
+        text.push_str(&value[..selection_start]);
+        text.push_str(preedit.as_str());
+        text.push_str(&value[selection_end..]);
+        Str::from(text)
+    };
     let use_placeholder = committed_with_preedit.is_empty();
     let label_target = if is_focused || !committed_with_preedit.is_empty() {
         1.0
@@ -333,14 +359,14 @@ pub(crate) fn render_text_field_parts(
         env,
         Some(text_bounds.width() as f32),
     );
-    let display_layout_height = HydrolysisRenderer::build_text_layout(
+    let display_layout = HydrolysisRenderer::build_text_layout(
         ctx.state_mut(),
         display_styled.clone(),
         HorizontalAlignment::Leading,
         env,
         Some(text_bounds.width() as f32),
-    )
-    .height();
+    );
+    let display_layout_height = display_layout.height();
     let text_clip_bounds = material_input_text_clip_rect(
         field_rect,
         text_bounds,
@@ -348,13 +374,6 @@ pub(crate) fn render_text_field_parts(
     );
     let selection = {
         let mut slot = selection_slot.borrow_mut();
-        if !slot.initialized {
-            slot.anchor = value.len();
-            slot.focus = value.len();
-            slot.initialized = true;
-        }
-        slot.anchor = clamp_to_char_boundary(value.as_str(), slot.anchor);
-        slot.focus = clamp_to_char_boundary(value.as_str(), slot.focus);
         let anchor_layout = input_model.layout_index_from_plain_index(slot.anchor);
         let focus_layout = input_model.layout_index_from_plain_index(slot.focus);
         let anchor_affinity = if anchor_layout >= value.len() {
@@ -387,8 +406,27 @@ pub(crate) fn render_text_field_parts(
         );
         ctx.pop_layer();
     }
-    let cursor_geometry = selection.focus().geometry(&committed_layout, 1.0);
+    // While composing, the caret the platform cares about is the live
+    // composition caret inside the marked text, mapped through the display
+    // layout — never the committed text's caret, which makes the candidate
+    // window refuse to follow the composition (#25).
+    let cursor_geometry = if preedit.is_empty() {
+        selection.focus().geometry(&committed_layout, 1.0)
+    } else {
+        let caret = preedit_caret.map_or(preedit.len(), |caret| {
+            clamp_to_char_boundary(preedit.as_str(), caret.min(preedit.len()))
+        });
+        let caret_index = selection_start + caret;
+        let affinity = if caret_index >= committed_with_preedit.len() {
+            parley::Affinity::Upstream
+        } else {
+            parley::Affinity::Downstream
+        };
+        parley::Cursor::from_byte_index(&display_layout, caret_index, affinity)
+            .geometry(&display_layout, 1.0)
+    };
     let cursor_area = material_input_cursor_rect(
+        field_rect,
         text_bounds,
         vello::kurbo::Rect::new(
             cursor_geometry.x0,
@@ -396,7 +434,6 @@ pub(crate) fn render_text_field_parts(
             cursor_geometry.x1,
             cursor_geometry.y1,
         ),
-        display_layout_height,
     );
     let hit_transform = ctx.hit_transform;
     if !disabled {
@@ -656,6 +693,7 @@ pub(crate) fn render_secure_field_parts(
     }
     let cursor_geometry = selection.focus().geometry(&committed_layout, 1.0);
     let cursor_area = material_input_cursor_rect(
+        field_rect,
         text_bounds,
         vello::kurbo::Rect::new(
             cursor_geometry.x0,
@@ -663,7 +701,6 @@ pub(crate) fn render_secure_field_parts(
             cursor_geometry.x1,
             cursor_geometry.y1,
         ),
-        committed_layout.height(),
     );
     let hit_transform = ctx.hit_transform;
     if !disabled {
@@ -846,25 +883,27 @@ fn material_input_text_clip_rect(
 }
 
 fn material_input_cursor_rect(
+    field_rect: vello::kurbo::Rect,
     text_rect: vello::kurbo::Rect,
     cursor_geometry: vello::kurbo::Rect,
-    fallback_layout_height: f32,
 ) -> vello::kurbo::Rect {
     let x0 = text_rect.x0 + cursor_geometry.x0;
     let x1 = text_rect.x0 + cursor_geometry.x1.max(cursor_geometry.x0 + 1.0);
-    let fallback_height = f64::from(fallback_layout_height)
-        .max(1.0)
-        .min(text_rect.height());
-    let geometry_height = cursor_geometry.height();
-    let (y0, y1) = if geometry_height > 1.0 {
+    // `text_rect` is the thin baseline strip the layout sits on — a real
+    // cursor already reports the shaped line's block extent (which legitimately
+    // rises above the strip's top and sinks below its bottom), so it is never
+    // clamped back into the strip. An empty layout reports no line at all:
+    // the caret still occupies the first line, which runs from the strip down
+    // to the field's bottom edge.
+    let (y0, y1) = if cursor_geometry.height() > 1.0 {
         (
             text_rect.y0 + cursor_geometry.y0,
             text_rect.y0 + cursor_geometry.y1,
         )
     } else {
-        (text_rect.y0, text_rect.y0 + fallback_height)
+        (text_rect.y0, field_rect.y1.max(text_rect.y0 + 1.0))
     };
-    vello::kurbo::Rect::new(x0, y0, x1, y1.min(text_rect.y1))
+    vello::kurbo::Rect::new(x0, y0, x1, y1)
 }
 
 /// Emits a retained text field's accessibility node and text-input target for
@@ -1130,24 +1169,29 @@ mod tests {
     }
 
     #[test]
-    fn material_input_cursor_uses_fallback_height_for_empty_layout_geometry() {
-        let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
+    fn material_input_cursor_spans_the_line_for_empty_layout_geometry() {
+        // A material field's text rect is the thin baseline strip; with no
+        // shaped line the caret still spans the strip down to the field's
+        // bottom edge rather than collapsing into the strip.
+        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
+        let text = vello::kurbo::Rect::new(16.0, 24.75, 184.0, 26.0);
         let empty_geometry = vello::kurbo::Rect::new(0.0, 0.0, 0.0, 1.0);
 
-        let cursor = material_input_cursor_rect(text, empty_geometry, 22.0);
+        let cursor = material_input_cursor_rect(field, text, empty_geometry);
 
         assert_eq!(cursor.x0, text.x0);
         assert_eq!(cursor.x1, text.x0 + 1.0);
         assert_eq!(cursor.y0, text.y0);
-        assert_eq!(cursor.y1, text.y0 + 22.0);
+        assert_eq!(cursor.y1, field.y1);
     }
 
     #[test]
     fn material_input_cursor_preserves_non_empty_layout_geometry() {
+        let field = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 56.0);
         let text = vello::kurbo::Rect::new(16.0, 26.0, 184.0, 60.0);
         let geometry = vello::kurbo::Rect::new(42.0, 3.0, 43.0, 25.0);
 
-        let cursor = material_input_cursor_rect(text, geometry, 34.0);
+        let cursor = material_input_cursor_rect(field, text, geometry);
 
         assert_eq!(cursor.x0, text.x0 + 42.0);
         assert_eq!(cursor.x1, text.x0 + 43.0);
