@@ -5,6 +5,9 @@
 # keysym-derived `text`) events arrive in the same flush as the preedit they
 # produced. IBus emits CommitText before UpdatePreeditText/HidePreeditText,
 # so the commit arrives BEFORE the cleared preedit.
+# Order derived from the documented flow above (winit source and
+# text-input-v3 semantics); the wl_keyboard co-delivery is not an observed
+# platform trace.
 final_text = "你好"
 selection = [6, 6]
 committing_key_swallowed = true
