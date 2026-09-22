@@ -3095,6 +3095,7 @@ dependencies = [
  "serde_json",
  "shaderloom",
  "tiny_http",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "ui-events-winit",
