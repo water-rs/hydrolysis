@@ -960,12 +960,17 @@ impl TextNode {
 /// ([`SceneContent::accessibility_label`](waterui_graphics::SceneContent::accessibility_label)):
 /// a formula's `MathML`, say. It names the node only when the application named
 /// nothing, so `.a11y_label(…)` still wins.
+///
+/// `default_value` is the drawing's spoken content beside its name
+/// ([`SceneContent::accessibility_value`](waterui_graphics::SceneContent::accessibility_value)),
+/// emitted under the same precedence: a scoped `.a11y_value(…)` wins it.
 #[cfg(feature = "accessibility")]
 pub(super) fn emit_graphics_image_accessibility(
     renderer: &mut crate::renderer::SemanticCore,
     ctx: Option<RenderContext>,
     env: &Environment,
     default_label: Option<String>,
+    default_value: Option<String>,
 ) {
     if env
         .get::<AccessibilityHidden>()
@@ -979,6 +984,9 @@ pub(super) fn emit_graphics_image_accessibility(
     if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
         node.set_label(label);
     }
+    if let Some(value) = renderer.resolve_accessibility_value(env, default_value) {
+        node.set_value(value);
+    }
     let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
 }
 
@@ -988,5 +996,6 @@ pub(super) fn emit_graphics_image_accessibility(
     _ctx: Option<RenderContext>,
     _env: &Environment,
     _default_label: Option<String>,
+    _default_value: Option<String>,
 ) {
 }

@@ -1339,6 +1339,22 @@ impl SemanticCore {
     }
 
     #[cfg(feature = "accessibility")]
+    pub(crate) fn resolve_accessibility_value(
+        &mut self,
+        env: &Environment,
+        default_value: Option<String>,
+    ) -> Option<String> {
+        // Same subscription as the label: a reactive value republishes without
+        // a subtree rebuild.
+        let signal = env
+            .get::<AccessibilityValue>()
+            .map(|value| value.signal().clone());
+        signal
+            .map(|signal| self.read_signal(&signal).as_str().to_owned())
+            .or(default_value)
+    }
+
+    #[cfg(feature = "accessibility")]
     pub(crate) fn resolve_accessibility_role(
         &self,
         env: &Environment,

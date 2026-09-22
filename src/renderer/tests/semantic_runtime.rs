@@ -32,7 +32,9 @@ use waterui_form::picker::date::DatePicker;
 use waterui_form::picker::{PickerStyle, picker};
 use waterui_form::secure::secure;
 use waterui_graphics::Color;
-use waterui_graphics::{Scene2D, SceneContent, SceneView};
+use waterui_graphics::{
+    GpuContext, GpuFrame, GpuSurface, GpuView, Scene2D, SceneContent, SceneView,
+};
 use waterui_layout::stack::{VStackLayout, vstack};
 use waterui_layout::{Divider, LazyContainer, scroll};
 use waterui_navigation::NavigationView;
@@ -1407,6 +1409,38 @@ fn scene_view_emits_an_image_leaf_with_its_content_label() {
     let (_, image_node) =
         find_only(&update, Role::Image).expect("the scene view must emit an Image leaf");
     assert_eq!(image_node.label(), Some("weekly chart"));
+}
+
+/// A GPU surface whose view names itself and reports its own semantic content —
+/// the pair of answers its `Image` node has to publish, since a surface reaches
+/// the tree as bare pixels.
+struct GpuChart;
+
+impl GpuView for GpuChart {
+    async fn setup(&mut self, _ctx: &GpuContext<'_>, _env: &mut Environment) {}
+
+    fn render(&mut self, _frame: &mut GpuFrame) {}
+
+    fn accessibility_label(&self) -> Option<String> {
+        Some("weekly chart".to_string())
+    }
+
+    fn accessibility_value(&self) -> Option<String> {
+        Some("up 12% week over week".to_string())
+    }
+}
+
+#[test]
+fn gpu_surface_emits_an_image_leaf_with_its_label_and_value() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(GpuSurface::new(GpuChart))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, image_node) =
+        find_only(&update, Role::Image).expect("the gpu surface must emit an Image leaf");
+    assert_eq!(image_node.label(), Some("weekly chart"));
+    assert_eq!(image_node.value(), Some("up 12% week over week"));
 }
 
 #[test]
