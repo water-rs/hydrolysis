@@ -897,7 +897,7 @@ impl RenderNode {
         RenderNode::SceneView(Box::new(SceneViewNode {
             #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
-            content: RefCell::new(content),
+            content: Rc::new(RefCell::new(content)),
         }))
     }
 
