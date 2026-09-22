@@ -3,50 +3,6 @@
 
 use super::*;
 
-#[cfg(feature = "winit")]
-#[cfg(not(target_os = "linux"))]
-pub(super) fn probe_accessibility_runtime() -> bool {
-    true
-}
-
-#[cfg(feature = "winit")]
-#[cfg(target_os = "linux")]
-pub(super) fn probe_accessibility_runtime() -> bool {
-    let output = Command::new("busctl")
-        .args([
-            "--user",
-            "get-property",
-            "org.a11y.Bus",
-            "/org/a11y/bus",
-            "org.a11y.Status",
-            "ScreenReaderEnabled",
-        ])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            let stderr = str::from_utf8(&output.stderr)
-                .map(str::trim)
-                .unwrap_or("<non-utf8 stderr>");
-            tracing::warn!(
-                target: "waterui::hydrolysis::a11y",
-                status = %output.status,
-                stderr,
-                "disabling accesskit adapter: org.a11y.Bus probe failed"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "waterui::hydrolysis::a11y",
-                error = %error,
-                "disabling accesskit adapter: failed to execute busctl probe"
-            );
-            false
-        }
-    }
-}
-
 /// The work scheduled for the next pump of a window.
 ///
 /// Every awake frame runs the full pass — apply pending patches, re-read

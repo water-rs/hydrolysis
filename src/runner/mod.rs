@@ -7,20 +7,16 @@
 //! - [`fonts`]: resource font registration and CJK fallbacks
 //! - [`diagnostics`]: opt-in frame timing reports
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::cell::Cell;
-use std::time::Duration;
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
-#[cfg(feature = "winit")]
-#[cfg(target_os = "linux")]
-use std::{process::Command, str};
-
 #[cfg(feature = "accessibility")]
 use accesskit::{
     ActionRequest as AccessibilityActionRequest, TreeUpdate as AccessibilityTreeUpdate,
 };
 use executor_core::try_init_local_executor;
 use nami::Signal as _;
+#[cfg(not(target_arch = "wasm32"))]
+use std::cell::Cell;
+use std::time::Duration;
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use waterui::app::App;
 use waterui::component::table::TableConfig;
 use waterui::graphics::Color;
