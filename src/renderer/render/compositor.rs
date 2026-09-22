@@ -771,6 +771,24 @@ impl EmbeddedGpuSurfaceRuntime {
         self.surface.as_ref().and_then(GpuSurface::ime_caret)
     }
 
+    /// The name the surface's view gives itself for assistive technologies.
+    ///
+    /// `None` while the surface is moved out for async setup, exactly as a
+    /// view that never names itself answers `None`.
+    pub(crate) fn accessibility_label(&self) -> Option<String> {
+        self.surface
+            .as_ref()
+            .and_then(GpuSurface::accessibility_label)
+    }
+
+    /// The semantic content the surface's view reports — what it *says* —
+    /// announced beside its label. `None` during async setup, as above.
+    pub(crate) fn accessibility_value(&self) -> Option<String> {
+        self.surface
+            .as_ref()
+            .and_then(GpuSurface::accessibility_value)
+    }
+
     pub(crate) fn handle_trackpad_pan(&mut self, dx: f32, dy: f32, phase: TouchPhase) -> bool {
         match phase {
             TouchPhase::Started => {
