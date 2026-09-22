@@ -653,7 +653,7 @@ pub(crate) struct SceneViewNode {
     /// The owned scene content, re-drawn each flush (it reads its own reactive
     /// inputs in `build_scene`). `RefCell` because `build_scene` needs `&mut` but
     /// `flush` takes `&self`.
-    pub(super) content: RefCell<Box<dyn waterui_graphics::SceneContent>>,
+    pub(super) content: Rc<RefCell<Box<dyn waterui_graphics::SceneContent>>>,
 }
 
 /// An embedded `GpuSurface` leaf that OWNS its `EmbeddedGpuSurfaceRuntime`
@@ -717,7 +717,7 @@ impl GpuSurfaceNode {
         // gesture: it gets raw scroll deltas instead of the pan state
         // `GpuFrame` exposes, so the two never both interpret one gesture.
         if self.runtime.borrow().wants_input_events() {
-            renderer.register_gpu_surface_input_target(
+            renderer.register_surface_input_target(
                 ctx.bounds,
                 ctx.hit_transform,
                 Rc::clone(&self.runtime),

@@ -2,9 +2,12 @@
 //!
 //! An embedded surface is a rectangle of the window that draws its own
 //! interactive content and therefore owns the input landing on it: a browser
-//! engine, or any [`GpuSurface`](waterui_graphics::GpuSurface) whose view asks
+//! engine, any [`GpuSurface`](waterui_graphics::GpuSurface) whose view asks
 //! for input with
-//! [`wants_input_events`](waterui_graphics::GpuView::wants_input_events).
+//! [`wants_input_events`](waterui_graphics::GpuView::wants_input_events), or
+//! any [`SceneView`](waterui_graphics::SceneView) whose content asks the same
+//! through
+//! [`SceneContent::wants_input_events`](waterui_graphics::SceneContent::wants_input_events).
 //!
 //! There is one target list, one hit-test arbitration and one focus/capture
 //! state machine for both, reached through [`EmbeddedInputSink`], and one
@@ -16,6 +19,7 @@
 
 use super::*;
 use crate::renderer::render::EmbeddedGpuSurfaceRuntime;
+use waterui_graphics::SceneContent;
 use waterui_graphics::input::{Code, Key, ScrollUnit, SurfaceInputEvent, SurfacePointerButton};
 
 /// One key transition, in the W3C UI Events vocabulary.
@@ -103,22 +107,53 @@ impl EmbeddedInputTarget {
     }
 }
 
-/// Bridges an embedded [`GpuSurface`](waterui_graphics::GpuSurface) runtime to
-/// the neutral [`SurfaceInputEvent`] vocabulary.
-///
-/// Constructed fresh on every registration; [`Self::identity`] reports the
-/// runtime it drives, which outlives the frame.
-pub(crate) struct GpuSurfaceInputSink {
-    runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
+/// Something that consumes the neutral [`SurfaceInputEvent`] vocabulary: the
+/// runtime of an embedded [`GpuSurface`](waterui_graphics::GpuSurface), or the
+/// content of a self-drawn [`SceneView`](waterui_graphics::SceneView).
+pub(crate) trait SurfaceInputReceiver {
+    fn input(&mut self, event: &SurfaceInputEvent);
+    /// The receiver's text caret, in logical surface-local coordinates.
+    fn ime_caret(&self) -> Option<vello::kurbo::Rect>;
 }
 
-impl GpuSurfaceInputSink {
-    pub(crate) const fn new(runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>) -> Self {
-        Self { runtime }
+impl SurfaceInputReceiver for EmbeddedGpuSurfaceRuntime {
+    fn input(&mut self, event: &SurfaceInputEvent) {
+        Self::input(self, event);
+    }
+
+    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
+        Self::ime_caret(self)
+    }
+}
+
+/// Scene content redraws through the invalidator it was handed at build time,
+/// so delivering an event requests no frame here: content whose drawing the
+/// event changed calls that invalidator itself.
+impl SurfaceInputReceiver for Box<dyn SceneContent> {
+    fn input(&mut self, event: &SurfaceInputEvent) {
+        SceneContent::input(&mut **self, event);
+    }
+
+    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
+        SceneContent::ime_caret(&**self)
+    }
+}
+
+/// Bridges a [`SurfaceInputReceiver`] to the renderer's embedded input routing.
+///
+/// Constructed fresh on every registration; [`Self::identity`] reports the
+/// receiver it drives, which outlives the frame.
+pub(crate) struct SurfaceInputSink<R> {
+    receiver: Rc<RefCell<R>>,
+}
+
+impl<R: SurfaceInputReceiver> SurfaceInputSink<R> {
+    pub(crate) const fn new(receiver: Rc<RefCell<R>>) -> Self {
+        Self { receiver }
     }
 
     fn send(&self, event: &SurfaceInputEvent) {
-        self.runtime.borrow_mut().input(event);
+        self.receiver.borrow_mut().input(event);
     }
 }
 
@@ -136,9 +171,9 @@ fn surface_pointer_button(button: PointerButton) -> Option<SurfacePointerButton>
     }
 }
 
-impl EmbeddedInputSink for GpuSurfaceInputSink {
+impl<R: SurfaceInputReceiver> EmbeddedInputSink for SurfaceInputSink<R> {
     fn identity(&self) -> *const () {
-        Rc::as_ptr(&self.runtime).cast()
+        Rc::as_ptr(&self.receiver).cast()
     }
 
     fn set_focus(&self, focused: bool) {
@@ -222,7 +257,7 @@ impl EmbeddedInputSink for GpuSurfaceInputSink {
     }
 
     fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
-        self.runtime.borrow().ime_caret()
+        self.receiver.borrow().ime_caret()
     }
 }
 
@@ -266,18 +301,19 @@ impl SemanticCore {
             });
     }
 
-    /// Registers an embedded [`GpuSurface`](waterui_graphics::GpuSurface)
-    /// runtime whose view asked for input.
-    pub(crate) fn register_gpu_surface_input_target(
+    /// Registers a surface whose drawing asked for input: an embedded
+    /// [`GpuSurface`](waterui_graphics::GpuSurface) runtime or a
+    /// [`SceneView`](waterui_graphics::SceneView)'s content.
+    pub(crate) fn register_surface_input_target<R: SurfaceInputReceiver + 'static>(
         &mut self,
         local_bounds: vello::kurbo::Rect,
         transform: vello::kurbo::Affine,
-        runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
+        receiver: Rc<RefCell<R>>,
     ) {
         self.register_embedded_input_target(
             local_bounds,
             transform,
-            Rc::new(GpuSurfaceInputSink::new(runtime)),
+            Rc::new(SurfaceInputSink::new(receiver)),
         );
     }
 

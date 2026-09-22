@@ -1,4 +1,5 @@
-//! Input delivery to a `GpuSurface` whose view handles its own input.
+//! Input delivery to a `GpuSurface` whose view handles its own input, and to a
+//! `SceneView` whose content does.
 //!
 //! These drive the real runner path — `push_input_event` →
 //! `handle_input_events` → hit-test arbitration → sink — so what they observe
@@ -17,12 +18,15 @@ use std::time::Instant;
 use waterui::ViewExt as _;
 use waterui::component::text;
 use waterui_core::AnyView;
+use waterui_core::View;
 use waterui_core::handler::AnyViewBuilder;
 use waterui_graphics::input::{
     Code, Key, Modifiers as W3cModifiers, NamedKey, ScrollUnit, SurfaceInputEvent,
     SurfacePointerButton,
 };
-use waterui_graphics::{GpuContext, GpuFrame, GpuSurface, GpuView};
+use waterui_graphics::{
+    GpuContext, GpuFrame, GpuSurface, GpuView, Scene2D, SceneContent, SceneInvalidator, SceneView,
+};
 use waterui_layout::stack::vstack;
 
 use super::{MinimalTestTheme, test_environment};
@@ -96,7 +100,7 @@ impl GpuView for SilentProbe {
     }
 }
 
-fn runtime_with(surface: GpuSurface) -> HeadlessRuntime {
+fn runtime_with(surface: impl View) -> HeadlessRuntime {
     let surface = RefCell::new(Some(surface));
     let builder = AnyViewBuilder::<AnyView>::new(move || {
         let surface = surface
@@ -530,6 +534,113 @@ fn a_view_that_does_not_want_input_receives_none() {
          claim the keyboard from the widgets around it"
     );
     assert!(runtime.focused_text_input_state().is_none());
+}
+
+/// Scene content that handles its own input, recording what reaches it and
+/// redrawing through its invalidator on every key, the way a terminal redraws
+/// the grid a keystroke changed.
+struct SceneProbe {
+    log: ProbeLog,
+    builds: Rc<RefCell<usize>>,
+    invalidator: Option<SceneInvalidator>,
+}
+
+impl SceneContent for SceneProbe {
+    fn build_scene(&mut self, _scene: &mut dyn Scene2D, _width: f32, _height: f32) -> bool {
+        *self.builds.borrow_mut() += 1;
+        false
+    }
+
+    fn set_invalidator(&mut self, invalidator: Option<SceneInvalidator>) {
+        self.invalidator = invalidator;
+    }
+
+    fn wants_input_events(&self) -> bool {
+        true
+    }
+
+    fn input(&mut self, event: &SurfaceInputEvent) {
+        self.log.0.borrow_mut().push(event.clone());
+        if matches!(event, SurfaceInputEvent::Key { .. }) {
+            let invalidator = self
+                .invalidator
+                .as_ref()
+                .expect("a mounted scene holds its invalidator");
+            invalidator();
+        }
+    }
+
+    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
+        Some(vello::kurbo::Rect::new(10.0, 20.0, 12.0, 38.0))
+    }
+}
+
+#[test]
+fn scene_content_that_wants_input_is_routed_like_a_surface() {
+    let log = ProbeLog::default();
+    let builds = Rc::new(RefCell::new(0));
+    let mut runtime = runtime_with(SceneView::new(SceneProbe {
+        log: log.clone(),
+        builds: Rc::clone(&builds),
+        invalidator: None,
+    }));
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    assert_eq!(log.drain(), Vec::new(), "nothing reaches unfocused content");
+
+    press_at(&mut runtime, 12.0, 34.0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+            SurfaceInputEvent::PointerButton {
+                pressed: true,
+                button: SurfacePointerButton::Primary,
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+        ],
+        "a press lands on the content in its own logical coordinates and \
+         focuses it"
+    );
+    let state = runtime
+        .focused_text_input_state()
+        .expect("focused content publishes its caret");
+    assert!(
+        (state.x - (SURFACE_ORIGIN_X + 10.0)).abs() < 0.01
+            && (state.y - (SURFACE_ORIGIN_Y + 20.0)).abs() < 0.01,
+        "the content's caret is projected into the window (got {}, {})",
+        state.x,
+        state.y
+    );
+
+    // Idle frames later — the targets re-emitted from scratch each time — the
+    // keyboard still reaches the content, and the redraw its invalidator asks
+    // for runs.
+    for frame in 8..12 {
+        let _ = runtime.pump_at(false, start + Duration::from_millis(frame * 16));
+    }
+    let builds_before = *builds.borrow();
+    runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Pressed));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(300));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(316));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Key {
+            pressed: true,
+            key: Key::Character("a".to_owned()),
+            code: Code::KeyA,
+            modifiers: W3cModifiers::empty(),
+            repeat: false,
+        }],
+    );
+    assert!(
+        *builds.borrow() > builds_before,
+        "content that invalidated on input is drawn again"
+    );
 }
 
 /// The winit translation this backend delegates to `ui-events-winit` is not
