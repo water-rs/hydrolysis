@@ -26,8 +26,8 @@ use waterui_core::Environment;
 use waterui_text::FontCollection;
 
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{DeviceEvent, DeviceId, ElementState, TouchPhase, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::{Window as NativeWindow, WindowId};
@@ -274,6 +274,7 @@ pub fn run(
             .collect(),
         pending_window_queue,
         windows: HashMap::new(),
+        popup_window_ids: std::collections::HashSet::new(),
         gpu_context: None,
         accesskit_adapters: HashMap::new(),
         last_accessibility_updates: HashMap::new(),
@@ -281,9 +282,15 @@ pub fn run(
         local_runnable_rx,
         event_proxy,
         render_diagnostics_config,
+        outside_pointer_presses: 0,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
+    // Raw pointer presses are reported for every device on the seat, not just
+    // presses over our own windows — that is the only way a press on the
+    // desktop or in another app reaches us, and it is what dismisses popup
+    // windows when the pointer goes down outside them.
+    event_loop.listen_device_events(DeviceEvents::Always);
     let run_result = event_loop.run_app(&mut runner);
     waterui_locale::shutdown_current_thread_runtime_locale_state();
     let _ = runner.drain_local_executor_queue();
@@ -305,6 +312,9 @@ struct WinitRunner {
     pending_windows: Vec<PendingWindow>,
     pending_window_queue: Rc<RefCell<Vec<PendingWindow>>>,
     windows: HashMap<WindowId, RuntimeWindow<WinitWindow>>,
+    /// Transient popup windows (mounted through `PopupWindowManager`): a
+    /// pointer press that lands outside every app window dismisses them.
+    popup_window_ids: std::collections::HashSet<WindowId>,
     gpu_context: Option<WinitGpuContext>,
     accesskit_adapters: HashMap<WindowId, AccessKitAdapter>,
     last_accessibility_updates: HashMap<WindowId, accesskit::TreeUpdate>,
@@ -315,6 +325,10 @@ struct WinitRunner {
     local_runnable_rx: mpsc::Receiver<Runnable>,
     event_proxy: winit::event_loop::EventLoopProxy<RunnerEvent>,
     render_diagnostics_config: RenderDiagnosticsConfig,
+    /// Raw pointer presses seen at the device level but not (yet) matched by a
+    /// window-level pointer event in the same event batch. What is left over
+    /// when the batch settles is a press outside every window we own.
+    outside_pointer_presses: u32,
 }
 
 /// Loads the window icon the water CLI stages into the asset bundle root.
@@ -468,6 +482,9 @@ impl WinitRunner {
         super::seed_core(&mut renderer, &self.fonts);
         let mut runtime =
             RuntimeWindow::new(window, platform, renderer, self.render_diagnostics_config);
+        if !activates {
+            self.popup_window_ids.insert(runtime.platform.id());
+        }
         let _ = pump_window_semantics(&mut runtime, &self.env);
         // The adapter is created unconditionally: accesskit resolves the
         // platform accessibility bus itself, lazily, so a missing org.a11y.Bus
@@ -568,6 +585,7 @@ impl WinitRunner {
 
         for id in close_ids {
             self.windows.remove(&id);
+            self.popup_window_ids.remove(&id);
             self.accesskit_adapters.remove(&id);
             self.last_accessibility_updates.remove(&id);
         }
@@ -603,6 +621,20 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
         event: WindowEvent,
     ) {
         let _ = self.drain_local_executor_queue();
+        let is_pointer_press = match &event {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } => true,
+            WindowEvent::Touch(touch) => touch.phase == TouchPhase::Started,
+            _ => false,
+        };
+        if is_pointer_press {
+            // A press that lands on one of our windows cancels out one raw
+            // device-level press; what remains at the end of the batch is
+            // presses outside every window we own.
+            self.outside_pointer_presses = self.outside_pointer_presses.saturating_sub(1);
+        }
         let should_close = {
             let Some(runtime) = self.windows.get_mut(&window_id) else {
                 return;
@@ -622,6 +654,7 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
 
         if should_close {
             self.windows.remove(&window_id);
+            self.popup_window_ids.remove(&window_id);
             self.accesskit_adapters.remove(&window_id);
             self.last_accessibility_updates.remove(&window_id);
             if self.windows.is_empty() && self.pending_windows.is_empty() {
@@ -676,7 +709,36 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+        if self.outside_pointer_presses > 0 {
+            self.outside_pointer_presses = 0;
+            // A raw device press left over after window-level presses are
+            // accounted for landed outside every window we own — on X11 the
+            // server only delivers pointer events for presses on our own
+            // windows, so this is the only signal a press on the desktop or
+            // another app ever reaches us. That outside press is what popup
+            // windows dismiss on.
+            for id in &self.popup_window_ids {
+                if let Some(runtime) = self.windows.get(id) {
+                    runtime.window.state.set(WindowState::Closed);
+                }
+            }
+        }
         self.remove_closed_windows(event_loop);
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::Button {
+            state: ElementState::Pressed,
+            ..
+        } = event
+        {
+            self.outside_pointer_presses += 1;
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: RunnerEvent) {
