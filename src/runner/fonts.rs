@@ -503,11 +503,11 @@ mod tests {
     }
 
     /// And the same statement from the other side: a script Roboto does not
-    /// carry must be answered by a face that is *not* bundled. Without this the
+    /// carry must be answered by a face other than the pinned Roboto. Without this the
     /// test above could pass on a collection that had quietly stopped
     /// registering anything at all.
     #[test]
-    fn a_script_roboto_lacks_is_answered_by_a_platform_face() {
+    fn a_script_roboto_lacks_is_answered_by_a_fallback_face() {
         let service = test_host_service();
         for (script, text) in &SAMPLES[2..] {
             let (_, _, all_bundled) = shaped(&service, text);
