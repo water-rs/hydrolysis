@@ -2022,46 +2022,57 @@ mod winit_impl {
         }
     }
 
-    /// The requested window frame held until the window has actually
-    /// mapped.
+    /// The window setup the app requested, held until the window has
+    /// actually mapped.
     ///
-    /// `apply_properties` pushes the requested frame while the window is
-    /// still unmapped (`with_visible(false)`); on X11 geometry set on an
-    /// unmapped window is dropped and the window manager's own placement —
-    /// position and initial size alike — wins the race. The requested frame
-    /// is held for one re-delivery on the first event that only reaches a
-    /// mapped window. Events that precede the map leave it armed.
+    /// `apply_properties` pushes the requested frame and state while the
+    /// window is still unmapped (`with_visible(false)`); on X11 a request
+    /// made of an unmapped window is dropped and the window manager's own
+    /// initial state wins the race — its placement for geometry, a normal
+    /// window for `Fullscreen`/`Minimized`/`Closed`. The request is held
+    /// for one re-delivery on the first event that only reaches a mapped
+    /// window. Events that precede the map leave it armed.
     #[derive(Debug, Default)]
-    struct MappedFrameRetry {
-        pending: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    struct MappedRequestRetry {
+        pending: Option<PendingMappedRequest>,
         mapped: bool,
     }
 
-    impl MappedFrameRetry {
-        /// Records the requested frame while the window is not yet known to
-        /// be visible, overwriting any earlier pending one — the latest
-        /// request wins. Once a mapped event has been seen this never re-arms:
-        /// `is_visible` can lag the real map transition, and re-arming off it
-        /// would re-deliver a frame the live geometry has already overtaken.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct PendingMappedRequest {
+        position: LogicalPosition<f64>,
+        size: LogicalSize<f64>,
+        state: WindowState,
+    }
+
+    impl MappedRequestRetry {
+        /// Records the requested frame and state while the window is not
+        /// yet known to be visible, overwriting any earlier pending one —
+        /// the latest request wins. Once a mapped event has been seen this
+        /// never re-arms: `is_visible` can lag the real map transition, and
+        /// re-arming off it would re-deliver a request the live window has
+        /// already overtaken.
         fn arm(
             &mut self,
             visible: Option<bool>,
             position: LogicalPosition<f64>,
             size: LogicalSize<f64>,
+            state: WindowState,
         ) {
             if visible != Some(true) && !self.mapped {
-                self.pending = Some((position, size));
+                self.pending = Some(PendingMappedRequest {
+                    position,
+                    size,
+                    state,
+                });
             }
         }
 
-        /// Consumes the held frame on the first mapped-signal event —
+        /// Consumes the held request on the first mapped-signal event —
         /// `Moved`, `Resized`, `Occluded(false)`, or `ScaleFactorChanged`,
         /// each of which only reaches a mapped window — returning it for
         /// re-application. Other events leave it armed.
-        fn take_on_mapped_event(
-            &mut self,
-            event: &WindowEvent,
-        ) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+        fn take_on_mapped_event(&mut self, event: &WindowEvent) -> Option<PendingMappedRequest> {
             let mapped = matches!(
                 event,
                 WindowEvent::Moved(_)
@@ -2101,12 +2112,12 @@ mod winit_impl {
         /// reading the live geometry against the stale binding would yank
         /// the window straight back to its old frame.
         applied_frame: Option<waterui_core::layout::Rect>,
-        /// The requested window frame held until the window has actually
-        /// mapped (`with_visible(false)`): on X11 geometry pushed onto an
-        /// unmapped window is dropped, so the first mapped-signal event
-        /// re-delivers it — the window manager's own initial placement
+        /// The requested window frame and state held until the window has
+        /// actually mapped (`with_visible(false)`): on X11 a request made
+        /// of an unmapped window is dropped, so the first mapped-signal
+        /// event re-delivers it — the window manager's own initial state
         /// otherwise wins.
-        pending_mapped_frame: MappedFrameRetry,
+        pending_mapped_request: MappedRequestRetry,
         /// Explicit ProMotion opt-in: declares the 120Hz frame-rate demand to
         /// the window server while redraws are being requested. `None` before
         /// macOS 14.
@@ -2148,7 +2159,7 @@ mod winit_impl {
                     current_cursor_style: CursorStyle::Arrow,
                     applied_size_limits: None,
                     applied_frame: None,
-                    pending_mapped_frame: MappedFrameRetry::default(),
+                    pending_mapped_request: MappedRequestRetry::default(),
                 },
                 gpu,
             )
@@ -2190,13 +2201,37 @@ mod winit_impl {
             self.hybrid_compositor.overlay_surface(index)
         }
 
+        /// Pushes the requested `WindowState` to the window server. Shared
+        /// by `apply_properties` and the first-mapped-event re-delivery: on
+        /// X11 the same call made of an unmapped window is dropped.
+        fn apply_window_state(&self, state: WindowState) {
+            match state {
+                WindowState::Normal => {
+                    self.window.set_minimized(false);
+                    self.window.set_fullscreen(None);
+                }
+                WindowState::Minimized => {
+                    self.window.set_minimized(true);
+                }
+                WindowState::Fullscreen => {
+                    self.window
+                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
+                }
+                WindowState::Closed => {
+                    self.window.set_visible(false);
+                }
+            }
+        }
+
         pub fn handle_window_event(&mut self, event: &WindowEvent) {
-            // The first mapped-signal event re-applies the frame the app
-            // asked for: geometry pushed while unmapped was dropped by
-            // X11, and the window manager's own placement won the race.
-            if let Some((position, size)) = self.pending_mapped_frame.take_on_mapped_event(event) {
-                self.window.set_outer_position(position);
-                let _ = self.window.request_inner_size(size);
+            // The first mapped-signal event re-applies the frame and state
+            // the app asked for: requests made of an unmapped window were
+            // dropped by X11, and the window manager's own state won the
+            // race.
+            if let Some(request) = self.pending_mapped_request.take_on_mapped_event(event) {
+                self.window.set_outer_position(request.position);
+                let _ = self.window.request_inner_size(request.size);
+                self.apply_window_state(request.state);
             }
             match event {
                 WindowEvent::CloseRequested => {
@@ -2517,14 +2552,20 @@ mod winit_impl {
             let applied = self.applied_frame;
             self.applied_frame = Some(frame);
             // Arm the post-map re-apply while the window is still hidden:
-            // the frame pushed above reaches an unmapped X11 window and is
-            // dropped, so the first mapped event must re-deliver origin and
-            // size — a window manager that stretched the window on map is
-            // put back on the requested frame. Once the window is visible
-            // the app-requested frame was already enforced and further
-            // `frame` changes just flow through the ordinary path.
-            self.pending_mapped_frame
-                .arm(self.window.is_visible(), target_position, target_size);
+            // the frame and state pushed above reach an unmapped X11 window
+            // and are dropped, so the first mapped event must re-deliver
+            // them — a window manager that stretched the window on map is
+            // put back on the requested frame, and a Fullscreen/Minimized/
+            // Closed request is restored after the window exists. Once the
+            // window is visible the app-requested setup was already
+            // enforced and further changes just flow through the ordinary
+            // path.
+            self.pending_mapped_request.arm(
+                self.window.is_visible(),
+                target_position,
+                target_size,
+                window.state.get(),
+            );
             let size_changed = applied.is_none_or(|applied| *applied.size() != *frame.size());
             let origin_changed = applied.is_none_or(|applied| applied.origin() != frame.origin());
             let current_position = self
@@ -2550,22 +2591,7 @@ mod winit_impl {
             {
                 let _ = self.window.request_inner_size(target_size);
             }
-            match window.state.get() {
-                WindowState::Normal => {
-                    self.window.set_minimized(false);
-                    self.window.set_fullscreen(None);
-                }
-                WindowState::Minimized => {
-                    self.window.set_minimized(true);
-                }
-                WindowState::Fullscreen => {
-                    self.window
-                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
-                }
-                WindowState::Closed => {
-                    self.window.set_visible(false);
-                }
-            }
+            self.apply_window_state(window.state.get());
         }
 
         fn drain_events(&mut self) -> Vec<InputEvent> {
@@ -2972,16 +2998,22 @@ mod winit_impl {
 
         #[test]
         fn the_requested_frame_is_reapplied_on_the_first_mapped_event() {
+            use waterui::window::WindowState;
             use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
             use winit::event::WindowEvent;
 
-            let mut retry = super::MappedFrameRetry::default();
+            let mut retry = super::MappedRequestRetry::default();
             let position = LogicalPosition::new(12.0, 34.0);
             let size = LogicalSize::new(800.0, 300.0);
+            let armed = |position, size, state| super::PendingMappedRequest {
+                position,
+                size,
+                state,
+            };
 
             // Armed while the window is unmapped: a pre-map event leaves the
             // frame held; the first mapped-signal event returns it once.
-            retry.arm(Some(false), position, size);
+            retry.arm(Some(false), position, size, WindowState::Normal);
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Focused(true)),
                 None,
@@ -2989,7 +3021,7 @@ mod winit_impl {
             );
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
-                Some((position, size)),
+                Some(armed(position, size, WindowState::Normal)),
             );
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Resized(PhysicalSize::new(1, 1))),
@@ -2997,42 +3029,78 @@ mod winit_impl {
                 "the re-apply fires once only"
             );
 
-            // A later request while still hidden replaces the earlier one.
-            let mut retry = super::MappedFrameRetry::default();
-            retry.arm(Some(false), position, size);
+            // A later request while still hidden replaces the earlier one —
+            // frame and state alike.
+            let mut retry = super::MappedRequestRetry::default();
+            retry.arm(Some(false), position, size, WindowState::Normal);
             let newer = (
                 LogicalPosition::new(56.0, 78.0),
                 LogicalSize::new(1024.0, 640.0),
             );
-            retry.arm(None, newer.0, newer.1);
+            retry.arm(None, newer.0, newer.1, WindowState::Fullscreen);
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Occluded(false)),
-                Some(newer),
+                Some(armed(newer.0, newer.1, WindowState::Fullscreen)),
             );
 
             // Once the window is visible nothing is held: the ordinary
             // frame-binding path applies later frames. `is_visible` may lag
             // the real map transition — a mapped event latches `mapped`, so
             // arming must not resurrect a retry the live geometry overtook.
-            let mut retry = super::MappedFrameRetry::default();
-            retry.arm(Some(false), position, size);
+            let mut retry = super::MappedRequestRetry::default();
+            retry.arm(Some(false), position, size, WindowState::Normal);
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
-                Some((position, size)),
+                Some(armed(position, size, WindowState::Normal)),
             );
-            retry.arm(None, newer.0, newer.1);
+            retry.arm(None, newer.0, newer.1, WindowState::Normal);
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
                 None,
                 "no re-arm is allowed once a mapped event has been seen"
             );
-            let mut retry = super::MappedFrameRetry::default();
-            retry.arm(Some(true), position, size);
+            let mut retry = super::MappedRequestRetry::default();
+            retry.arm(Some(true), position, size, WindowState::Normal);
             assert_eq!(
                 retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
                 None,
                 "a confirmed-visible window holds nothing"
             );
+        }
+
+        #[test]
+        fn a_premap_state_is_reapplied_on_the_first_mapped_event() {
+            use waterui::window::WindowState;
+            use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
+            use winit::event::WindowEvent;
+
+            let position = LogicalPosition::new(12.0, 34.0);
+            let size = LogicalSize::new(800.0, 300.0);
+
+            // A Fullscreen request made while the window was still unmapped
+            // is held and delivered once on the first mapped-signal event.
+            for state in [
+                WindowState::Fullscreen,
+                WindowState::Minimized,
+                WindowState::Closed,
+            ] {
+                let mut retry = super::MappedRequestRetry::default();
+                retry.arm(Some(false), position, size, state);
+                assert_eq!(
+                    retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
+                    Some(super::PendingMappedRequest {
+                        position,
+                        size,
+                        state,
+                    }),
+                    "a pre-map {state:?} must be re-delivered on the first mapped event"
+                );
+                assert_eq!(
+                    retry.take_on_mapped_event(&WindowEvent::Resized(PhysicalSize::new(1, 1))),
+                    None,
+                    "a pre-map {state:?} is delivered once only"
+                );
+            }
         }
     }
 }
