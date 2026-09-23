@@ -373,11 +373,19 @@ fn native_window_attributes(
     icon: Option<winit::window::Icon>,
 ) -> winit::window::WindowAttributes {
     let frame = crate::platform::validated_window_frame(window.frame.get());
+    // A Fullscreen request present at creation travels as a window
+    // attribute — the same way the position does — so the window manager
+    // sees it with the map request instead of after it. The retry in
+    // `apply_properties` still re-delivers it on the first mapped event:
+    // a state written between creation and map, or a manager that ignored
+    // the attribute, is covered by the same mapped signal.
+    let fullscreen = matches!(window.state.get(), waterui::window::WindowState::Fullscreen);
     NativeWindow::default_attributes()
         .with_window_icon(icon)
         .with_title(window.display_title().get().as_str())
         .with_resizable(window.resizable)
         .with_visible(false)
+        .with_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None)))
         .with_active(activates)
         .with_transparent(super::window_requires_transparency(window, env))
         .with_decorations(!matches!(
