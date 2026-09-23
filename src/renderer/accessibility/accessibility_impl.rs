@@ -1301,6 +1301,50 @@ impl SemanticCore {
         if let Some(icon) = view.downcast_ref::<Native<SystemIcon>>() {
             return Some(icon.as_inner().name.as_str().to_owned());
         }
+        // A control's `label` is the same `Label` a composite button's name
+        // derives from, so a container holding a bare control derives the
+        // control's own name rather than dropping it — e.g. a `List` row of a
+        // single `toggle("Wi-Fi")` announces "Wi-Fi".
+        macro_rules! label_from_native_config {
+            ($($config:ty),+ $(,)?) => {$(
+                if let Some(native) = view.downcast_ref::<Native<$config>>() {
+                    return self
+                        .accessibility_label_from_label(&native.as_inner().label, &scoped_env);
+                }
+            )+};
+        }
+        label_from_native_config!(
+            waterui_controls::toggle::ToggleConfig,
+            waterui_controls::slider::SliderConfig,
+            waterui_controls::stepper::StepperConfig,
+            waterui_controls::button::ButtonConfig,
+            waterui_controls::text_field::ResolvedTextFieldConfig,
+            waterui_form::secure::SecureFieldConfig,
+            waterui_form::picker::PickerConfig,
+            waterui_form::picker::date::DatePickerConfig,
+            waterui_form::picker::color::ColorPickerConfig,
+        );
+        if let Some(menu) = view.downcast_ref::<Native<waterui_controls::menu::ResolvedMenu>>() {
+            let styled = self.read_signal(&menu.as_inner().accessibility_label);
+            return Some(styled.to_semantic().to_string());
+        }
+        if let Some(progress) =
+            view.downcast_ref::<Native<waterui::component::progress::ProgressConfig>>()
+        {
+            return self
+                .accessibility_label_from_view_with_budget(
+                    &progress.as_inner().label,
+                    &scoped_env,
+                    remaining - 1,
+                )
+                .or_else(|| {
+                    self.accessibility_label_from_view_with_budget(
+                        &progress.as_inner().value_label,
+                        &scoped_env,
+                        remaining - 1,
+                    )
+                });
+        }
         if let Some(container) = view.downcast_ref::<Native<FixedContainer>>() {
             let (_, children) = container.as_inner().as_parts();
             let labels = children

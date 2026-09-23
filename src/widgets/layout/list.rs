@@ -4,7 +4,10 @@ use std::rc::Rc;
 
 use crate::gesture::GestureTarget;
 #[cfg(feature = "accessibility")]
-use crate::renderer::AccessibilityActionTarget;
+use crate::renderer::{
+    AccessibilityActionTarget, accessibility_container_child_environment,
+    hoist_accessibility_metadata,
+};
 use crate::renderer::{
     HydroNativeView, HydroState, RenderContext, VisibleSubviewCache, WidgetRenderContext,
     local_interaction_state, materialize_list_item, measure_list_intrinsic,
@@ -16,6 +19,8 @@ use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, NodeId as AccessibilityNodeId,
     Role as AccessibilityNodeRole,
 };
+#[cfg(feature = "accessibility")]
+use waterui::accessibility::{AccessibilityHidden, AccessibilityStateSignal};
 use waterui::component::list::{ListConfig, Move};
 use waterui::gesture::{DragEvent, DragGesture, Gesture, GesturePhase};
 use waterui_core::handler::{BoxedAction, boxed_action};
@@ -684,6 +689,13 @@ pub(crate) fn list_accessibility(
         list_node.set_scroll_y_max(metrics.max_y);
         list_node.add_action(AccessibilityAction::ScrollUp);
         list_node.add_action(AccessibilityAction::ScrollDown);
+        if ctx.is_none() {
+            // The semantic walk emits every row's content through the shared
+            // sub-view cache — the same frame bookkeeping the rendered flush
+            // runs keeps a row's retained node alive across emissions and
+            // evicts the ones no row touched this pass.
+            state.item_cache.borrow_mut().begin_frame();
+        }
         let mut y = viewport.y0 - metrics.offset_y + leading_offset;
         for index in emit_range {
             let row_env = env.clone();
@@ -751,30 +763,52 @@ pub(crate) fn list_accessibility(
                     list_node.push_child(node_id);
                 }
             }
+            // Hoist the row content's accessibility metadata onto a scoped row
+            // env, exactly as the retained build would: the row's `ListItem`
+            // node then claims the content's explicit label, role or
+            // identifier — not the first leaf inside it — and the subtree emits
+            // under the container-child env that strips that naming, so the
+            // row's name is announced once and children keep their own.
+            let mut item = item;
+            let (content, row_a11y_env) = hoist_accessibility_metadata(item.content, &row_env);
+            item.content = content;
+            // A hidden row vanishes whole — node and content — matching the
+            // naming container's treatment of `accessibilityHidden`.
+            let row_hidden = row_a11y_env
+                .get::<AccessibilityHidden>()
+                .is_some_and(AccessibilityHidden::is_hidden)
+                || row_a11y_env
+                    .get::<AccessibilityStateSignal>()
+                    .is_some_and(|signal| renderer.read_signal(signal.state()).is_hidden());
             let mut row_node = AccessibilityNode::new(
-                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::ListItem),
+                renderer.resolve_accessibility_role(&row_a11y_env, AccessibilityNodeRole::ListItem),
             );
-            let default_label = renderer.accessibility_label_from_view(&item.content, &row_env);
-            let label = renderer.resolve_accessibility_label(&row_env, default_label);
+            let default_label =
+                renderer.accessibility_label_from_view(&item.content, &row_a11y_env);
+            let label = renderer.resolve_accessibility_label(&row_a11y_env, default_label);
             if let Some(label) = label {
                 row_node.set_label(label);
             }
             row_node.add_action(AccessibilityAction::Focus);
             row_node.set_selected(renderer.read_signal(&item.selected));
-            let row_node_id = match ctx {
-                Some(ctx) => renderer.register_accessibility_child_node_with_key(
-                    key_base + A11Y_KEY_ROW,
-                    row_node,
-                    transformed_rect(ctx.hit_transform, row_rect),
-                    &row_env,
-                    None,
-                ),
-                None => renderer.register_accessibility_child_node_with_key_semantic(
-                    key_base + A11Y_KEY_ROW,
-                    row_node,
-                    &row_env,
-                    None,
-                ),
+            let row_node_id = if row_hidden {
+                None
+            } else {
+                match ctx {
+                    Some(ctx) => renderer.register_accessibility_child_node_with_key(
+                        key_base + A11Y_KEY_ROW,
+                        row_node,
+                        transformed_rect(ctx.hit_transform, row_rect),
+                        &row_a11y_env,
+                        None,
+                    ),
+                    None => renderer.register_accessibility_child_node_with_key_semantic(
+                        key_base + A11Y_KEY_ROW,
+                        row_node,
+                        &row_a11y_env,
+                        None,
+                    ),
+                }
             };
             if let Some(row_node_id) = row_node_id {
                 list_node.push_child(row_node_id);
@@ -785,6 +819,23 @@ pub(crate) fn list_accessibility(
                     &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base),
                     row_node_id,
                 );
+                if ctx.is_none() {
+                    // Emit the row content's own semantics under the row's node:
+                    // every text, control and image in the row becomes a child
+                    // of its `ListItem`, so row content reaches the semantic
+                    // tree. The rendered path parents the same subtree in
+                    // `render_list_parts`.
+                    renderer.push_accessibility_parent(row_node_id);
+                    let subtree_env = accessibility_container_child_environment(&row_a11y_env)
+                        .unwrap_or_else(|| row_a11y_env.clone());
+                    let content = item.content;
+                    {
+                        let mut cache = state.item_cache.borrow_mut();
+                        let subview = cache.entry(row_id, move || content);
+                        subview.emit_accessibility(renderer, &subtree_env);
+                    }
+                    renderer.pop_accessibility_parent();
+                }
             }
             if let Some(footer) = chrome.footer.clone() {
                 let footer_rect = vello::kurbo::Rect::new(
@@ -805,6 +856,9 @@ pub(crate) fn list_accessibility(
                     list_node.push_child(node_id);
                 }
             }
+        }
+        if ctx.is_none() {
+            state.item_cache.borrow_mut().end_frame();
         }
         let _ = renderer.register_accessibility_leaf(
             ctx,
@@ -991,6 +1045,23 @@ pub(crate) fn render_list_parts(
 
     for (index, row_id, item, resting_y, row_height) in rows {
         let row_env = env.clone();
+        // The row's `ListItem` node claims whatever naming scope the content
+        // carries — hoist the metadata off the view the same way
+        // `list_accessibility` does, or the first leaf inside the subtree
+        // would claim the row's explicit label for itself. The subtree then
+        // flushes under the container-child env that strips that naming.
+        #[cfg(feature = "accessibility")]
+        let (item, row_env) = {
+            let mut item = item;
+            let (content, scoped) = hoist_accessibility_metadata(item.content, &row_env);
+            item.content = content;
+            (item, scoped)
+        };
+        #[cfg(feature = "accessibility")]
+        let subtree_env =
+            accessibility_container_child_environment(&row_env).unwrap_or_else(|| row_env.clone());
+        #[cfg(not(feature = "accessibility"))]
+        let subtree_env = row_env.clone();
         let row_interaction_base = (i32::from(*row_id) as u32 as usize)
             .checked_mul(3)
             .expect("hydrolysis List interaction identity overflow");
@@ -1266,15 +1337,30 @@ pub(crate) fn render_list_parts(
             // cache, keyed by stable row id, instead of re-dispatching it each frame.
             // The cache keeps a row's node only while it stays visible (built on first
             // appearance, evicted by `end_frame` once it scrolls out), so reactive row
-            // content stays live across frames while virtualization is preserved. Row
-            // a11y is emitted by `list_accessibility`, so suppress the sub-view's own
-            // a11y (matching the old `dispatch_in_rect_without_accessibility`).
+            // content stays live across frames while virtualization is preserved. The
+            // sub-view's own a11y emits *inside* the row: `list_accessibility` emitted
+            // the row's `ListItem` node this frame and linked it to this row's
+            // interaction key — parenting the flush under that node keeps every text,
+            // control and image in the row a descendant of its `ListItem`. When the
+            // row emitted no node (a hidden or otherwise suppressed row), the subtree
+            // suppresses the same way the old flush-wide suppression did.
             let id = contents
                 .get_id(index)
                 .unwrap_or_else(|| panic!("hydrolysis list row {index} has no id"));
             let content = item.content;
             #[cfg(feature = "accessibility")]
-            ctx.renderer_mut().push_accessibility_suppression();
+            let row_parented = {
+                let row_node_id = ctx.renderer_mut().focus_node_for_key(
+                    &crate::renderer::InteractionKey::for_rc(state, row_interaction_base),
+                );
+                if let Some(row_node_id) = row_node_id {
+                    ctx.renderer_mut().push_accessibility_parent(row_node_id);
+                    true
+                } else {
+                    ctx.renderer_mut().push_accessibility_suppression();
+                    false
+                }
+            };
             let render_ctx = ctx.render_context();
             {
                 let state_ref = state.borrow();
@@ -1283,13 +1369,17 @@ pub(crate) fn render_list_parts(
                 subview.flush_in_rect(
                     ctx.renderer_mut(),
                     render_ctx,
-                    &row_env,
+                    &subtree_env,
                     bounded_proposal(content_rect),
                     content_rect,
                 );
             }
             #[cfg(feature = "accessibility")]
-            ctx.renderer_mut().pop_accessibility_suppression();
+            if row_parented {
+                ctx.renderer_mut().pop_accessibility_parent();
+            } else {
+                ctx.renderer_mut().pop_accessibility_suppression();
+            }
         }
 
         {

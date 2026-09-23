@@ -15,6 +15,7 @@ use accesskit::{
 use nami::Binding;
 use nami::Signal as _;
 use waterui::ViewExt as _;
+use waterui::accessibility::AccessibilityState;
 use waterui::component::list::{List, ListItem};
 use waterui::component::progress::progress;
 use waterui::component::table::{col, table};
@@ -35,7 +36,8 @@ use waterui_graphics::Color;
 use waterui_graphics::{
     GpuContext, GpuFrame, GpuSurface, GpuView, Scene2D, SceneContent, SceneView,
 };
-use waterui_layout::stack::{VStackLayout, vstack};
+use waterui_layout::spacer::spacer;
+use waterui_layout::stack::{VStackLayout, hstack, vstack};
 use waterui_layout::{Divider, LazyContainer, scroll};
 use waterui_navigation::NavigationView;
 use waterui_navigation::tab::{Tab, Tabs};
@@ -812,6 +814,156 @@ fn list_emits_all_rows_and_scrolls() {
     assert!(
         !act(&mut runtime, Action::ScrollLeft, list_id),
         "a direction the axis does not serve must report unhandled"
+    );
+}
+
+/// A row's content is the row's own subtree: every text inside it lands under
+/// the `ListItem` node, and the row's label derives from that content the way
+/// a composite button's does.
+#[test]
+fn list_rows_emit_content_subtree_and_derived_label() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(List::content((
+            || ListItem::new(hstack((text("Name"), spacer(), text("Value")))),
+            || ListItem::new(text("Plain")),
+        )))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    let children = list_node.children();
+    assert_eq!(
+        children.len(),
+        2,
+        "the two rows must be the list's children"
+    );
+
+    let row = lookup(&update, children[0]);
+    assert_eq!(row.role(), Role::ListItem);
+    assert_eq!(
+        row.label(),
+        Some("Name Value"),
+        "the row's label derives from its content like a composite button's"
+    );
+    assert!(row.supports_action(Action::Focus));
+    // Both texts are nodes under the row — the spacer emits nothing.
+    let row_children: Vec<&Node> = row
+        .children()
+        .iter()
+        .map(|id| lookup(&update, *id))
+        .collect();
+    assert_eq!(
+        row_children.len(),
+        2,
+        "only the two texts emit under the row"
+    );
+    assert_eq!(row_children[0].role(), Role::Label);
+    assert_eq!(row_children[0].label(), Some("Name"));
+    assert_eq!(row_children[1].role(), Role::Label);
+    assert_eq!(row_children[1].label(), Some("Value"));
+
+    let plain = lookup(&update, children[1]);
+    assert_eq!(plain.role(), Role::ListItem);
+    assert_eq!(plain.label(), Some("Plain"));
+    let plain_child = lookup(&update, plain.children()[0]);
+    assert_eq!(plain_child.role(), Role::Label);
+    assert_eq!(plain_child.label(), Some("Plain"));
+}
+
+/// An interactive control inside a row stays its own actionable node — a
+/// child of the `ListItem`, never folded into it — and the row derives the
+/// control's own name.
+#[test]
+fn list_toggle_row_emits_actionable_switch() {
+    let on = Binding::container(false);
+    let on_for_view = on.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let on_for_row = on_for_view.clone();
+        AnyView::new(List::content((move || {
+            ListItem::new(toggle("Wi-Fi", &on_for_row))
+        },)))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (switch, switch_node) =
+        find_by_label(&update, Role::Switch, "Wi-Fi").expect("the toggle is missing");
+    assert_eq!(switch_node.toggled(), Some(Toggled::False));
+    assert!(switch_node.supports_action(Action::Click));
+    assert!(switch_node.supports_action(Action::Focus));
+
+    let (_, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    let row = lookup(&update, list_node.children()[0]);
+    assert_eq!(row.role(), Role::ListItem);
+    assert_eq!(
+        row.label(),
+        Some("Wi-Fi"),
+        "the row derives the control's own name"
+    );
+    assert!(
+        row.children().contains(&switch),
+        "the toggle must sit under its row's ListItem node"
+    );
+
+    assert!(
+        act(&mut runtime, Action::Click, switch),
+        "Click changed nothing"
+    );
+    assert!(on.get(), "the toggle binding did not flip");
+}
+
+/// An explicit `a11y_label` on the row's content names the `ListItem` node —
+/// the row claims the naming scope, not a leaf inside it — while the content
+/// subtree still emits under it.
+#[test]
+fn list_row_explicit_label_names_the_row() {
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(List::content((|| {
+            ListItem::new(text("content text").a11y_label("Row name"))
+        },)))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    let row = lookup(&update, list_node.children()[0]);
+    assert_eq!(row.role(), Role::ListItem);
+    assert_eq!(row.label(), Some("Row name"));
+    let child = lookup(&update, row.children()[0]);
+    assert_eq!(child.role(), Role::Label);
+    assert_eq!(
+        child.label(),
+        Some("content text"),
+        "the leaf keeps its own name — the row's label is not re-emitted"
+    );
+}
+
+/// A row whose reactive accessibility state turns hidden leaves the tree on
+/// the next frame — the hidden check must subscribe to the state signal, or
+/// no rebuild is scheduled and the stale row outlives the flip.
+#[test]
+fn list_row_state_signal_hidden_removes_row_next_frame() {
+    let state = Binding::container(AccessibilityState::new());
+    let state_for_view = state.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        let state_for_row = state_for_view.clone();
+        AnyView::new(List::content((move || {
+            ListItem::new(text("Hide me").a11y_state_signal(state_for_row.clone()))
+        },)))
+    }));
+
+    let update = pumped(&mut runtime);
+    assert_rooted(&update);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    assert_eq!(list_node.children().len(), 1, "the row starts visible");
+
+    state.set(AccessibilityState::new().hidden(true));
+    let update = pumped(&mut runtime);
+    let (_, list_node) = find_only(&update, Role::List).expect("the list is missing");
+    assert!(
+        list_node.children().is_empty(),
+        "a row whose state signal turns hidden must leave the tree on the next frame"
     );
 }
 
