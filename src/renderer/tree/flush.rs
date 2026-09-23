@@ -270,18 +270,23 @@ impl RenderNode {
             RenderNode::SceneView(node) => {
                 // The drawing's own name and content, read every flush: content
                 // that follows a signal answers with what it currently draws.
-                let (content_label, content_value) = {
+                let (content_label, content_value, wants_input) = {
                     let content = node.content.borrow();
-                    (content.accessibility_label(), content.accessibility_value())
+                    (
+                        content.accessibility_label(),
+                        content.accessibility_value(),
+                        content.wants_input_events(),
+                    )
                 };
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(
+                let _focus_node = emit_graphics_image_accessibility(
                     renderer,
                     Some(ctx),
                     env,
                     content_label,
                     content_value,
+                    wants_input,
                 );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
@@ -310,33 +315,45 @@ impl RenderNode {
                 // Content that handles its own input receives the pointer,
                 // keyboard, IME and scroll events landing on its bounds, through
                 // the same routing an interactive `GpuSurface` uses.
-                if node.content.borrow().wants_input_events() {
+                if wants_input {
                     renderer.register_surface_input_target(
                         ctx.bounds,
                         ctx.hit_transform,
                         Rc::clone(&node.content),
+                        #[cfg(feature = "accessibility")]
+                        _focus_node,
                     );
                 }
             }
             RenderNode::GpuSurface(node) => {
                 // The surface view's own name and content, read every flush —
                 // it is re-asked after each frame it draws.
-                let (content_label, content_value) = {
+                let (content_label, content_value, wants_input) = {
                     let runtime = node.runtime.borrow();
-                    (runtime.accessibility_label(), runtime.accessibility_value())
+                    (
+                        runtime.accessibility_label(),
+                        runtime.accessibility_value(),
+                        runtime.wants_input_events(),
+                    )
                 };
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(
+                let _focus_node = emit_graphics_image_accessibility(
                     renderer,
                     Some(ctx),
                     env,
                     content_label,
                     content_value,
+                    wants_input,
                 );
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
-                node.flush(renderer, ctx);
+                node.flush(
+                    renderer,
+                    ctx,
+                    #[cfg(feature = "accessibility")]
+                    _focus_node,
+                );
             }
             RenderNode::ViewEffect(node) => node.flush(renderer, ctx),
             RenderNode::AppliedFilter(node) => node.flush(renderer, ctx),
@@ -524,34 +541,64 @@ impl RenderNode {
                 renderer.pop_accessibility_owner();
             }
             RenderNode::SceneView(node) => {
-                let (content_label, content_value) = {
+                let (content_label, content_value, wants_input) = {
                     let content = node.content.borrow();
-                    (content.accessibility_label(), content.accessibility_value())
+                    (
+                        content.accessibility_label(),
+                        content.accessibility_value(),
+                        content.wants_input_events(),
+                    )
                 };
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(
+                let focus_node = emit_graphics_image_accessibility(
                     renderer,
                     None,
                     env,
                     content_label,
                     content_value,
+                    wants_input,
                 );
                 renderer.pop_accessibility_owner();
+                if wants_input {
+                    // The semantic walk registers the same input target the
+                    // rendered flush would — there is no layout to bound it,
+                    // so it is a focus-bookkeeping slot (keyboard traversal,
+                    // `.focused`), not a hit rect.
+                    renderer.register_surface_input_target(
+                        vello::kurbo::Rect::ZERO,
+                        vello::kurbo::Affine::IDENTITY,
+                        Rc::clone(&node.content),
+                        focus_node,
+                    );
+                }
             }
             RenderNode::GpuSurface(node) => {
-                let (content_label, content_value) = {
+                let (content_label, content_value, wants_input) = {
                     let runtime = node.runtime.borrow();
-                    (runtime.accessibility_label(), runtime.accessibility_value())
+                    (
+                        runtime.accessibility_label(),
+                        runtime.accessibility_value(),
+                        runtime.wants_input_events(),
+                    )
                 };
                 renderer.push_accessibility_owner(&node.accessibility_identity);
-                emit_graphics_image_accessibility(
+                let focus_node = emit_graphics_image_accessibility(
                     renderer,
                     None,
                     env,
                     content_label,
                     content_value,
+                    wants_input,
                 );
                 renderer.pop_accessibility_owner();
+                if wants_input {
+                    renderer.register_surface_input_target(
+                        vello::kurbo::Rect::ZERO,
+                        vello::kurbo::Affine::IDENTITY,
+                        Rc::clone(&node.runtime),
+                        focus_node,
+                    );
+                }
             }
             RenderNode::ViewEffect(node) => {
                 node.child.borrow().emit_accessibility(renderer, &node.env);

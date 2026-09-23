@@ -170,11 +170,12 @@ impl HydrolysisRenderer {
         render_content(renderer);
     }
 
-    /// Render the wrapped content, then bind the single text input it registered to
-    /// the `.focused(binding)` binding and reconcile focus state. Shared by the
+    /// Render the wrapped content, then bind the single focusable target — a
+    /// text input or an input surface — it registered to the
+    /// `.focused(binding)` binding and reconcile focus state. Shared by the
     /// dispatch handler and the retained `Wrapper` node ([`WrapperEffect::Focused`]):
     /// the binding is read through `read_signal` so a change schedules a frame, and
-    /// the target bookkeeping counts inputs registered during the content render, so
+    /// the target bookkeeping counts targets registered during the content render, so
     /// it works identically whether the content is dispatched or node-flushed.
     pub(super) fn apply_focused(
         renderer: &mut HydrolysisRenderer,
@@ -182,14 +183,15 @@ impl HydrolysisRenderer {
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let should_focus = renderer.read_signal(&value.0);
-        let start = renderer.text_editing.text_input_targets.len();
+        let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
         render_content(renderer);
-        renderer.wire_focused_target(value, should_focus, start);
+        renderer.wire_focused_target(value, should_focus, text_start, embedded_start);
     }
 
     /// The semantic counterpart of [`Self::apply_focused`]: the same focus
-    /// wiring over the text-input targets the semantic walk registered, with
-    /// no renderer in hand.
+    /// wiring over the text-input and surface targets the semantic walk
+    /// registered, with no renderer in hand.
     #[cfg(feature = "accessibility")]
     pub(super) fn apply_focused_semantic(
         renderer: &mut SemanticCore,
@@ -197,9 +199,10 @@ impl HydrolysisRenderer {
         render_content: impl FnOnce(&mut SemanticCore),
     ) {
         let should_focus = renderer.read_signal(&value.0);
-        let start = renderer.text_editing.text_input_targets.len();
+        let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
         render_content(renderer);
-        renderer.wire_focused_target(value, should_focus, start);
+        renderer.wire_focused_target(value, should_focus, text_start, embedded_start);
     }
 
     /// Render the given content and, when hit-testing is disabled, truncate every

@@ -20,7 +20,9 @@
 use super::*;
 use crate::renderer::render::EmbeddedGpuSurfaceRuntime;
 use waterui_graphics::SceneContent;
-use waterui_graphics::input::{Code, Key, ScrollUnit, SurfaceInputEvent, SurfacePointerButton};
+use waterui_graphics::input::{
+    Code, Key, NamedKey, ScrollUnit, SurfaceInputEvent, SurfacePointerButton,
+};
 
 /// One key transition, in the W3C UI Events vocabulary.
 pub(crate) struct KeyDelivery<'a> {
@@ -71,11 +73,21 @@ pub(crate) trait EmbeddedInputSink {
 
 #[derive(Clone)]
 pub(crate) struct EmbeddedInputTarget {
+    /// The surface owner's interaction identity — what keyboard focus and a
+    /// `.focused(binding)` write address the surface by.
+    pub(crate) interaction_key: InteractionKey,
     pub(crate) local_bounds: vello::kurbo::Rect,
     pub(crate) inverse_transform: vello::kurbo::Affine,
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) sink: Rc<dyn EmbeddedInputSink>,
+    /// Written by `.focused(binding)` when it wraps this surface.
+    pub(crate) focus_binding: Option<Binding<bool>>,
+    /// The node the surface emits for the semantic tree. Keyboard traversal
+    /// reaches the surface through it, and an assistive `Focus` request on it
+    /// resolves back to the surface's interaction identity.
+    #[cfg(feature = "accessibility")]
+    pub(crate) accessibility_node_id: Option<AccessibilityNodeId>,
 }
 
 impl EmbeddedInputTarget {
@@ -268,11 +280,18 @@ impl SemanticCore {
     /// already logical: the projection back through its inverse is exactly the
     /// logical surface-local position the sink is contracted to receive, with
     /// no display-scale division anywhere on the path.
+    ///
+    /// `interaction_key` is the surface owner's interaction identity — what
+    /// keyboard focus and a `.focused(binding)` write address the surface by.
+    /// `accessibility_node_id` is the surface's semantic node, when the
+    /// semantic tree exists.
     pub(crate) fn register_embedded_input_target(
         &mut self,
         local_bounds: vello::kurbo::Rect,
         transform: vello::kurbo::Affine,
         sink: Rc<dyn EmbeddedInputSink>,
+        interaction_key: InteractionKey,
+        #[cfg(feature = "accessibility")] accessibility_node_id: Option<AccessibilityNodeId>,
     ) {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -293,27 +312,39 @@ impl SemanticCore {
         self.hit_test
             .embedded_input_targets
             .push(EmbeddedInputTarget {
+                interaction_key,
                 local_bounds,
                 inverse_transform: transform.inverse(),
                 depth: self.render_depth,
                 order,
                 sink,
+                focus_binding: None,
+                #[cfg(feature = "accessibility")]
+                accessibility_node_id,
             });
     }
 
     /// Registers a surface whose drawing asked for input: an embedded
     /// [`GpuSurface`](waterui_graphics::GpuSurface) runtime or a
     /// [`SceneView`](waterui_graphics::SceneView)'s content.
+    ///
+    /// `focus_node` is the surface's semantic node, when the semantic tree
+    /// exists.
     pub(crate) fn register_surface_input_target<R: SurfaceInputReceiver + 'static>(
         &mut self,
         local_bounds: vello::kurbo::Rect,
         transform: vello::kurbo::Affine,
         receiver: Rc<RefCell<R>>,
+        #[cfg(feature = "accessibility")] focus_node: Option<AccessibilityNodeId>,
     ) {
+        let interaction_key = InteractionKey::for_rc(&receiver, 0);
         self.register_embedded_input_target(
             local_bounds,
             transform,
             Rc::new(SurfaceInputSink::new(receiver)),
+            interaction_key,
+            #[cfg(feature = "accessibility")]
+            focus_node,
         );
     }
 
@@ -344,7 +375,7 @@ impl SemanticCore {
         point: vello::kurbo::Point,
         pointer_priority: Option<(usize, usize, usize)>,
         text_priority: Option<(usize, usize, usize)>,
-    ) -> Option<(EmbeddedInputTarget, vello::kurbo::Point)> {
+    ) -> Option<(usize, EmbeddedInputTarget, vello::kurbo::Point)> {
         let (index, position) = self.topmost_embedded_target_at(point)?;
         let target = &self.hit_test.embedded_input_targets[index];
         let embedded_priority = Self::target_hit_priority(target.depth, target.order, index);
@@ -353,7 +384,7 @@ impl SemanticCore {
         {
             return None;
         }
-        Some((target.clone(), position))
+        Some((index, target.clone(), position))
     }
 
     pub(crate) fn handle_embedded_pointer_move(&mut self, point: vello::kurbo::Point) -> bool {
@@ -375,7 +406,7 @@ impl SemanticCore {
             let target = &self.text_editing.text_input_targets[index];
             Self::target_hit_priority(target.depth, target.order, index)
         });
-        let Some((target, position)) =
+        let Some((_, target, position)) =
             self.embedded_target_wins_at(point, pointer_priority, text_priority)
         else {
             return false;
@@ -402,6 +433,15 @@ impl SemanticCore {
     }
 
     pub(crate) fn handle_embedded_key(&mut self, delivery: &KeyDelivery<'_>) -> bool {
+        // GTK's text-view convention: while a surface holds keyboard focus,
+        // Tab and Shift-Tab are surface input like any other key — a
+        // terminal needs them for completion and backtab. Ctrl+Tab and
+        // Ctrl+Shift+Tab are the way out: the surface never sees them, the
+        // traversal gate takes them, and the move sends the surface its
+        // `Focus(false)` exactly as it does for any other focused control.
+        if matches!(delivery.logical, Key::Named(NamedKey::Tab)) && delivery.modifiers.control {
+            return false;
+        }
         let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() else {
             return false;
         };
@@ -474,6 +514,78 @@ impl SemanticCore {
         if let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() {
             sink.set_modifiers(modifiers);
         }
+    }
+
+    /// The embedded-input target registered for the surface owner behind
+    /// `key`, if the surface is still mounted.
+    pub(crate) fn embedded_index_for_key(&self, key: &InteractionKey) -> Option<usize> {
+        self.hit_test
+            .embedded_input_targets
+            .iter()
+            .position(|target| &target.interaction_key == key)
+    }
+
+    /// The embedded-input target behind the semantic node the surface
+    /// emitted, when the tree walks it.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn embedded_index_for_node(&self, node: AccessibilityNodeId) -> Option<usize> {
+        self.hit_test
+            .embedded_input_targets
+            .iter()
+            .position(|target| target.accessibility_node_id == Some(node))
+    }
+
+    /// Whether the surface owner behind `key` holds embedded focus.
+    pub(crate) fn is_focused_embedded(&self, key: &InteractionKey) -> bool {
+        self.hit_test.focused_embedded_key.as_ref() == Some(key)
+    }
+
+    /// Moves embedded focus to the surface owner `key` names — the
+    /// programmatic half of the shared focus model, reached by
+    /// `.focused(binding)` writes and the keyboard traversal alike.
+    ///
+    /// Taking focus: the surface takes semantic focus with it, its sink
+    /// receives `Focus(true)`, and editing on any text field ends — the same
+    /// rule a pointer press on the surface follows. Releasing it drops
+    /// semantic focus only while it still rests on that surface, then sends
+    /// `Focus(false)`.
+    pub(crate) fn set_focused_embedded_key(&mut self, focused: Option<InteractionKey>) -> bool {
+        let previous = self.hit_test.focused_embedded_key.clone();
+        if previous == focused {
+            return false;
+        }
+        let index = focused
+            .as_ref()
+            .and_then(|key| self.embedded_index_for_key(key));
+        let mut changed = false;
+        match focused.as_ref() {
+            Some(key) => {
+                #[cfg(feature = "accessibility")]
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    #[cfg(feature = "accessibility")]
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+                changed |= self.hit_test.set_embedded_focus_index(index);
+                // Landing on a surface ends text editing exactly as a
+                // pointer press on one does (#95's rule).
+                changed |= self.set_focused_text_input(None);
+            }
+            None => {
+                if self.hit_test.keyboard_focus == previous {
+                    changed |= self.set_keyboard_focus_impl(
+                        None,
+                        #[cfg(feature = "accessibility")]
+                        None,
+                        false,
+                    );
+                }
+                changed |= self.hit_test.set_embedded_focus_index(None);
+            }
+        }
+        changed
     }
 
     /// The focused embedded surface's caret, in window hit-test space.
