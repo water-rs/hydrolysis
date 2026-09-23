@@ -703,6 +703,33 @@ impl HydrolysisRenderer {
                 self.set_keyboard_focus(None, false);
             }
             target.sink.pointer_move(local_position);
+            // A secondary press still focuses the surface, but a context menu
+            // enclosing it claims the button: the menu's actions act on the
+            // focused surface, so the button itself is not delivered. A surface
+            // with no enclosing menu, or whose menu has no items, receives the
+            // secondary button as before.
+            if button == PointerButton::Secondary {
+                let surface_bounds = target.to_window_rect(vello::kurbo::Rect::from_origin_size(
+                    vello::kurbo::Point::ORIGIN,
+                    target.local_bounds.size(),
+                ));
+                if let Some(menu_target) =
+                    self.topmost_context_menu_target_enclosing(point, surface_bounds)
+                {
+                    let mut items = popup_menu_nodes(&menu_target.items.get());
+                    self.append_inspect_element_item(&mut items, point);
+                    if !items.is_empty() {
+                        let metrics = self.theme().text_context_menu_metrics();
+                        self.show_popup_menu_nodes(
+                            items,
+                            LayoutPoint::new(point.x as f32, point.y as f32),
+                            metrics,
+                            env,
+                        );
+                        return true;
+                    }
+                }
+            }
             target.sink.pointer_button(true, button, local_position);
             self.hit_test.active_embedded_target = Some(target);
             return true;
