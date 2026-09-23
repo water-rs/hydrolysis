@@ -388,6 +388,13 @@ fn native_window_attributes(
             frame.width() as f64,
             frame.height() as f64,
         ))
+        // The requested position is a creation-time attribute: on X11 a
+        // position set on an unmapped window is dropped, so it must travel
+        // with the map request for the window manager to honor it.
+        .with_position(winit::dpi::LogicalPosition::new(
+            frame.x() as f64,
+            frame.y() as f64,
+        ))
 }
 
 impl WinitRunner {
@@ -751,7 +758,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     use super::{TerminationAction, TerminationRequests};
     use waterui::window::{Window, WindowState};
-    use waterui_core::{Environment, binding};
+    use waterui_core::{Binding, Environment, binding};
 
     #[cfg(any(unix, windows))]
     #[test]
@@ -770,5 +777,29 @@ mod tests {
 
         assert!(native_window_attributes(&window, &env, true, None).active);
         assert!(!native_window_attributes(&window, &env, false, None).active);
+    }
+
+    #[test]
+    fn window_attributes_carry_the_requested_frame() {
+        use waterui_core::layout::{Point, Rect, Size};
+        let frame = Binding::container(Rect::new(Point::new(12.0, 34.0), Size::new(800.0, 300.0)));
+        let mut window = Window::new("", binding(WindowState::Normal), || ());
+        window.frame = frame;
+        let env = Environment::new();
+
+        let attributes = native_window_attributes(&window, &env, false, None);
+        assert_eq!(
+            attributes.position,
+            Some(winit::dpi::Position::Logical(
+                winit::dpi::LogicalPosition::new(12.0, 34.0)
+            )),
+            "the requested origin must travel with the window attributes: a position set while unmapped is dropped on X11"
+        );
+        assert_eq!(
+            attributes.inner_size,
+            Some(winit::dpi::Size::Logical(winit::dpi::LogicalSize::new(
+                800.0, 300.0
+            ))),
+        );
     }
 }
