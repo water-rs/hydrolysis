@@ -125,6 +125,9 @@ pub(crate) enum AccessibilityActionTarget {
         /// frame; `None` in the semantic tree, where activation mounts the
         /// same window with no placement at all.
         origin: Option<LayoutPoint>,
+        /// The node's own environment — its popup opens inside it
+        /// (water-rs/hydrolysis#140).
+        env: Environment,
     },
     TextField {
         value: nami::Binding<StyledStr>,
@@ -829,12 +832,14 @@ impl SemanticCore {
                 range,
                 ty,
                 origin,
+                env: picker_env,
             } => handle_accessibility_date_picker_action(
                 self,
                 &value,
                 &range,
                 ty,
                 origin,
+                &picker_env,
                 action,
                 action_data,
                 env,
@@ -1607,6 +1612,7 @@ fn handle_accessibility_date_picker_action(
     range: &RangeInclusive<DateTime>,
     ty: DatePickerType,
     origin: Option<LayoutPoint>,
+    picker_env: &Environment,
     action: AccessibilityAction,
     data: Option<AccessibilityActionData>,
     env: &Environment,
@@ -1615,12 +1621,15 @@ fn handle_accessibility_date_picker_action(
         // A rendered node carries its trigger anchor; a semantic node carries
         // none and mounts the same window with no placement at all.
         AccessibilityAction::Click => {
+            // The picker's own environment layers over the dispatch's
+            // (water-rs/hydrolysis#140).
+            let env = picker_env.layered_on(env);
             match origin {
                 Some(origin) => {
-                    renderer.show_date_picker(value.clone(), range.clone(), ty, origin, env);
+                    renderer.show_date_picker(value.clone(), range.clone(), ty, origin, &env);
                 }
                 None => {
-                    renderer.activate_date_picker(value.clone(), range.clone(), ty, env);
+                    renderer.activate_date_picker(value.clone(), range.clone(), ty, &env);
                 }
             }
             true

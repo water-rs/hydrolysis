@@ -231,6 +231,9 @@ pub(crate) fn picker_accessibility(
                             metrics,
                         )
                     });
+                    // The popup opens in the picker's environment layered over
+                    // the dispatch's (water-rs/hydrolysis#140).
+                    let picker_env = env.clone();
                     AccessibilityActionTarget::Activate {
                         action: Rc::new(RefCell::new(
                             move |renderer: &mut crate::renderer::SemanticCore,
@@ -241,6 +244,7 @@ pub(crate) fn picker_accessibility(
                                 if open.get() {
                                     renderer.dismiss_active_popup_menu();
                                 } else {
+                                    let env = picker_env.layered_on(env);
                                     match request {
                                         Some((origin, width, row_height, metrics)) => {
                                             renderer.show_picker_menu(
@@ -254,7 +258,7 @@ pub(crate) fn picker_accessibility(
                                                     selected,
                                                 },
                                                 metrics,
-                                                env,
+                                                &env,
                                             );
                                         }
                                         None => {
@@ -262,7 +266,7 @@ pub(crate) fn picker_accessibility(
                                                 menu_entries.clone(),
                                                 selection.clone(),
                                                 &open,
-                                                env,
+                                                &env,
                                             );
                                         }
                                     }
@@ -597,6 +601,9 @@ pub(crate) fn render_menu_picker(
         let menu_origin =
             waterui_core::layout::Point::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
         let menu_width = hit_bounds.width();
+        // The popup opens in the picker's environment layered over the
+        // dispatch's (water-rs/hydrolysis#140).
+        let picker_env = env.clone();
         ctx.renderer_mut().register_interactive_pointer_target(
             hit_bounds,
             press_slot,
@@ -605,6 +612,7 @@ pub(crate) fn render_menu_picker(
                     renderer.dismiss_active_popup_menu();
                     false
                 } else {
+                    let env = picker_env.layered_on(env);
                     renderer.show_picker_menu(
                         PickerMenuRequest {
                             entries: menu_entries.clone(),
@@ -616,7 +624,7 @@ pub(crate) fn render_menu_picker(
                             selected,
                         },
                         metrics,
-                        env,
+                        &env,
                     )
                 }
             },

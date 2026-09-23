@@ -515,15 +515,17 @@ impl HydrolysisRenderer {
     /// Register the context-menu hit-target, then render the given content. Shared
     /// by the dispatch handler and the retained `Wrapper` node. The node owns the
     /// [`ResolvedContextMenu`] by reference, so the menu items are cloned for
-    /// registration.
+    /// registration. The node's environment travels with the target so the popup
+    /// opens inside it (water-rs/hydrolysis#140).
     pub(super) fn apply_context_menu(
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
+        env: &Environment,
         value: &ResolvedContextMenu,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        renderer.register_context_menu_target(bounds, value.items.clone());
+        renderer.register_context_menu_target(bounds, value.items.clone(), env);
         render_content(renderer);
     }
 

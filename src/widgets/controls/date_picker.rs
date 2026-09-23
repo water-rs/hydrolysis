@@ -108,6 +108,9 @@ pub(crate) fn date_picker_accessibility(
                 range: date_picker.range.clone(),
                 ty: date_picker.ty,
                 origin,
+                // The popup opens in the picker's own environment
+                // (water-rs/hydrolysis#140).
+                env: env.clone(),
             }),
         ) {
             for key in focus_keys {
@@ -287,11 +290,15 @@ pub(crate) fn render_date_picker_parts(
     );
 
     let origin = waterui_core::layout::Point::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
+    // The popup opens in the picker's environment layered over the
+    // dispatch's (water-rs/hydrolysis#140).
+    let picker_env = env.clone();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
-            renderer.show_date_picker(value_binding.clone(), range.clone(), ty, origin, env)
+            let env = picker_env.layered_on(env);
+            renderer.show_date_picker(value_binding.clone(), range.clone(), ty, origin, &env)
         },
     );
 }

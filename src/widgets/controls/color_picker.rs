@@ -115,9 +115,13 @@ pub(crate) fn color_picker_accessibility(
             let value = color_picker.value.clone();
             let support_alpha = color_picker.support_alpha;
             let support_hdr = color_picker.support_hdr;
+            // The popup opens in the picker's environment layered over the
+            // dispatch's (water-rs/hydrolysis#140).
+            let picker_env = env.clone();
             AccessibilityActionTarget::Activate {
                 action: Rc::new(RefCell::new(
                     move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
+                        let env = picker_env.layered_on(env);
                         match origin {
                             Some(origin) => {
                                 renderer.show_color_picker(
@@ -125,7 +129,7 @@ pub(crate) fn color_picker_accessibility(
                                     support_alpha,
                                     support_hdr,
                                     origin,
-                                    env,
+                                    &env,
                                 );
                             }
                             None => {
@@ -133,7 +137,7 @@ pub(crate) fn color_picker_accessibility(
                                     value.clone(),
                                     support_alpha,
                                     support_hdr,
-                                    env,
+                                    &env,
                                 );
                             }
                         }
@@ -352,16 +356,20 @@ pub(crate) fn render_color_picker_parts(
     }
 
     let origin = waterui_core::layout::Point::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
+    // The popup opens in the picker's environment layered over the
+    // dispatch's (water-rs/hydrolysis#140).
+    let picker_env = env.clone();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
+            let env = picker_env.layered_on(env);
             renderer.show_color_picker(
                 value_binding.clone(),
                 support_alpha,
                 support_hdr,
                 origin,
-                env,
+                &env,
             )
         },
     );

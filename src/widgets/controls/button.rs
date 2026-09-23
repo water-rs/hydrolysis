@@ -390,16 +390,21 @@ pub(crate) fn menu_accessibility(
             )
         });
         let items = state.borrow().items.clone();
+        // The popup opens in the trigger node's environment layered over the
+        // dispatch's, so `.state(&value)` overlays reach the item actions
+        // (water-rs/hydrolysis#140).
+        let menu_env = env.clone();
         let activation = AccessibilityActionTarget::Activate {
             action: Rc::new(RefCell::new(
                 move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
                     let nodes = popup_menu_nodes(&items.get());
+                    let env = menu_env.layered_on(env);
                     match request {
                         Some((anchor, metrics)) => {
-                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, env);
+                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, &env);
                         }
                         None => {
-                            renderer.activate_popup_menu_nodes(nodes, env);
+                            renderer.activate_popup_menu_nodes(nodes, &env);
                         }
                     }
                     true
@@ -697,15 +702,19 @@ pub(crate) fn render_menu_parts(
     let _ = ctx.renderer_mut().read_signal(&items);
     let anchor = LayoutPoint::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
     let menu_metrics = theme.text_context_menu_metrics();
+    // The popup opens in the trigger node's environment layered over the
+    // dispatch's (water-rs/hydrolysis#140).
+    let menu_env = env.clone();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
+            let env = menu_env.layered_on(env);
             renderer.show_popup_menu_nodes(
                 popup_menu_nodes(&items.get()),
                 anchor,
                 menu_metrics,
-                env,
+                &env,
             )
         },
     );

@@ -316,6 +316,7 @@ impl SemanticCore {
             order,
             model: data.target.model,
             selection: data.target.selection,
+            env: data.target.env,
             focus_binding: data.focus_binding,
             #[cfg(feature = "accessibility")]
             accessibility_node_id: data.accessibility_node_id,
