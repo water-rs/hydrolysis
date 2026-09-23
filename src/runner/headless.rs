@@ -163,6 +163,20 @@ impl Drop for ReclaimGpuOnDrop {
     }
 }
 
+/// The window headless constructors wrap a content builder in: the same
+/// default background as platform windows (the theme `Background` slot), so
+/// offscreen captures match what `water run` renders from the very first
+/// frame.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_window(content: AnyViewBuilder<AnyView>) -> Window {
+    let content_builder = content.clone();
+    Window::new(
+        "",
+        waterui_core::binding(waterui::window::WindowState::Normal),
+        move || content_builder.build(),
+    )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl HeadlessRuntime {
     #[must_use]
@@ -176,7 +190,7 @@ impl HeadlessRuntime {
         Self::on_gpu_context(
             pollster::block_on(OffscreenGpuContext::new()),
             env,
-            content,
+            default_window(content),
             width,
             height,
             style,
@@ -213,7 +227,30 @@ impl HeadlessRuntime {
         Self::on_gpu_context(
             OffscreenGpuContext::new_for_tests_blocking(),
             env,
-            content,
+            default_window(content),
+            width,
+            height,
+            style,
+            super::fonts::deterministic_test_fonts,
+        )
+    }
+
+    /// Same as [`Self::new_for_tests`] around a caller-built [`Window`], so a
+    /// test can exercise window-level properties a plain content builder
+    /// cannot express — a translucent [`Window::background`], for one.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn new_for_tests_with_window(
+        env: Environment,
+        window: Window,
+        width: u32,
+        height: u32,
+        style: impl crate::Style,
+    ) -> Self {
+        Self::on_gpu_context(
+            OffscreenGpuContext::new_for_tests_blocking(),
+            env,
+            window,
             width,
             height,
             style,
@@ -243,7 +280,7 @@ impl HeadlessRuntime {
         Self::on_gpu_context(
             gpu,
             env,
-            content,
+            default_window(content),
             width,
             height,
             style,
@@ -254,7 +291,7 @@ impl HeadlessRuntime {
     fn on_gpu_context(
         gpu: OffscreenGpuContext,
         env: Environment,
-        content: AnyViewBuilder<AnyView>,
+        window: Window,
         width: u32,
         height: u32,
         style: impl crate::Style,
@@ -298,15 +335,6 @@ impl HeadlessRuntime {
             inspector_probe,
         ));
 
-        // The headless window uses the same default background as platform
-        // windows (the theme `Background` slot), so offscreen captures match
-        // what `water run` renders from the very first frame.
-        let content_builder = content.clone();
-        let window = Window::new(
-            "",
-            waterui_core::binding(waterui::window::WindowState::Normal),
-            move || content_builder.build(),
-        );
         window.frame.set(waterui_core::layout::Rect::new(
             waterui_core::layout::Point::zero(),
             waterui_core::layout::Size::new(width.max(1) as f32, height.max(1) as f32),

@@ -1086,3 +1086,91 @@ fn the_winit_translation_follows_the_w3c_vocabulary() {
         Code::KeyA
     );
 }
+
+/// A secondary press into a `.context_menu`-wrapped surface still focuses it
+/// — the menu's commands act on the focused content — but the enclosing menu
+/// claims the button itself: the surface sees only the pointer move.
+/// water-rs/hydrolysis#110.
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+#[test]
+fn context_menu_claims_the_secondary_button_over_an_input_surface() {
+    use accesskit::Role;
+    use waterui_controls::menu::CommandExt as _;
+
+    let log = ProbeLog::default();
+    let mut runtime = runtime_with(
+        SceneView::new(SceneProbe {
+            log: log.clone(),
+            builds: Rc::new(RefCell::new(0)),
+            invalidator: None,
+        })
+        .context_menu(vec!["Copy".action(|| {})]),
+    );
+    let start = Instant::now();
+    settled(&mut runtime, start);
+
+    let (x, y) = window_point(12.0, 34.0);
+    runtime.push_input_event(InputEvent::PointerDown {
+        id: POINTER_ID,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Secondary,
+    });
+    let update = runtime
+        .pump_at(false, start + Duration::from_millis(100))
+        .tree_update
+        .expect("the click frame must publish an accessibility tree");
+    assert!(
+        super::popup_windows::find_by_label(&update, Role::Button, "Copy").is_some(),
+        "the context menu must open over the input surface"
+    );
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+        ],
+        "the surface takes focus and the pointer move, not the secondary button"
+    );
+}
+
+/// Without an enclosing context menu the surface keeps the secondary button.
+#[test]
+fn secondary_button_reaches_an_input_surface_without_a_context_menu() {
+    let log = ProbeLog::default();
+    let mut runtime = runtime_with(SceneView::new(SceneProbe {
+        log: log.clone(),
+        builds: Rc::new(RefCell::new(0)),
+        invalidator: None,
+    }));
+    let start = Instant::now();
+    settled(&mut runtime, start);
+
+    let (x, y) = window_point(12.0, 34.0);
+    runtime.push_input_event(InputEvent::PointerDown {
+        id: POINTER_ID,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Secondary,
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+            SurfaceInputEvent::PointerButton {
+                pressed: true,
+                button: SurfacePointerButton::Secondary,
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+        ],
+        "the secondary button reaches the surface when no menu claims it"
+    );
+}
