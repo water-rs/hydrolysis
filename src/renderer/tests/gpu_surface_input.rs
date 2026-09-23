@@ -967,6 +967,99 @@ fn a_structural_rebuild_re_focuses_the_surface_programmatically() {
     );
 }
 
+/// The pane a tab switch shows — each tab's surface stays mounted under
+/// `.visible(selected.equal_to(...))` the way #103's app keeps every tab's
+/// `SceneView` alive and only switches which is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tab {
+    One,
+    Two,
+}
+
+/// Switching the selected tab hides the focused surface: focus is released,
+/// the surface receives `Focus(false)`, nothing focuses the newly shown tab
+/// on its own, and later keystrokes land nowhere.
+#[test]
+fn hiding_the_focused_tab_releases_its_surface_focus() {
+    let log_one = ProbeLog::default();
+    let log_two = ProbeLog::default();
+    let selected = Binding::container(Tab::One);
+    let view = vstack((
+        GpuSurface::new(InputProbe {
+            log: log_one.clone(),
+            caret: None,
+        })
+        .visible(selected.equal_to(Tab::One)),
+        GpuSurface::new(InputProbe {
+            log: log_two.clone(),
+            caret: None,
+        })
+        .visible(selected.equal_to(Tab::Two)),
+    ));
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    let _ = log_one.drain();
+    let _ = log_two.drain();
+
+    press_at(&mut runtime, 10.0, 10.0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(
+        log_one.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(10.0, 10.0),
+            },
+            SurfaceInputEvent::PointerButton {
+                pressed: true,
+                button: SurfacePointerButton::Primary,
+                position: vello::kurbo::Point::new(10.0, 10.0),
+            },
+        ],
+        "the press focuses the visible tab's surface"
+    );
+    let (x, y) = window_point(10.0, 10.0);
+    runtime.push_input_event(InputEvent::PointerUp {
+        id: POINTER_ID,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(116));
+    let _ = log_one.drain();
+
+    // The user switches tabs: the focused surface is still mounted but no
+    // longer visible — it must not keep keyboard focus.
+    selected.set(Tab::Two);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(132));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(148));
+    assert_eq!(
+        log_one.drain(),
+        vec![SurfaceInputEvent::Focus(false)],
+        "hiding the focused surface releases focus and tells it so"
+    );
+    assert_eq!(
+        log_two.drain(),
+        Vec::new(),
+        "focus moves nowhere on its own — the shown tab is not auto-focused"
+    );
+
+    // Typing after the switch must not reach the invisible tab.
+    runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Pressed));
+    runtime.push_input_event(InputEvent::TextInput {
+        text: "a".to_owned(),
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(164));
+    assert_eq!(
+        log_one.drain(),
+        Vec::new(),
+        "keys keep going to an invisible surface — the bug #103 reports"
+    );
+    assert_eq!(log_two.drain(), Vec::new());
+}
+
 /// The winit translation this backend delegates to `ui-events-winit` is not
 /// reachable from a headless test, so the two quirks the mapping depends on
 /// are pinned here directly: get either wrong and space stops activating

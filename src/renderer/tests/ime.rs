@@ -1435,3 +1435,158 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
         "Space must activate the button keyboard focus moved to"
     );
 }
+
+/// `.visible(false)` on a subtree releases a focused field inside it
+/// (#103): the caret and the IME anchor go away, the `.focused` binding
+/// reads `None`, and typing lands nowhere.
+#[test]
+fn hiding_a_subtree_releases_the_focused_field_inside_it() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Field {
+        Name,
+    }
+    let value = Binding::container(Str::default());
+    let focus = Binding::container(None::<Field>);
+    let shown = Binding::container(true);
+    let view = {
+        let value_for_view = value.clone();
+        let focus_for_view = focus.clone();
+        let shown_for_view = shown.clone();
+        AnyView::new(
+            field("Name", &value_for_view)
+                .focused(&focus_for_view, Field::Name)
+                .visible(shown_for_view)
+                .size(FIELD_WIDTH, FIELD_HEIGHT),
+        )
+    };
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    let mut now = start;
+
+    press_text_input(&mut runtime, 0);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "pressing the field must focus it"
+    );
+    assert_eq!(focus.get(), Some(Field::Name));
+
+    // The subtree turns invisible while the field holds focus.
+    shown.set(false);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_none(),
+        "a field under an invisible subtree must not keep the caret"
+    );
+    assert_eq!(
+        focus.get(),
+        None,
+        "the field's .focused(binding) must clear when it goes invisible"
+    );
+
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Character("x".into()),
+            Code::KeyX,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    runtime.push_input_event(InputEvent::TextInput {
+        text: "x".to_owned(),
+    });
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        value.get().to_string().as_str(),
+        "",
+        "typing must not reach the hidden field"
+    );
+}
+
+/// Hidden nodes are not Tab targets, and with focus released onto nothing
+/// the next Tab resumes from the slot it left — the nearest still-visible
+/// focusable in tree order, not the top of the walk.
+#[test]
+fn tab_skips_hidden_focusables_and_resumes_from_the_released_slot() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Field {
+        Name,
+    }
+    let value = Binding::container(Str::default());
+    let focus = Binding::container(None::<Field>);
+    let shown = Binding::container(true);
+    let first_pressed = Binding::bool(false);
+    let last_pressed = Binding::bool(false);
+    let view = {
+        let value_for_view = value.clone();
+        let focus_for_view = focus.clone();
+        let shown_for_view = shown.clone();
+        let first_for_action = first_pressed.clone();
+        let last_for_action = last_pressed.clone();
+        AnyView::new(vstack((
+            button("first").action(move || first_for_action.set(true)),
+            field("Name", &value_for_view)
+                .focused(&focus_for_view, Field::Name)
+                .visible(shown_for_view)
+                .size(FIELD_WIDTH, FIELD_HEIGHT),
+            button("last").action(move || last_for_action.set(true)),
+        )))
+    };
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    let mut now = start;
+
+    press_text_input(&mut runtime, 0);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(runtime.focused_text_input_state().is_some());
+    assert_eq!(focus.get(), Some(Field::Name));
+
+    // Hide the field mid-focus: focus is released onto nothing.
+    shown.set(false);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(runtime.focused_text_input_state().is_none());
+    assert_eq!(focus.get(), None);
+
+    // The next Tab skips the hidden field and lands on the focusable after
+    // its slot — the nearest visible one in tree order, not the first.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Character(" ".into()),
+            Code::Space,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        !first_pressed.get(),
+        "Tab must not restart traversal from the first focusable"
+    );
+    assert!(
+        last_pressed.get(),
+        "Tab after the release must land on the nearest visible focusable \
+         after the hidden slot"
+    );
+}
