@@ -86,9 +86,11 @@ use nami::{Binding, Signal};
 use std::sync::Arc;
 use waterkit_clipboard::Clipboard;
 use waterui::ViewExt;
+#[cfg(feature = "accessibility")]
+use waterui::accessibility::AccessibilityValue;
 use waterui::accessibility::{
     AccessibilityChildren, AccessibilityHidden, AccessibilityIdentifier, AccessibilityLabel,
-    AccessibilityRole, AccessibilityState, AccessibilityStateSignal, AccessibilityValue,
+    AccessibilityRole, AccessibilityState, AccessibilityStateSignal,
 };
 use waterui::animation::Animation;
 use waterui::background::{Background, MaterialBackground};
@@ -130,6 +132,7 @@ use waterui_core::layout::{
     Rect as LayoutRect, Size as LayoutSize, StretchAxis, SubView, VerticalAlignment,
     ViewDimensions,
 };
+#[cfg(feature = "accessibility")]
 use waterui_core::metadata::MetadataKey;
 use waterui_core::view::Hook;
 use waterui_core::views::Views;

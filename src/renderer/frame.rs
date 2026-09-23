@@ -89,6 +89,7 @@ impl SemanticCore {
                 .keyboard_focus_node()
                 .is_none_or(|node| self.emitted_node_is_live(node))
             {
+                self.hit_test.focus_dropped_this_frame = true;
                 self.set_keyboard_focus_node(None, false);
             }
         }
@@ -128,6 +129,7 @@ impl SemanticCore {
                     }
             });
         if !keyboard_focus_is_live {
+            self.hit_test.focus_dropped_this_frame = true;
             self.set_keyboard_focus(None, false);
         }
         let selection_drag_is_live = self
@@ -137,6 +139,36 @@ impl SemanticCore {
             .is_none_or(|drag| self.text_editing.index_of(&drag.target).is_some());
         if !selection_drag_is_live {
             self.text_editing.active_text_selection_drag = None;
+        }
+    }
+
+    /// Relocates focus that lost its view to this frame's flush: a hidden
+    /// or unmounted view cannot keep focus, and dropping it on the floor
+    /// leaves every keystroke dead until a pointer press re-grants it —
+    /// the #126 regression. Focus relocates to the next focusable after the
+    /// freed slot, in the emitted tree order `traversal_anchor` tracks —
+    /// the same move Tab traversal performs. A `.focused(binding)` grant
+    /// that landed in the same frame wins over the relocation, as does any
+    /// focusable the transition already handed focus to.
+    pub(crate) fn relocate_dropped_focus(&mut self) {
+        if !self.hit_test.focus_dropped_this_frame {
+            return;
+        }
+        self.hit_test.focus_dropped_this_frame = false;
+        let focus_alive = self.hit_test.focused_embedded_key.is_some()
+            || self.hit_test.keyboard_focus.is_some()
+            || {
+                #[cfg(feature = "accessibility")]
+                {
+                    self.keyboard_focus_node().is_some()
+                }
+                #[cfg(not(feature = "accessibility"))]
+                {
+                    false
+                }
+            };
+        if !focus_alive {
+            self.move_keyboard_focus(false);
         }
     }
 
@@ -364,6 +396,7 @@ impl HydrolysisRenderer {
         self.core
             .hit_test
             .finish_rebuild_frame(&self.core.text_editing.text_input_targets);
+        self.relocate_dropped_focus();
         self.core.navigation.finish_rebuild_frame();
         self.core.signals.finish_rebuild();
         #[cfg(feature = "accessibility")]
