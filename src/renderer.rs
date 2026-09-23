@@ -268,6 +268,13 @@ pub struct SemanticCore {
     /// of an IME-consumed press in a later batch, after the commit that ended
     /// the composition.
     ime_swallowed_codes: Vec<keyboard_types::Code>,
+    /// `true` when this core is the semantic walk — it emits no pointer
+    /// machinery, so focus liveness may fall back to the semantic focus
+    /// link. The semantic runner marks it at construction; a rendered
+    /// runtime never does, so a rendered frame with no pointer targets
+    /// still applies the rendered-runtime rule.
+    #[cfg(feature = "accessibility")]
+    semantic_walk: bool,
 }
 
 /// Core hydrolysis renderer state: a [`SemanticCore`] plus the GPU-side scene,
@@ -358,6 +365,8 @@ impl SemanticCore {
             render_tree: None,
             subview_structural_change: false,
             ime_swallowed_codes: Vec::new(),
+            #[cfg(feature = "accessibility")]
+            semantic_walk: false,
         }
     }
 

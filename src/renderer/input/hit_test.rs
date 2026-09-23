@@ -191,6 +191,10 @@ pub(crate) struct HitTestState {
     /// so keyboard traversal and `.focused(binding)` writes resolve the
     /// same owner the pointer focused.
     pub(crate) focused_embedded_key: Option<InteractionKey>,
+    /// The `.focused()` binding of the surface holding embedded focus,
+    /// captured while the target is emitted so unfocus writes still reach
+    /// it after the target has been truncated or unmounted.
+    pub(crate) focused_embedded_binding: Option<Binding<bool>>,
     /// Whether an input-method composition session is open on the focused
     /// sink, so pre-edit updates and commits form a well-formed W3C session.
     pub(crate) embedded_composing: bool,
@@ -233,6 +237,11 @@ pub(crate) struct HitTestState {
     pub(crate) trackpad_pan_targets: Vec<TrackpadPanTarget>,
     pub(crate) hit_test_opacity: f32,
     pub(crate) hit_test_order: usize,
+    /// The tree order of the candidate keyboard focus last rested on —
+    /// kept after that focusable went hidden or unmounted so the next Tab
+    /// resumes from the nearest still-visible focusable instead of
+    /// restarting traversal from scratch.
+    pub(crate) traversal_anchor: Option<usize>,
 }
 
 impl HitTestState {
@@ -273,15 +282,7 @@ impl HitTestState {
         if self.focused_embedded_key == next_key {
             return false;
         }
-        let binding_of = |key: Option<&InteractionKey>| {
-            key.and_then(|key| {
-                self.embedded_input_targets
-                    .iter()
-                    .find(|target| &target.interaction_key == key)
-            })
-            .and_then(|target| target.focus_binding.clone())
-        };
-        if let Some(binding) = binding_of(self.focused_embedded_key.as_ref()) {
+        if let Some(binding) = self.focused_embedded_binding.take() {
             binding.set(false);
         }
         if let Some(sink) = self.focused_embedded_sink.take() {
@@ -293,7 +294,9 @@ impl HitTestState {
         }
         self.focused_embedded_key = next_key;
         self.focused_embedded_sink = index.map(|i| Rc::clone(&self.embedded_input_targets[i].sink));
-        if let Some(binding) = binding_of(self.focused_embedded_key.as_ref()) {
+        self.focused_embedded_binding =
+            index.and_then(|i| self.embedded_input_targets[i].focus_binding.clone());
+        if let Some(binding) = self.focused_embedded_binding.as_ref() {
             binding.set(true);
         }
         if let Some(sink) = self.focused_embedded_sink.as_ref() {
@@ -330,13 +333,12 @@ impl HitTestState {
             .as_ref()
             .is_some_and(|target| !present(&target.sink));
         if focus_left {
-            // The retired surface may hold the keyboard-focus slot — drop
-            // it or a stale `InteractionKey` would still sit there.
-            let retired_key = self.focused_embedded_key.clone();
+            // Only the embedded slot retires here: the surface's
+            // `InteractionKey` is also dead to
+            // `validate_focused_text_input_after_flush`, which clears the
+            // keyboard-focus slot through the shared setter so the focus
+            // binding and the semantic focus node release together.
             self.set_embedded_focus_index(None);
-            if self.keyboard_focus == retired_key {
-                self.keyboard_focus = None;
-            }
         }
         if capture_left {
             self.active_embedded_target = None;
@@ -1145,9 +1147,9 @@ struct KeyboardFocusCandidate {
     /// The candidate's index in `embedded_input_targets`, when it names an
     /// input surface — the keyboard-focus slot such a surface occupies.
     embedded: Option<usize>,
-    /// Emission order — only consulted when the candidate list itself is not
-    /// already in tree order (the pointer/text-input path).
-    #[cfg(not(feature = "accessibility"))]
+    /// Emission order — the candidate's slot in the sequence traversal
+    /// walks. The accessibility flavour counts the emitted node tree; the
+    /// pointer/text-input flavour sorts by it.
     order: usize,
 }
 
@@ -1244,6 +1246,16 @@ impl SemanticCore {
         self.hit_test.keyboard_activation = KeyboardActivation::Semantic;
     }
 
+    /// This core is the semantic walk: it emits no pointer machinery, so
+    /// the focus-liveness fallback may resolve a key through the semantic
+    /// focus link. Rendered runtimes never call it — there a key backed by
+    /// no target is dead even when a frame happens to emit no pointer
+    /// targets at all.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn use_semantic_walk(&mut self) {
+        self.semantic_walk = true;
+    }
+
     pub(crate) fn set_keyboard_focus(
         &mut self,
         focus: Option<InteractionKey>,
@@ -1293,6 +1305,7 @@ impl SemanticCore {
         {
             return false;
         }
+        let leaving = self.focused_candidate_order();
         if self.hit_test.keyboard_focus != focus || node_changed {
             if let Some(binding) = self.hit_test.keyboard_focus_binding.take() {
                 binding.set(false);
@@ -1338,9 +1351,64 @@ impl SemanticCore {
                 binding.set(true);
             }
         }
+        // The anchor tracks whichever focusable focus rests on now, or the
+        // slot it just left — the slot's order still points at the same
+        // tree position once that focusable disappears.
+        self.hit_test.traversal_anchor = self
+            .focused_candidate_order()
+            .or(leaving)
+            .or(self.hit_test.traversal_anchor);
         self.hit_test.keyboard_focus_visible = visible;
         self.request_refresh();
         true
+    }
+
+    /// The tree order of the candidate keyboard focus currently rests on —
+    /// the focused node's slot in the emitted tree, matching the `order`
+    /// accessibility candidates carry.
+    #[cfg(feature = "accessibility")]
+    fn focused_candidate_order(&self) -> Option<usize> {
+        let node = self.keyboard_focus_node().or_else(|| {
+            self.hit_test
+                .keyboard_focus
+                .as_ref()
+                .and_then(|key| self.focus_node_for_key(key))
+        });
+        node.and_then(|node| {
+            self.accessibility
+                .nodes
+                .iter()
+                .position(|(id, _)| *id == node)
+        })
+    }
+
+    /// The tree order of the candidate keyboard focus currently rests on —
+    /// the emission order of the target behind it, matching the `order`
+    /// pointer/text-input candidates carry.
+    #[cfg(not(feature = "accessibility"))]
+    fn focused_candidate_order(&self) -> Option<usize> {
+        self.hit_test.keyboard_focus.as_ref().and_then(|focused| {
+            self.hit_test
+                .pointer_targets
+                .iter()
+                .filter_map(|target| target.press_slot.as_ref())
+                .find(|slot| &slot.key == focused)
+                .map(|slot| slot.order)
+                .or_else(|| {
+                    self.text_editing
+                        .text_input_targets
+                        .iter()
+                        .find(|target| &target.interaction_key == focused)
+                        .map(|target| target.order)
+                })
+                .or_else(|| {
+                    self.hit_test
+                        .embedded_input_targets
+                        .iter()
+                        .find(|target| &target.interaction_key == focused)
+                        .map(|target| target.order)
+                })
+        })
     }
 
     /// The traversal order is the semantic order of the emitted tree: the
@@ -1363,8 +1431,11 @@ impl SemanticCore {
         self.accessibility
             .nodes
             .iter()
-            .filter(|(_, node)| node.supports_action(AccessibilityAction::Focus))
-            .filter_map(|(node_id, _)| {
+            .enumerate()
+            .filter(|(_, (_, node))| {
+                node.supports_action(AccessibilityAction::Focus) && !node.is_hidden()
+            })
+            .filter_map(|(order, (node_id, _))| {
                 let node_id = *node_id;
                 let text_input = self
                     .text_editing
@@ -1407,6 +1478,7 @@ impl SemanticCore {
                     node: node_id,
                     text_input,
                     embedded,
+                    order,
                 })
             })
             .collect()
@@ -1500,12 +1572,35 @@ impl SemanticCore {
                 .iter()
                 .position(|candidate| candidate.key.as_ref() == Some(focused))
         });
+        // With no live focus to start from, resume at the slot focus last
+        // held — `traversal_anchor` survives the focusable that held it
+        // going hidden or unmounted, so the next Tab lands on the nearest
+        // still-visible candidate in tree order rather than restarting.
+        let anchor = self.hit_test.traversal_anchor;
         let next = if reverse {
-            current.map_or(candidates.len() - 1, |index| {
-                index.checked_sub(1).unwrap_or(candidates.len() - 1)
-            })
+            current.map_or_else(
+                || {
+                    anchor.map_or(candidates.len() - 1, |anchor| {
+                        candidates
+                            .iter()
+                            .rposition(|candidate| candidate.order < anchor)
+                            .unwrap_or(candidates.len() - 1)
+                    })
+                },
+                |index| index.checked_sub(1).unwrap_or(candidates.len() - 1),
+            )
         } else {
-            current.map_or(0, |index| (index + 1) % candidates.len())
+            current.map_or_else(
+                || {
+                    anchor.map_or(0, |anchor| {
+                        candidates
+                            .iter()
+                            .position(|candidate| candidate.order > anchor)
+                            .unwrap_or(0)
+                    })
+                },
+                |index| (index + 1) % candidates.len(),
+            )
         };
         let candidate = &candidates[next];
         let text_input = candidate.text_input;

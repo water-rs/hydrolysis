@@ -223,6 +223,7 @@ impl HydrolysisRenderer {
         let hover_start = renderer.hit_test.hover_targets.len();
         let scroll_start = renderer.hit_test.scroll_targets.len();
         let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
 
         render_content(renderer);
 
@@ -259,6 +260,18 @@ impl HydrolysisRenderer {
             .truncate(text_start);
         if focus_was_dropped {
             renderer.set_focused_text_input_key(None);
+        }
+        // The same goes for an input surface under the modifier: a surface
+        // that is no longer hittable must not keep keyboard focus.
+        let embedded_focus_was_dropped = renderer.hit_test.embedded_input_targets[embedded_start..]
+            .iter()
+            .any(|target| renderer.is_focused_embedded(&target.interaction_key));
+        renderer
+            .hit_test
+            .embedded_input_targets
+            .truncate(embedded_start);
+        if embedded_focus_was_dropped {
+            renderer.set_focused_embedded_key(None);
         }
     }
 
