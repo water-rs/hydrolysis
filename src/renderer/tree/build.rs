@@ -404,6 +404,7 @@ impl RenderNode {
                     #[cfg(feature = "accessibility")]
                     default_a11y_label: renderer.accessibility_label_from_view(&content, env),
                     gesture_group_identity: gesture_group_identity(&content),
+                    gesture_target: Cell::new(None),
                 };
                 return RenderNode::build_wrapper(
                     WrapperEffect::GestureObserver(effect),

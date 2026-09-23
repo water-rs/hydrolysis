@@ -392,7 +392,17 @@ impl HydrolysisRenderer {
             return;
         }
 
-        renderer.register_gesture_target(bounds, group_id, effect.gesture.clone(), layered_action);
+        if let Some(target) = effect.gesture_target.take() {
+            renderer.register_retained_gesture_target(&target, bounds, group_id);
+            effect.gesture_target.set(Some(target));
+        } else {
+            effect.gesture_target.set(renderer.register_gesture_target(
+                bounds,
+                group_id,
+                effect.gesture.clone(),
+                layered_action,
+            ));
+        }
         Self::render_gesture_content(renderer, env, render_content);
     }
 
