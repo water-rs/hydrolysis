@@ -1470,8 +1470,8 @@ fn lazy_stack_emits_every_item_without_layout() {
 
 /// The `.focused(binding)` direction of focus: a runtime write to the focus
 /// binding lands UI focus on the field's node in the emitted tree, clearing
-/// the binding clears it, and a non-text node can hold the tree's focus
-/// while UI focus stays on the field — the two are deliberately separate.
+/// the binding clears it, and a non-text node taking the tree's focus ends
+/// editing — the caret follows keyboard focus (#95).
 #[test]
 fn focused_binding_moves_ui_focus_and_tree_focus() {
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1519,25 +1519,18 @@ fn focused_binding_moves_ui_focus_and_tree_focus() {
     assert_eq!(update.focus, email_node);
     assert_eq!(runtime.focused_ui_node(), Some(email_node));
 
-    // A non-text node taking the tree's focus leaves UI focus on the field —
-    // the text caret is independent of where keyboard focus sits.
+    // A non-text node taking the tree's focus ends text editing: UI focus
+    // follows keyboard focus onto the button, clearing the caret and
+    // writing the `.focused` binding back to None.
     assert!(act(&mut runtime, Action::Focus, done));
     let update = pumped(&mut runtime);
     assert_eq!(update.focus, done);
     assert_eq!(
         runtime.focused_ui_node(),
-        Some(email_node),
-        "UI focus is the text caret — the button holds only the tree's focus"
+        None,
+        "UI focus follows keyboard focus — the caret left the field"
     );
-    assert_eq!(focus.get(), Some(Field::Email));
-
-    // Clearing the binding clears UI focus and writes None back; the tree's
-    // focus stays on the button it moved to.
-    focus.set(None);
-    let update = pumped(&mut runtime);
-    assert_eq!(runtime.focused_ui_node(), None);
     assert_eq!(focus.get(), None);
-    assert_eq!(update.focus, done);
 
     // A cleared UI focus accepts a new target: an accessibility Focus on the
     // field moves UI focus and the tree's focus, and writes the tag back.
