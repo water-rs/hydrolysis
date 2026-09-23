@@ -1377,6 +1377,17 @@ where
             InputEvent::ModifiersChanged(modifiers) => {
                 runtime.renderer.update_embedded_modifiers(modifiers);
             }
+            InputEvent::Focused(focused) => {
+                let changed = runtime.renderer.handle_window_focused(focused);
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    event = "window_focused",
+                    focused,
+                    changed,
+                    "runner dispatched input event"
+                );
+                schedule_redraw_or_refresh(runtime, changed);
+            }
         }
     }
     runtime
