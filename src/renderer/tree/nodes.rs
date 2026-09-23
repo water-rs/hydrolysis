@@ -447,6 +447,15 @@ pub(crate) trait WidgetBehavior {
         0
     }
 
+    /// Whether this leaf draws nothing — WaterUI's empty view `()`.
+    ///
+    /// This is a semantic answer, not a measured size: a `Spacer` squeezed to
+    /// zero still renders and still answers `false`. A stack treats a child
+    /// answering `true` as a non-member (§4.4: no slot, no spacing).
+    fn renders_nothing(&self) -> bool {
+        false
+    }
+
     /// Re-renders the leaf from its retained state.
     fn render(
         self: Rc<Self>,

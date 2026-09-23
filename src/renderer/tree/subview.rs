@@ -27,6 +27,8 @@ pub(super) struct NodeSubView<'a> {
     theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch: StretchAxis,
     priority: i32,
+    /// Whether this child draws nothing — the §4.4 membership answer.
+    is_empty: bool,
     /// Per-proposal memo for this layout pass (containers probe children with
     /// repeated proposals). Only the recursion path caches here; the text path
     /// memoizes in the content-keyed `TextMeasureService` instead.
@@ -87,6 +89,7 @@ impl<'a> NodeSubView<'a> {
         Self {
             stretch: node.stretch(),
             priority: node.priority(),
+            is_empty: node.is_empty(),
             node: MainThreadBound::new(node),
             state: MainThreadBound::new(state),
             env: MainThreadBound::new(env.clone()),
@@ -150,5 +153,8 @@ impl SubView for NodeSubView<'_> {
     }
     fn priority(&self) -> i32 {
         self.priority
+    }
+    fn is_empty(&self) -> bool {
+        self.is_empty
     }
 }
