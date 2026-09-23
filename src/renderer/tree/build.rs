@@ -178,41 +178,6 @@ impl RenderNode {
         // (possibly reactive) content stays live instead of freezing in `Captured`.
         // The two *naming* wrappers additionally carry a scope identity, so a
         // container that no control spoke for can emit the node naming itself.
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityLabel>>() {
-            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityIdentifier>>() {
-            Ok(meta) => {
-                let IgnorableMetadata { content, value } = *meta;
-                #[cfg(feature = "accessibility")]
-                {
-                    let scoped = a11y_scoped_env(env, &ScopedAccessibilityIdentifier::new(value));
-                    let child = RenderNode::build(content, &scoped, renderer);
-                    return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
-                }
-                // An identifier names a node in the accessibility tree. Without
-                // that tree there is nothing to name, so it only unwraps.
-                #[cfg(not(feature = "accessibility"))]
-                {
-                    drop(value);
-                    return RenderNode::build(content, env, renderer);
-                }
-            }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityRole>>() {
-            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityHidden>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityChildren>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
         // Accessibility state is stored in the scoped environment as a *live*
         // `AccessibilityStateSignal` (a static state becomes a constant signal):
         // descendants capture environment clones at build time, so a resolved
@@ -225,17 +190,13 @@ impl RenderNode {
         // snapshot would freeze the subtree hidden after the signal turns
         // visible. A signal-hidden node is emitted with the accesskit hidden
         // flag instead, so it follows the signal every flush.
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityState>>() {
-            Ok(meta) => {
-                let IgnorableMetadata { content, value } = *meta;
-                let scoped = a11y_scoped_env_for_state(env, &value);
+        // Which wrapper maps to which scoping is defined once in
+        // `a11y_scoped_env_for_view` — the List-row hoist reads the same table.
+        let view = match a11y_scoped_env_for_view(view, env) {
+            Ok((content, scoped)) => {
                 let child = RenderNode::build(content, &scoped, renderer);
                 return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
             }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityStateSignal>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
             Err(view) => view,
         };
         // Passthrough metadata: the dispatch handlers discard the value and just
@@ -733,40 +694,6 @@ impl RenderNode {
             _ => panic!("hydrolysis lifecycle variant is not supported"),
         };
         RenderNode::build_wrapper(WrapperEffect::LifeCycle(effect), content, env, renderer)
-    }
-
-    /// Build an environment-scoping `Env` node from an [`IgnorableMetadata`] whose
-    /// only effect is `env.insert(value)` (the accessibility metadata wrappers): the
-    /// extended environment travels with the node so it is read at every flush, and
-    /// the wrapped content recurses so reactive descendants stay live.
-    fn build_env_scoped<T: MetadataKey + Clone + 'static>(
-        meta: IgnorableMetadata<T>,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        let IgnorableMetadata { content, value } = meta;
-        let scoped = a11y_scoped_env(env, &value);
-        let child = RenderNode::build(content, &scoped, renderer);
-        RenderNode::Env(Box::new(EnvNode { env: scoped, child }))
-    }
-
-    /// Build the `Env` node for naming metadata (`.a11y_label()` / `.a11y_role()`).
-    ///
-    /// Same scoping as [`RenderNode::build_env_scoped`], plus the scope identity
-    /// that lets the node representing this view claim the name — see
-    /// [`a11y_naming_scoped_env`].
-    fn build_naming_scoped<T: MetadataKey + Clone + 'static>(
-        meta: IgnorableMetadata<T>,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        let IgnorableMetadata { content, value } = meta;
-        #[cfg(feature = "accessibility")]
-        let scoped = a11y_naming_scoped_env(env, &value);
-        #[cfg(not(feature = "accessibility"))]
-        let scoped = a11y_scoped_env(env, &value);
-        let child = RenderNode::build(content, &scoped, renderer);
-        RenderNode::Env(Box::new(EnvNode { env: scoped, child }))
     }
 
     /// Build a retained reactive collection (non-virtualized): materialize every
