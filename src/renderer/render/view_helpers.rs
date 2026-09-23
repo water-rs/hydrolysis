@@ -69,6 +69,16 @@ pub(crate) fn a11y_naming_scoped_env<T: MetadataKey + Clone + 'static>(
     scoped
 }
 
+/// Without an accessibility tree there is no naming scope to grow, so naming
+/// metadata scopes the environment like every other value.
+#[cfg(not(feature = "accessibility"))]
+pub(crate) fn a11y_naming_scoped_env<T: MetadataKey + Clone + 'static>(
+    env: &Environment,
+    value: &T,
+) -> Environment {
+    a11y_scoped_env(env, value)
+}
+
 /// Carries the accessibility naming scope across a `Metadata<Environment>`
 /// override.
 ///
@@ -145,6 +155,103 @@ pub(crate) fn a11y_scoped_env_for_state(
         value.clone(),
     )));
     scoped
+}
+
+/// The `Env` scoping for an [`AccessibilityIdentifier`]: the value wraps in a
+/// [`ScopedAccessibilityIdentifier`] so the node that registers under it can
+/// claim that identity rather than any other scoped identifier above it.
+/// Without an accessibility tree there is nothing to name, so the value drops
+/// and the environment passes through.
+#[cfg(feature = "accessibility")]
+fn a11y_scoped_identifier_env(env: &Environment, value: &AccessibilityIdentifier) -> Environment {
+    a11y_scoped_env(env, &ScopedAccessibilityIdentifier::new(value.clone()))
+}
+
+#[cfg(not(feature = "accessibility"))]
+fn a11y_scoped_identifier_env(env: &Environment, _value: &AccessibilityIdentifier) -> Environment {
+    env.clone()
+}
+
+/// If `view`'s outermost wrapper is an accessibility `IgnorableMetadata`
+/// scope, peel it and return its content with `env` extended for it — the
+/// single definition of the metadata-type → scoping table. The retained
+/// build's `Env` arms and the List-row hoist both peel through this, so
+/// registering a new accessibility scope touches one place. `Err` hands the
+/// view back untouched when the outer wrapper is not one of these scopes.
+pub(crate) fn a11y_scoped_env_for_view(
+    view: AnyView,
+    env: &Environment,
+) -> Result<(AnyView, Environment), AnyView> {
+    macro_rules! try_scope {
+        ($view:expr, $( $ty:ty => $install:expr ),+ $(,)?) => {{
+            let mut view = $view;
+            $(
+                match view.downcast::<IgnorableMetadata<$ty>>() {
+                    Ok(metadata) => {
+                        let IgnorableMetadata { content, value } = *metadata;
+                        let install: fn(&Environment, &$ty) -> Environment = $install;
+                        return Ok((content, install(env, &value)));
+                    }
+                    Err(back) => view = back,
+                }
+            )+
+            Err(view)
+        }};
+    }
+    try_scope!(
+        view,
+        AccessibilityLabel => a11y_naming_scoped_env::<AccessibilityLabel>,
+        AccessibilityIdentifier => a11y_scoped_identifier_env,
+        AccessibilityRole => a11y_naming_scoped_env::<AccessibilityRole>,
+        AccessibilityHidden => a11y_scoped_env::<AccessibilityHidden>,
+        AccessibilityChildren => a11y_scoped_env::<AccessibilityChildren>,
+        AccessibilityState => a11y_scoped_env_for_state,
+        AccessibilityStateSignal => a11y_scoped_env::<AccessibilityStateSignal>,
+    )
+}
+
+/// Peels the accessibility metadata wrappers off `view`, installing each into a
+/// scoped copy of `env` the way the retained build's `Env`-scoping arms do —
+/// naming metadata grows a fresh [`ScopedAccessibilitySemantics`] so the first
+/// node registered under the result claims it.
+///
+/// A `List` row uses this so the row's own `ListItem` node — rather than a
+/// leaf inside its content — claims the content's explicit label, role, or
+/// identifier; the subtree then emits under the container-child environment
+/// that strips that naming ([`accessibility_container_child_environment`]).
+/// `Metadata<Environment>` snapshots are transparent to hoisting: every row's
+/// content arrives wrapped in the selection theme's `use_env` snapshot, which
+/// is not a view the user named — it stays on the returned view while the
+/// metadata inside it lifts. Any other `Metadata<T>` (a `.padding()` between
+/// the modifier and the named view) still belongs to the subtree's own build,
+/// so hoisting stops at one.
+#[cfg(feature = "accessibility")]
+pub(crate) fn hoist_accessibility_metadata(
+    view: AnyView,
+    env: &Environment,
+) -> (AnyView, Environment) {
+    let mut scoped = env.clone();
+    let view = hoist_accessibility_metadata_inner(view, &mut scoped);
+    (view, scoped)
+}
+
+#[cfg(feature = "accessibility")]
+fn hoist_accessibility_metadata_inner(mut view: AnyView, scoped: &mut Environment) -> AnyView {
+    view = match view.downcast::<Metadata<Environment>>() {
+        Ok(metadata) => {
+            let Metadata { content, value } = *metadata;
+            let content = hoist_accessibility_metadata_inner(content, scoped);
+            return AnyView::new(Metadata { content, value });
+        }
+        Err(view) => view,
+    };
+    match a11y_scoped_env_for_view(view, scoped) {
+        Ok((content, next)) => {
+            *scoped = next;
+            hoist_accessibility_metadata_inner(content, scoped)
+        }
+        Err(view) => view,
+    }
 }
 
 fn gesture_group_identity_with_budget(view: &AnyView, remaining: usize) -> usize {
