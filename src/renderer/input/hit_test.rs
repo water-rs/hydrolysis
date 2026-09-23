@@ -242,6 +242,11 @@ pub(crate) struct HitTestState {
     /// resumes from the nearest still-visible focusable instead of
     /// restarting traversal from scratch.
     pub(crate) traversal_anchor: Option<usize>,
+    /// Whether this frame's flush dropped the focused view's targets —
+    /// the view went hidden or unmounted while holding focus. Read at the
+    /// end of the frame: focus then relocates to the next focusable rather
+    /// than dying until a pointer press re-grants it.
+    pub(crate) focus_dropped_this_frame: bool,
 }
 
 impl HitTestState {
@@ -261,6 +266,7 @@ impl HitTestState {
     pub(crate) fn begin_rebuild_frame(&mut self) {
         self.hit_test_opacity = 1.0;
         self.hit_test_order = 0;
+        self.focus_dropped_this_frame = false;
         self.interaction.begin_rebuild_frame();
     }
 
@@ -337,7 +343,9 @@ impl HitTestState {
             // `InteractionKey` is also dead to
             // `validate_focused_text_input_after_flush`, which clears the
             // keyboard-focus slot through the shared setter so the focus
-            // binding and the semantic focus node release together.
+            // binding and the semantic focus node release together. The
+            // end of the frame relocates the freed focus.
+            self.focus_dropped_this_frame = true;
             self.set_embedded_focus_index(None);
         }
         if capture_left {
@@ -1418,9 +1426,13 @@ impl SemanticCore {
             self.hit_test
                 .pointer_targets
                 .iter()
-                .filter_map(|target| target.press_slot.as_ref())
-                .find(|slot| &slot.key == focused)
-                .map(|slot| slot.order)
+                .find(|target| {
+                    target
+                        .press_slot
+                        .as_ref()
+                        .is_some_and(|slot| &slot.key == focused)
+                })
+                .map(|target| target.order)
                 .or_else(|| {
                     self.text_editing
                         .text_input_targets
@@ -1577,7 +1589,7 @@ impl SemanticCore {
         candidates
     }
 
-    fn move_keyboard_focus(&mut self, reverse: bool) -> bool {
+    pub(crate) fn move_keyboard_focus(&mut self, reverse: bool) -> bool {
         let candidates = self.keyboard_focus_candidates();
         if candidates.is_empty() {
             #[cfg(feature = "accessibility")]
@@ -1631,7 +1643,6 @@ impl SemanticCore {
         };
         let candidate = &candidates[next];
         let text_input = candidate.text_input;
-        #[cfg(feature = "accessibility")]
         let embedded = candidate.embedded;
         #[cfg(feature = "accessibility")]
         let changed =
@@ -1639,10 +1650,7 @@ impl SemanticCore {
         #[cfg(not(feature = "accessibility"))]
         let changed = self.set_keyboard_focus(candidate.key.clone(), true);
         let mut changed = changed;
-        #[cfg(feature = "accessibility")]
-        {
-            changed |= self.hit_test.set_embedded_focus_index(embedded);
-        }
+        changed |= self.hit_test.set_embedded_focus_index(embedded);
         // The caret follows keyboard focus: traversal onto a field focuses
         // it for editing, and a non-text candidate ends editing exactly as
         // a pointer press on one does.
