@@ -2022,6 +2022,62 @@ mod winit_impl {
         }
     }
 
+    /// The requested window frame held until the window has actually
+    /// mapped.
+    ///
+    /// `apply_properties` pushes the requested frame while the window is
+    /// still unmapped (`with_visible(false)`); on X11 geometry set on an
+    /// unmapped window is dropped and the window manager's own placement —
+    /// position and initial size alike — wins the race. The requested frame
+    /// is held for one re-delivery on the first event that only reaches a
+    /// mapped window. Events that precede the map leave it armed.
+    #[derive(Debug, Default)]
+    struct MappedFrameRetry {
+        pending: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+        mapped: bool,
+    }
+
+    impl MappedFrameRetry {
+        /// Records the requested frame while the window is not yet known to
+        /// be visible, overwriting any earlier pending one — the latest
+        /// request wins. Once a mapped event has been seen this never re-arms:
+        /// `is_visible` can lag the real map transition, and re-arming off it
+        /// would re-deliver a frame the live geometry has already overtaken.
+        fn arm(
+            &mut self,
+            visible: Option<bool>,
+            position: LogicalPosition<f64>,
+            size: LogicalSize<f64>,
+        ) {
+            if visible != Some(true) && !self.mapped {
+                self.pending = Some((position, size));
+            }
+        }
+
+        /// Consumes the held frame on the first mapped-signal event —
+        /// `Moved`, `Resized`, `Occluded(false)`, or `ScaleFactorChanged`,
+        /// each of which only reaches a mapped window — returning it for
+        /// re-application. Other events leave it armed.
+        fn take_on_mapped_event(
+            &mut self,
+            event: &WindowEvent,
+        ) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+            let mapped = matches!(
+                event,
+                WindowEvent::Moved(_)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
+                    | WindowEvent::Occluded(false)
+            );
+            if mapped {
+                self.mapped = true;
+                self.pending.take()
+            } else {
+                None
+            }
+        }
+    }
+
     #[derive(Debug)]
     pub struct WinitWindow {
         window: Arc<NativeWindow>,
@@ -2045,6 +2101,12 @@ mod winit_impl {
         /// reading the live geometry against the stale binding would yank
         /// the window straight back to its old frame.
         applied_frame: Option<waterui_core::layout::Rect>,
+        /// The requested window frame held until the window has actually
+        /// mapped (`with_visible(false)`): on X11 geometry pushed onto an
+        /// unmapped window is dropped, so the first mapped-signal event
+        /// re-delivers it — the window manager's own initial placement
+        /// otherwise wins.
+        pending_mapped_frame: MappedFrameRetry,
         /// Explicit ProMotion opt-in: declares the 120Hz frame-rate demand to
         /// the window server while redraws are being requested. `None` before
         /// macOS 14.
@@ -2086,6 +2148,7 @@ mod winit_impl {
                     current_cursor_style: CursorStyle::Arrow,
                     applied_size_limits: None,
                     applied_frame: None,
+                    pending_mapped_frame: MappedFrameRetry::default(),
                 },
                 gpu,
             )
@@ -2128,6 +2191,13 @@ mod winit_impl {
         }
 
         pub fn handle_window_event(&mut self, event: &WindowEvent) {
+            // The first mapped-signal event re-applies the frame the app
+            // asked for: geometry pushed while unmapped was dropped by
+            // X11, and the window manager's own placement won the race.
+            if let Some((position, size)) = self.pending_mapped_frame.take_on_mapped_event(event) {
+                self.window.set_outer_position(position);
+                let _ = self.window.request_inner_size(size);
+            }
             match event {
                 WindowEvent::CloseRequested => {
                     self.pending_events.push(InputEvent::CloseRequested);
@@ -2446,6 +2516,15 @@ mod winit_impl {
             // window straight back and make user resizes impossible.
             let applied = self.applied_frame;
             self.applied_frame = Some(frame);
+            // Arm the post-map re-apply while the window is still hidden:
+            // the frame pushed above reaches an unmapped X11 window and is
+            // dropped, so the first mapped event must re-deliver origin and
+            // size — a window manager that stretched the window on map is
+            // put back on the requested frame. Once the window is visible
+            // the app-requested frame was already enforced and further
+            // `frame` changes just flow through the ordinary path.
+            self.pending_mapped_frame
+                .arm(self.window.is_visible(), target_position, target_size);
             let size_changed = applied.is_none_or(|applied| *applied.size() != *frame.size());
             let origin_changed = applied.is_none_or(|applied| applied.origin() != frame.origin());
             let current_position = self
@@ -2888,6 +2967,71 @@ mod winit_impl {
                 &caps_with_alpha_modes(&[Mode::Opaque]),
                 true,
                 &fake_adapter_info(),
+            );
+        }
+
+        #[test]
+        fn the_requested_frame_is_reapplied_on_the_first_mapped_event() {
+            use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
+            use winit::event::WindowEvent;
+
+            let mut retry = super::MappedFrameRetry::default();
+            let position = LogicalPosition::new(12.0, 34.0);
+            let size = LogicalSize::new(800.0, 300.0);
+
+            // Armed while the window is unmapped: a pre-map event leaves the
+            // frame held; the first mapped-signal event returns it once.
+            retry.arm(Some(false), position, size);
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Focused(true)),
+                None,
+                "a non-mapped event must not consume the held frame"
+            );
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
+                Some((position, size)),
+            );
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Resized(PhysicalSize::new(1, 1))),
+                None,
+                "the re-apply fires once only"
+            );
+
+            // A later request while still hidden replaces the earlier one.
+            let mut retry = super::MappedFrameRetry::default();
+            retry.arm(Some(false), position, size);
+            let newer = (
+                LogicalPosition::new(56.0, 78.0),
+                LogicalSize::new(1024.0, 640.0),
+            );
+            retry.arm(None, newer.0, newer.1);
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Occluded(false)),
+                Some(newer),
+            );
+
+            // Once the window is visible nothing is held: the ordinary
+            // frame-binding path applies later frames. `is_visible` may lag
+            // the real map transition — a mapped event latches `mapped`, so
+            // arming must not resurrect a retry the live geometry overtook.
+            let mut retry = super::MappedFrameRetry::default();
+            retry.arm(Some(false), position, size);
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
+                Some((position, size)),
+            );
+            retry.arm(None, newer.0, newer.1);
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
+                None,
+                "no re-arm is allowed once a mapped event has been seen"
+            );
+            let mut retry = super::MappedFrameRetry::default();
+            retry.arm(Some(true), position, size);
+            assert_eq!(
+                retry.take_on_mapped_event(&WindowEvent::Moved(PhysicalPosition::new(0, 0))),
+                None,
+                "a confirmed-visible window holds nothing"
             );
         }
     }
