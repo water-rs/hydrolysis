@@ -531,12 +531,51 @@ fn radio_picker_emits_group_and_selects() {
     assert_eq!(manual.role(), Role::RadioButton);
     assert_eq!(manual.label(), Some("Manual"));
     assert_eq!(manual.is_selected(), Some(false));
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Mode"))
+            .count(),
+        1,
+        "the picker's label must name its single group node exactly once"
+    );
 
     assert!(
         act(&mut runtime, Action::Click, children[1]),
         "the radio Click changed nothing"
     );
     assert_eq!(selection.get(), 1, "the radio option did not select");
+}
+
+/// A visually hidden radio-picker label draws nothing and takes no space, but
+/// the group's accessibility node still carries the label — exactly once.
+#[test]
+fn radio_picker_hidden_label_still_names_the_group() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Mode",
+            vec![text("Auto").tag(0i32), text("Manual").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Radio)
+        .hide_label(),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    find_by_label(&update, Role::Group, "Mode")
+        .expect("a hidden label still names the radio group");
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Mode"))
+            .count(),
+        1,
+        "a hidden label must not add a second node carrying the label"
+    );
 }
 
 #[test]
@@ -1411,6 +1450,15 @@ fn segmented_picker_emits_group_and_click_selects() {
     assert_eq!(manual.label(), Some("Manual"));
     assert_eq!(manual.is_selected(), Some(false));
     assert!(manual.supports_action(Action::Click));
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Mode"))
+            .count(),
+        1,
+        "the picker's label must name its single group node exactly once"
+    );
 
     assert!(
         act(&mut runtime, Action::Click, children[1]),
@@ -1423,6 +1471,36 @@ fn segmented_picker_emits_group_and_click_selects() {
     let children = group_node.children();
     assert_eq!(lookup(&update, children[0]).is_selected(), Some(false));
     assert_eq!(lookup(&update, children[1]).is_selected(), Some(true));
+}
+
+/// A visually hidden segmented-picker label draws nothing and takes no space,
+/// but the group's accessibility node still carries the label — exactly once.
+#[test]
+fn segmented_picker_hidden_label_still_names_the_group() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Mode",
+            vec![text("Auto").tag(0i32), text("Manual").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Segmented)
+        .hide_label(),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    find_by_label(&update, Role::Group, "Mode")
+        .expect("a hidden label still names the segmented group");
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Mode"))
+            .count(),
+        1,
+        "a hidden label must not add a second node carrying the label"
+    );
 }
 
 /// A scene that names itself — the label the semantic tree has to offer its
