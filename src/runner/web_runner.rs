@@ -172,7 +172,11 @@ struct BrowserRunner {
 impl BrowserRunner {
     fn drain_runnable_queue(runnable_queue: &RefCell<VecDeque<Runnable>>) -> bool {
         let mut drained = false;
-        while let Some(runnable) = runnable_queue.borrow_mut().pop_front() {
+        // The pop borrow must end before `run`: running a task can schedule
+        // more runnables, which pushes onto this same queue.
+        loop {
+            let runnable = runnable_queue.borrow_mut().pop_front();
+            let Some(runnable) = runnable else { break };
             drained = true;
             runnable.run();
         }
@@ -185,7 +189,11 @@ impl BrowserRunner {
 
     fn frame(&mut self) -> bool {
         let _ = self.drain_local_executor_queue();
-        while let Some(request) = self.accessibility_actions.borrow_mut().pop_front() {
+        // Same borrow discipline: handling an action may schedule work that
+        // queues further accessibility requests.
+        loop {
+            let request = self.accessibility_actions.borrow_mut().pop_front();
+            let Some(request) = request else { break };
             if self
                 .runtime
                 .renderer
@@ -297,7 +305,7 @@ pub fn run(app: App) {
             "hydrolysis web runner supports exactly one window"
         );
 
-        let mut env = env;
+        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
         let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
         super::install_native_component_hooks(&mut env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
@@ -348,6 +356,7 @@ pub fn run(app: App) {
             let handle = handle.clone();
             Rc::new(move || handle.schedule_frame())
         });
+        waterui_locale::start_system_locale_listener();
         handle.schedule_frame();
     });
 }
