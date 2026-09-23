@@ -34,6 +34,10 @@ pub(crate) struct TextEditingState {
     pub(crate) last_text_selection_click: Option<TextSelectionClickState>,
     pub(crate) active_text_context_menu: Option<ActiveTextContextMenu>,
     focused_text_input: RefCell<Option<InteractionKey>>,
+    /// The `.focused()` binding of the field holding text focus, captured
+    /// while the target is emitted so unfocus writes still reach it after
+    /// the target has been truncated or unmounted.
+    pub(crate) focused_binding: Option<nami::Binding<bool>>,
     pub(crate) ime_preedit: Option<Str>,
     /// Byte offset of the caret inside `ime_preedit`, as the platform
     /// reported it — the live composition caret the candidate window must
@@ -1058,16 +1062,18 @@ impl SemanticCore {
         if previous == focused {
             return changed;
         }
-        let focus_binding = |key: Option<&InteractionKey>| {
-            key.and_then(|key| self.text_editing.index_of(key))
-                .and_then(|index| {
-                    self.text_editing.text_input_targets[index]
-                        .focus_binding
-                        .clone()
-                })
-        };
-        let previous_binding = focus_binding(previous.as_ref());
-        let next_binding = focus_binding(focused.as_ref());
+        let previous_binding = self.text_editing.focused_binding.take();
+        // The outgoing target may already be truncated or unmounted, so the
+        // `.focused` binding is captured while the target is emitted and
+        // replayed from the slot — resolving it now would find nothing.
+        let next_binding = focused
+            .as_ref()
+            .and_then(|key| self.text_editing.index_of(key))
+            .and_then(|index| {
+                self.text_editing.text_input_targets[index]
+                    .focus_binding
+                    .clone()
+            });
         if let Some(binding) = previous_binding {
             binding.set(false);
         }
@@ -1079,6 +1085,7 @@ impl SemanticCore {
         );
         let focused_something = focused.is_some();
         self.text_editing.store_focused_key(focused);
+        self.text_editing.focused_binding = next_binding.clone();
         if let Some(binding) = next_binding {
             binding.set(true);
         }
