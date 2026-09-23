@@ -40,7 +40,11 @@ waterui-backend-core = { version = "0.5.0", default-features = false, features =
 waterkit-clipboard = "0.1.1"
 waterui-locale = "0.5.0"
 vello = "0.9"
-parley = { version = "0.11", default-features = false, features = ["system"] }
+# `complex-scripts` ships the ICU4X segmentation dictionaries (CJ plus the
+# Southeast-Asian scripts) inside the one parley build: this runner owns the
+# `LayoutContext`, and without them its word segmenter logs `No segmentation
+# model for complex script` per CJK run on every layout pass.
+parley = { version = "0.11", default-features = false, features = ["system", "complex-scripts"] }
 wgpu = "29.0.4"
 lru = "0.18"
 rayon = "1.12"
@@ -189,6 +193,13 @@ waterui = { version = "0.5.0", default-features = false, features = ["flow-markd
 base64 = "0.22"
 executor-core = { version = "0.7.1", features = ["std", "async-executor"] }
 tiny_http = "0.12"
+# Two crates that only exist to let the segmentation test see what it asserts
+# about: `icu_provider/logging` routes ICU4X data warnings through `log`
+# instead of the `eprintln` shim debug builds get otherwise, and `tracing-log`
+# bridges those records into the `tracing` subscriber the test captures. With
+# `complex-scripts` on the parley dep, no warning may be emitted at all.
+icu_provider = { version = "2.3", features = ["logging"] }
+tracing-log = "0.2"
 
 # `WKWebView` is `MainThreadOnly` and libtest runs tests on worker threads, so
 # the macOS real-engine suite owns its `main` and pumps the main run loop.

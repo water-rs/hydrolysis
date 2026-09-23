@@ -362,6 +362,87 @@ mod tests {
         }
     }
 
+    /// Long enough that a narrow proposal can only answer it with many lines,
+    /// and mixing Japanese kana and kanji with Chinese hanzi so every CJ
+    /// complex-script classification passes through the word segmenter.
+    const CJK_PARAGRAPH: &str = "こんにちは世界。これは日本語のテキストです。雨にも負けず風にも負けず。中文也可以排版，天涯海角任我行。";
+
+    /// UAX #14 already allows a line break between adjacent ideographs, so a
+    /// narrow proposal must wrap a CJK paragraph into several lines. And with
+    /// the bundled segmentation dictionaries the segmenter answers every
+    /// complex-script run with a model, so the layout pass must stay silent:
+    /// `No segmentation model for complex script` was the warn/debug record a
+    /// missing model emitted once per CJK run per layout.
+    #[test]
+    fn a_cjk_paragraph_wraps_at_ideographic_boundaries_and_logs_nothing() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for LogBuffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log capture buffer mutex poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+            type Writer = LogBuffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        // ICU4X data warnings travel through `log`; `LogTracer` lands them in
+        // the same subscriber, so a missing model could not hide behind the
+        // `eprintln` path debug builds take without `icu_provider/logging`.
+        tracing_log::LogTracer::init().ok();
+
+        let mut lines = 0;
+        tracing::subscriber::with_default(subscriber, || {
+            let service = test_host_service();
+            let mut env = Environment::new();
+            crate::testing::install_theme(&mut env);
+            let input = resolve_text_layout_input(
+                &StyledStr::from(CJK_PARAGRAPH),
+                HorizontalAlignment::Leading,
+                &env,
+            );
+            let layout = service.shape(&input, Some(80.0));
+            lines = layout.lines().count();
+        });
+
+        assert!(
+            lines >= 3,
+            "a CJK paragraph in an 80px width must wrap at ideographic boundaries; got {lines} line(s)"
+        );
+        let logged = String::from_utf8(
+            buffer
+                .0
+                .lock()
+                .expect("log capture buffer mutex poisoned")
+                .clone(),
+        )
+        .expect("captured log output must be UTF-8");
+        assert!(
+            !logged.contains("segmentation model") && !logged.contains("icu_segmenter"),
+            "laying out CJK text must not log segmentation-model misses: {logged}"
+        );
+    }
+
     /// And the same statement from the other side: a script Roboto does not
     /// carry must be answered by a face that is *not* bundled. Without this the
     /// test above could pass on a collection that had quietly stopped
