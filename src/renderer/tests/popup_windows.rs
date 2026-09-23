@@ -27,7 +27,7 @@ use crate::platform::{InputEvent, PointerButton, PointerKind};
 const WINDOW_SIZE: f32 = 160.0;
 
 /// The node labelled `label` with `role`, if present.
-fn find_by_label<'a>(
+pub(super) fn find_by_label<'a>(
     update: &'a TreeUpdate,
     role: Role,
     label: &str,
