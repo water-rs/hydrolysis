@@ -299,9 +299,27 @@ pub(crate) fn picker_accessibility(
                     .as_ref()
                     .zip(theme)
                     .map(|(ctx, theme)| (ctx, theme.picker_metrics(picker.style)));
+                // The group heading offsets the option rows exactly as the
+                // render path lays them out, so emitted row bounds overlay the
+                // drawn rows — the same presence rule: measured height > 0.
+                let group_label_height = theme.map_or(0.0, |theme| {
+                    f64::from(
+                        state
+                            .label_view
+                            .measure_built(renderer.state_mut(), env, theme)
+                            .height,
+                    )
+                });
                 let selected = renderer.read_signal(&picker.selection);
-                let mut row_y =
-                    geometry.map(|(ctx, metrics)| ctx.bounds.y0 + metrics.vertical_inset);
+                let mut row_y = geometry.map(|(ctx, metrics)| {
+                    ctx.bounds.y0
+                        + metrics.vertical_inset
+                        + if group_label_height > 0.0 {
+                            group_label_height + metrics.label_spacing
+                        } else {
+                            0.0
+                        }
+                });
                 for (index, item) in items.iter().enumerate() {
                     let label = renderer
                         .read_resolved_text_styled(&item.content, env)
@@ -316,12 +334,13 @@ pub(crate) fn picker_accessibility(
                         if picker.style == PickerStyle::Segmented {
                             let segment_width = ctx.bounds.width() / items.len() as f64;
                             let x0 = ctx.bounds.x0 + segment_width * index as f64;
-                            vello::kurbo::Rect::new(
-                                x0,
-                                ctx.bounds.y0,
-                                x0 + segment_width,
-                                ctx.bounds.y1,
-                            )
+                            let top = ctx.bounds.y0
+                                + if group_label_height > 0.0 {
+                                    group_label_height + metrics.label_spacing
+                                } else {
+                                    0.0
+                                };
+                            vello::kurbo::Rect::new(x0, top, x0 + segment_width, ctx.bounds.y1)
                         } else {
                             let y = row_y.unwrap_or(ctx.bounds.y0);
                             let row_height =
@@ -613,23 +632,7 @@ pub(crate) fn render_menu_picker(
     let (label_bounds, text_bounds) =
         menu_picker_content_rects(ctx.bounds, metrics, f64::from(label_size.height));
     if let Some(label_bounds) = label_bounds {
-        // The label is a retained node sub-view re-flushed at its rect; reactive
-        // content stays live through the node's own per-frame re-flush, with no
-        // dispatch. Its semantics are merged into the picker's own node by
-        // `picker_accessibility`, so the sub-view flushes visual-only.
-        let mut state = owner.borrow_mut();
-        let render_ctx = ctx.render_context();
-        let label_view = &mut state.label_view;
-        ctx.renderer_mut()
-            .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(
-                    renderer,
-                    render_ctx,
-                    env,
-                    ProposalSize::UNSPECIFIED,
-                    label_bounds,
-                );
-            });
+        flush_picker_label(ctx, owner, env, label_bounds);
     }
     ctx.render_styled_text(
         StyledStr::plain(selected_text),
@@ -679,6 +682,76 @@ pub(crate) fn menu_picker_content_rects(
     }
 }
 
+/// The radio group's label layout: the heading sits in the top inset band
+/// inside the horizontal insets — aligned with the option rows' leading edge —
+/// and the rows begin below it with the metrics' label spacing between them.
+/// The label is present iff its measured height is nonzero — the same rule the
+/// measure path uses. A label measuring zero height (a hidden one) draws
+/// nothing and takes no space: the rows begin at `content_y_without_label`.
+pub(crate) fn radio_group_label_area(
+    bounds: vello::kurbo::Rect,
+    metrics: PickerMetrics,
+    label_height: f64,
+    content_y_without_label: f64,
+) -> (Option<vello::kurbo::Rect>, f64) {
+    if label_height > 0.0 {
+        let heading = vello::kurbo::Rect::new(
+            bounds.x0 + metrics.horizontal_inset,
+            bounds.y0 + metrics.vertical_inset,
+            bounds.x1 - metrics.horizontal_inset,
+            bounds.y0 + metrics.vertical_inset + label_height,
+        );
+        (Some(heading), heading.y1 + metrics.label_spacing)
+    } else {
+        (None, content_y_without_label)
+    }
+}
+
+/// The segmented picker's label layout: the segment row is flush with the
+/// control bounds, so the heading spans the full width at the top edge — edge
+/// to edge like the row below it — and the row keeps exactly its unlabelled
+/// height in the space below the heading and the metrics' label spacing. Same
+/// presence rule: a label measuring zero height (a hidden one) draws nothing
+/// and takes no space — the row keeps the full bounds.
+pub(crate) fn segmented_label_area(
+    bounds: vello::kurbo::Rect,
+    metrics: PickerMetrics,
+    label_height: f64,
+) -> (Option<vello::kurbo::Rect>, vello::kurbo::Rect) {
+    if label_height > 0.0 {
+        let heading =
+            vello::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x1, bounds.y0 + label_height);
+        let row = vello::kurbo::Rect::new(
+            bounds.x0,
+            heading.y1 + metrics.label_spacing,
+            bounds.x1,
+            bounds.y1,
+        );
+        (Some(heading), row)
+    } else {
+        (None, bounds)
+    }
+}
+
+/// Flushes the picker's retained label sub-view at `rect` with accessibility
+/// suppressed: the label is a retained node re-flushed each frame so reactive
+/// content stays live, and its semantics are merged into the picker's own node
+/// by `picker_accessibility`, so the sub-view emits no node of its own.
+fn flush_picker_label(
+    ctx: &mut WidgetRenderContext<'_>,
+    owner: &Rc<RefCell<PickerRenderState>>,
+    env: &Environment,
+    rect: vello::kurbo::Rect,
+) {
+    let mut state = owner.borrow_mut();
+    let render_ctx = ctx.render_context();
+    let label_view = &mut state.label_view;
+    ctx.renderer_mut()
+        .with_suppressed_accessibility(|renderer| {
+            label_view.flush_in_rect(renderer, render_ctx, env, ProposalSize::UNSPECIFIED, rect);
+        });
+}
+
 pub(crate) fn render_radio_picker(
     ctx: &mut WidgetRenderContext<'_>,
     owner: &Rc<RefCell<PickerRenderState>>,
@@ -692,7 +765,22 @@ pub(crate) fn render_radio_picker(
     let selection_identity = selection.identity();
     let selected = ctx.renderer_mut().read_signal(&selection);
     let bounds = ctx.bounds;
-    let mut row_y = bounds.y0 + metrics.vertical_inset;
+    // The group heading sits in the top inset band; the option rows begin
+    // below it with the metrics' label spacing, at the same y the
+    // accessibility rows and the measured height agree on.
+    let label_size = owner
+        .borrow_mut()
+        .label_view
+        .measure_intrinsic(ctx.renderer_mut(), env);
+    let (heading, mut row_y) = radio_group_label_area(
+        bounds,
+        metrics,
+        f64::from(label_size.height),
+        bounds.y0 + metrics.vertical_inset,
+    );
+    if let Some(heading) = heading {
+        flush_picker_label(ctx, owner, env, heading);
+    }
     for (row_index, item) in items.into_iter().enumerate() {
         let label = ctx
             .renderer_mut()
@@ -798,11 +886,23 @@ pub(crate) fn render_segmented_picker(
     let selected = ctx.renderer_mut().read_signal(&selection);
     let bounds = ctx.bounds;
     let item_count = items.len();
-    let segment_width = bounds.width() / item_count as f64;
+    // The group heading spans the full width at the top edge; the segment
+    // row keeps its unlabelled height in the space below it, and keeps the
+    // full bounds when the label is hidden.
+    let label_size = owner
+        .borrow_mut()
+        .label_view
+        .measure_intrinsic(ctx.renderer_mut(), env);
+    let (heading, row_bounds) = segmented_label_area(bounds, metrics, f64::from(label_size.height));
+    if let Some(heading) = heading {
+        flush_picker_label(ctx, owner, env, heading);
+    }
+    let segment_width = row_bounds.width() / item_count as f64;
 
     for (index, item) in items.into_iter().enumerate() {
-        let x0 = bounds.x0 + segment_width * index as f64;
-        let segment_rect = vello::kurbo::Rect::new(x0, bounds.y0, x0 + segment_width, bounds.y1);
+        let x0 = row_bounds.x0 + segment_width * index as f64;
+        let segment_rect =
+            vello::kurbo::Rect::new(x0, row_bounds.y0, x0 + segment_width, row_bounds.y1);
         let is_selected = item.tag == selected;
         let hit_rect = transformed_rect(ctx.hit_transform, segment_rect);
         let discriminator = i32::from(item.tag) as u32 as usize;
@@ -861,7 +961,7 @@ pub(crate) fn render_segmented_picker(
     }
 
     let mut draw = ctx.draw_context();
-    theme.draw_segmented_picker_container(&mut draw, bounds, item_count);
+    theme.draw_segmented_picker_container(&mut draw, row_bounds, item_count);
 }
 
 fn segmented_label_rect(
@@ -891,7 +991,7 @@ pub(crate) fn emit_picker_accessibility(
 
 #[cfg(test)]
 mod tests {
-    use super::menu_picker_content_rects;
+    use super::{menu_picker_content_rects, radio_group_label_area, segmented_label_area};
     use vello::kurbo::Rect;
     use waterui_backend_core::widget::PickerMetrics;
 
@@ -936,5 +1036,47 @@ mod tests {
 
         assert!(label.is_none());
         assert_eq!(value, Rect::new(16.0, 8.0, 286.0, 48.0));
+    }
+
+    /// The radio group's heading sits in the top inset band inside the
+    /// horizontal insets, and the first option row begins below it with the
+    /// metrics' label spacing.
+    #[test]
+    fn radio_label_heading_sits_above_the_rows_with_label_spacing() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 96.0);
+        let default_row_y = bounds.y0 + metrics().vertical_inset;
+        let (heading, row_y) = radio_group_label_area(bounds, metrics(), 12.0, default_row_y);
+        let heading = heading.expect("a drawn group label must be placed");
+
+        assert_eq!(heading, Rect::new(16.0, 8.0, 304.0, 20.0));
+        assert_eq!(row_y, heading.y1 + metrics().label_spacing);
+        assert!(bounds.contains_rect(heading));
+    }
+
+    /// The segmented group's heading spans the full control width at the top
+    /// edge — edge to edge like the row it heads — and the segment row fills
+    /// the space below it down to the bottom edge.
+    #[test]
+    fn segmented_label_heading_spans_edge_to_edge_above_the_row() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 64.0);
+        let (heading, row) = segmented_label_area(bounds, metrics(), 12.0);
+        let heading = heading.expect("a drawn group label must be placed");
+
+        assert_eq!(heading, Rect::new(0.0, 0.0, 320.0, 12.0));
+        assert_eq!(row, Rect::new(0.0, 20.0, 320.0, 64.0));
+        assert_eq!(row.y0, heading.y1 + metrics().label_spacing);
+    }
+
+    /// A hidden group label draws nothing and takes no space: no heading rect
+    /// and the content keeps its unlabelled span for either group style.
+    #[test]
+    fn hidden_group_label_leaves_the_content_start_untouched() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 96.0);
+
+        assert_eq!(
+            radio_group_label_area(bounds, metrics(), 0.0, 14.0),
+            (None, 14.0)
+        );
+        assert_eq!(segmented_label_area(bounds, metrics(), 0.0), (None, bounds));
     }
 }
