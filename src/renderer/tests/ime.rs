@@ -864,7 +864,8 @@ fn a_key_co_delivered_with_its_commit_inserts_text_once() {
 fn enter_after_a_direct_commit_still_reaches_the_form() {
     let (mut runtime, value, submitted) = form_runtime();
     let mut now = Instant::now() + Duration::from_millis(200);
-    // Tab moves keyboard focus to the button; the field keeps text focus.
+    // Tab moves keyboard focus to the button; the caret follows it, so
+    // editing on the field ends (#95).
     for state in [KeyState::Pressed, KeyState::Released] {
         runtime.push_input_event(key_event(
             Key::Named(NamedKey::Tab),
@@ -876,8 +877,8 @@ fn enter_after_a_direct_commit_still_reaches_the_form() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        runtime.focused_text_input_state().is_some(),
-        "traversing to the button must not steal the field's text focus"
+        runtime.focused_text_input_state().is_none(),
+        "traversing to the button ends the field's text focus"
     );
 
     for event in [
@@ -913,7 +914,10 @@ fn enter_after_a_direct_commit_still_reaches_the_form() {
     }
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
-    assert_eq!(value.get().to_string().as_str(), "a");
+    assert!(
+        value.get().to_string().is_empty(),
+        "editing ended on the field: the direct commit lands nowhere"
+    );
     assert!(
         submitted.get(),
         "the Enter after a commit is ordinary input and must activate the \
@@ -1156,13 +1160,14 @@ fn a_key_between_direct_commits_stays_ordinary_input() {
 }
 
 /// A key before the press a commit answers is not that commit's producer:
-/// `[Enter, a, Commit "a"]` types `a` and the earlier Enter is ordinary
-/// input, activating the keyboard-focused control.
+/// `[Enter, a, Commit "a"]` activates the keyboard-focused control on the
+/// Enter and the commit's own press is the only one it claims.
 #[test]
 fn a_commit_claims_only_the_nearest_press() {
     let (mut runtime, value, submitted) = form_runtime();
     let mut now = Instant::now() + Duration::from_millis(200);
-    // Tab moves keyboard focus to the button; the field keeps text focus.
+    // Tab moves keyboard focus to the button; the caret follows it, so
+    // editing on the field ends (#95).
     for state in [KeyState::Pressed, KeyState::Released] {
         runtime.push_input_event(key_event(
             Key::Named(NamedKey::Tab),
@@ -1174,8 +1179,8 @@ fn a_commit_claims_only_the_nearest_press() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        runtime.focused_text_input_state().is_some(),
-        "traversing to the button must not steal the field's text focus"
+        runtime.focused_text_input_state().is_none(),
+        "traversing to the button ends the field's text focus"
     );
 
     for event in [
@@ -1211,7 +1216,10 @@ fn a_commit_claims_only_the_nearest_press() {
     }
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
-    assert_eq!(value.get().to_string().as_str(), "a");
+    assert!(
+        value.get().to_string().is_empty(),
+        "editing ended on the field: the commit lands nowhere"
+    );
     assert!(
         submitted.get(),
         "the Enter the commit cannot be answering is ordinary input and \
@@ -1261,5 +1269,169 @@ fn a_tab_beside_ime_disabled_still_moves_focus() {
         submitted.get(),
         "the Tab beside ImeDisabled is ordinary input: keyboard focus \
          moved to the button, so Enter submits the form"
+    );
+}
+
+/// Keyboard traversal away from a field ends text editing exactly as a
+/// pointer press on a non-text node does (#95): the caret follows keyboard
+/// focus, so the field's `.focused(binding)` clears, the IME anchor goes
+/// away, and typing lands nowhere. Shift-Tab back restores editing at the
+/// caret it left, and Space activates the button keyboard focus moved to.
+#[test]
+fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Field {
+        Name,
+    }
+    let value = Binding::container(Str::default());
+    let focus = Binding::container(None::<Field>);
+    let submitted = Binding::bool(false);
+    let view = {
+        let value_for_view = value.clone();
+        let focus_for_view = focus.clone();
+        let submitted_for_action = submitted.clone();
+        AnyView::new(vstack((
+            field("Name", &value_for_view)
+                .focused(&focus_for_view, Field::Name)
+                .size(FIELD_WIDTH, FIELD_HEIGHT),
+            button("Submit").action(move || submitted_for_action.set(true)),
+        )))
+    };
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    let mut now = start;
+    press_text_input(&mut runtime, 0);
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "pressing the field must focus it"
+    );
+    assert_eq!(focus.get(), Some(Field::Name));
+
+    // Type "ab" and park the caret between the characters — the position
+    // Shift-Tab back must restore.
+    runtime.push_input_event(InputEvent::TextInput {
+        text: "ab".to_owned(),
+    });
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(value.get().to_string().as_str(), "ab");
+    // Caret moves measure against the retained text layout — pump first so it
+    // reflects the committed text.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::ArrowLeft),
+            Code::ArrowLeft,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        selection_of(&runtime),
+        (1, 1),
+        "the caret must park between `a` and `b`"
+    );
+
+    // Tab to the button: editing ends — the caret follows keyboard focus.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_none(),
+        "traversal onto the button must end text editing"
+    );
+    assert_eq!(
+        focus.get(),
+        None,
+        "the field's .focused(binding) must clear when the caret leaves"
+    );
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Character("x".into()),
+            Code::KeyX,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        value.get().to_string().as_str(),
+        "ab",
+        "typing must not reach the field once editing ended"
+    );
+
+    // Shift-Tab back: editing resumes and the caret is where it was left.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "Shift-Tab back onto the field must restore editing"
+    );
+    assert_eq!(focus.get(), Some(Field::Name));
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Character("y".into()),
+            Code::KeyY,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert_eq!(
+        value.get().to_string().as_str(),
+        "ayb",
+        "typing must resume at the caret Shift-Tab restored"
+    );
+
+    // Tab forward again, then Space activates the button keyboard focus
+    // moved to.
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Named(NamedKey::Tab),
+            Code::Tab,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(runtime.focused_text_input_state().is_none());
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(key_event(
+            Key::Character(" ".into()),
+            Code::Space,
+            state,
+            Modifiers::default(),
+        ));
+    }
+    now += Duration::from_millis(16);
+    let _ = runtime.pump_at(false, now);
+    assert!(
+        submitted.get(),
+        "Space must activate the button keyboard focus moved to"
     );
 }

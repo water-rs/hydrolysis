@@ -1019,8 +1019,9 @@ impl SemanticCore {
             }
             Some(_) => {}
             // Clearing UI focus drops the semantic focus only when the tree
-            // was resting on the cleared field — focus on a non-text node
-            // is independent of the text caret.
+            // still rests on the cleared field. A focus move that already
+            // landed elsewhere — traversal ends editing after re-targeting
+            // semantic focus — is left alone.
             None if previous.is_some() && self.hit_test.keyboard_focus == previous => {
                 changed |= self.set_keyboard_focus_impl(
                     None,
