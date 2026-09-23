@@ -178,6 +178,10 @@ pub(crate) struct CollectionNode {
     pub(super) _dirty_key: Rc<()>,
     /// Membership-change watcher; a change sets `dirty` and schedules a refresh.
     pub(super) _guard: BoxWatcherGuard,
+    /// The collection layout's own `watch_invalidation` subscriptions — a
+    /// change to a layout-input signal schedules the refresh that re-derives
+    /// the collection's extents and item rects.
+    pub(super) _layout_guards: Vec<BoxWatcherGuard>,
 }
 
 pub(crate) struct LazyStackNode {
@@ -224,6 +228,10 @@ pub(crate) struct LazyStackNode {
     pub(super) _guard: BoxWatcherGuard,
     /// Direction-change watcher: locale changes immediately mirror placement.
     pub(super) _direction_guard: BoxWatcherGuard,
+    /// The stack layout's own `watch_invalidation` subscriptions — e.g. a
+    /// `spacing` signal change schedules the refresh that re-derives the
+    /// extent index and item rects.
+    pub(super) _layout_guards: Vec<BoxWatcherGuard>,
 }
 
 impl CollectionNode {

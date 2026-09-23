@@ -129,6 +129,44 @@ impl RenderNode {
                 .collect_dynamic_identities_into(out),
         }
     }
+
+    /// Consume the subtree's layout-invalidated marks: `true` when any
+    /// `FixedContainer` in the subtree had a `Layout::watch_invalidation`
+    /// subscription fire since the last consume, meaning `place` must re-run
+    /// even where an outer `RetainedSubview` reports an unchanged rect and
+    /// proposal. Walks the same child-bearing variants as [`Self::patch`]. Every
+    /// visited mark is cleared, so a stale mark cannot force a second relayout.
+    pub(super) fn take_layout_dirty(&mut self) -> bool {
+        match self {
+            RenderNode::Container(node) => {
+                let own = node.layout_dirty.replace(false);
+                node.children
+                    .iter_mut()
+                    .fold(own, |dirty, child| child.take_layout_dirty() | dirty)
+            }
+            RenderNode::Opacity(node) => node.child.take_layout_dirty(),
+            RenderNode::Scale(node) => node.child.take_layout_dirty(),
+            RenderNode::Rotation(node) => node.child.take_layout_dirty(),
+            RenderNode::Offset(node) => node.child.take_layout_dirty(),
+            RenderNode::Retain(node) => node.child.take_layout_dirty(),
+            RenderNode::Env(node) => node.child.take_layout_dirty(),
+            RenderNode::Wrapper(node) => node.child.take_layout_dirty(),
+            RenderNode::Dynamic(node) => node.child.take_layout_dirty(),
+            RenderNode::Scroll(node) => node.child.take_layout_dirty(),
+            RenderNode::ViewEffect(node) => node.child.borrow_mut().take_layout_dirty(),
+            RenderNode::AppliedFilter(node) => node.child.take_layout_dirty(),
+            RenderNode::Collection(node) => node
+                .entries
+                .iter_mut()
+                .fold(false, |dirty, entry| entry.node.take_layout_dirty() | dirty),
+            RenderNode::LazyStack(node) => node.item_cache.borrow_mut().take_layout_dirty(),
+            RenderNode::Color(_)
+            | RenderNode::Text(_)
+            | RenderNode::SceneView(_)
+            | RenderNode::GpuSurface(_)
+            | RenderNode::Widget(_) => false,
+        }
+    }
 }
 
 impl SemanticCore {
