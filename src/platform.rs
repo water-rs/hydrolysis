@@ -348,16 +348,43 @@ pub trait SurfaceProvider {
     }
 }
 
+/// Asserts the app's `Window::frame` binding carries finite components on
+/// all four fields. The binding is a trust boundary — a NaN or infinite
+/// frame is a programming error, not something the runner silently repairs
+/// deeper in the geometry path.
+pub(crate) fn validated_window_frame(
+    frame: waterui_core::layout::Rect,
+) -> waterui_core::layout::Rect {
+    for (field, value) in [
+        ("x", frame.x()),
+        ("y", frame.y()),
+        ("width", frame.width()),
+        ("height", frame.height()),
+    ] {
+        assert!(
+            value.is_finite(),
+            "hydrolysis runner: Window::frame.{field} must be finite, got {value}"
+        );
+    }
+    frame
+}
+
 /// Window abstraction consumed by hydrolysis runner.
 pub trait PlatformWindow: 'static {
     fn surface(&mut self) -> &mut dyn SurfaceProvider;
     fn apply_properties(&mut self, window: &WuiWindow);
     /// Applies the window's effective content-size limits (logical units).
     ///
-    /// Explicit `Window::min_size`/`max_size` values take precedence; otherwise
-    /// each limit comes from the content's layout negotiation. Targets without
-    /// per-window runtime size limits (offscreen surfaces, web canvases, fixed
-    /// embedded displays) keep this default no-op.
+    /// The minimum is the content's layout minimum, overridden by an explicit
+    /// `Window::min_size`. The maximum stays `None` — resizable and
+    /// maximizable — unless the app pins `Window::max_size`: content never
+    /// contributes a maximum, since content that does not stretch on an axis
+    /// is laid out inside a larger offer per the layout spec rather than
+    /// capping the window. A `+∞` component inside an explicit `Some` max is
+    /// the app's per-axis unbounded — treat it as "no bound on that axis".
+    /// Targets without per-window runtime size limits
+    /// (offscreen surfaces, web canvases, fixed embedded displays) keep this
+    /// default no-op.
     fn set_size_limits(
         &mut self,
         min: Option<waterui_core::layout::Size>,
@@ -1137,7 +1164,7 @@ impl PlatformWindow for OffscreenWindow {
         if window.state.get() == WindowState::Closed {
             return;
         }
-        let frame = window.frame.get();
+        let frame = validated_window_frame(window.frame.get());
         // `frame` is in logical units; the surface is allocated in physical
         // pixels, so the scale factor has to be applied here or a HiDPI window
         // would rasterize at one physical pixel per logical pixel.
@@ -1222,7 +1249,7 @@ mod winit_impl {
     use super::{
         CursorStyle, InputEvent, KeyCode, KeyState, Modifiers, PlatformWindow, PointerButton,
         PointerKind, RedrawHandle, SurfaceError, SurfaceFrame, SurfaceProvider, TextInputPurpose,
-        TextInputState, TouchPhase, reclaim_device,
+        TextInputState, TouchPhase, reclaim_device, validated_window_frame,
     };
 
     #[derive(Clone)]
@@ -2011,6 +2038,13 @@ mod winit_impl {
             Option<waterui_core::layout::Size>,
             Option<waterui_core::layout::Size>,
         )>,
+        /// The frame rect the last `apply_properties` read from the binding.
+        /// The binding is enforced only when it changed since the previous
+        /// pump: a user-driven resize or move lands in the window server
+        /// before its `Resized`/`Moved` event updates the binding, and
+        /// reading the live geometry against the stale binding would yank
+        /// the window straight back to its old frame.
+        applied_frame: Option<waterui_core::layout::Rect>,
         /// Explicit ProMotion opt-in: declares the 120Hz frame-rate demand to
         /// the window server while redraws are being requested. `None` before
         /// macOS 14.
@@ -2051,6 +2085,7 @@ mod winit_impl {
                     text_input_sync: TextInputSync::default(),
                     current_cursor_style: CursorStyle::Arrow,
                     applied_size_limits: None,
+                    applied_frame: None,
                 },
                 gpu,
             )
@@ -2389,7 +2424,7 @@ mod winit_impl {
                 window.style,
                 waterui::window::WindowStyle::Borderless
             ));
-            let frame = window.frame.get();
+            let frame = validated_window_frame(window.frame.get());
             let target_size = LogicalSize::new(frame.width() as f64, frame.height() as f64);
             let mut target_position = LogicalPosition::new(frame.x() as f64, frame.y() as f64);
             if let Some(monitor) = self.window.current_monitor() {
@@ -2403,23 +2438,36 @@ mod winit_impl {
                 target_position.x = target_position.x.clamp(monitor_position.x, max_x);
                 target_position.y = target_position.y.clamp(monitor_position.y, max_y);
             }
+            // The frame binding is pushed to the window only when it changed
+            // since the previous pump. A user-driven resize or move lands in
+            // the window server before its `Resized`/`Moved` event reaches the
+            // binding, so the live geometry legitimately disagrees with the
+            // stale binding in that window — enforcing it then would yank the
+            // window straight back and make user resizes impossible.
+            let applied = self.applied_frame;
+            self.applied_frame = Some(frame);
+            let size_changed = applied.is_none_or(|applied| *applied.size() != *frame.size());
+            let origin_changed = applied.is_none_or(|applied| applied.origin() != frame.origin());
             let current_position = self
                 .window
                 .outer_position()
                 .ok()
                 .map(|value| value.to_logical::<f64>(self.window.scale_factor()));
-            if current_position.is_none_or(|current| {
-                (current.x - target_position.x).abs() > 0.5
-                    || (current.y - target_position.y).abs() > 0.5
-            }) {
+            if origin_changed
+                && current_position.is_none_or(|current| {
+                    (current.x - target_position.x).abs() > 0.5
+                        || (current.y - target_position.y).abs() > 0.5
+                })
+            {
                 self.window.set_outer_position(target_position);
             }
             let current_size = self
                 .window
                 .inner_size()
                 .to_logical::<f64>(self.window.scale_factor());
-            if (current_size.width - target_size.width).abs() > 0.5
-                || (current_size.height - target_size.height).abs() > 0.5
+            if size_changed
+                && ((current_size.width - target_size.width).abs() > 0.5
+                    || (current_size.height - target_size.height).abs() > 0.5)
             {
                 let _ = self.window.request_inner_size(target_size);
             }

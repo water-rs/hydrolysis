@@ -372,7 +372,7 @@ fn native_window_attributes(
     activates: bool,
     icon: Option<winit::window::Icon>,
 ) -> winit::window::WindowAttributes {
-    let frame = window.frame.get();
+    let frame = crate::platform::validated_window_frame(window.frame.get());
     NativeWindow::default_attributes()
         .with_window_icon(icon)
         .with_title(window.display_title().get().as_str())
