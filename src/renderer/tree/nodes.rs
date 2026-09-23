@@ -220,6 +220,15 @@ impl RetainedSubview {
         structural
     }
 
+    /// Consume the subtree's layout-invalidated mark (`false` for an unbuilt
+    /// view). The flush sites fold this into `needs_layout` so a layout-signal
+    /// change re-places the subtree at its unchanged rect.
+    pub(crate) fn take_layout_dirty(&mut self) -> bool {
+        self.node
+            .as_mut()
+            .is_some_and(RenderNode::take_layout_dirty)
+    }
+
     /// Build (once), patch, lay out (when the rect size or the structure
     /// changed), and flush the sub-view at `rect` under `env`. A zero-area rect
     /// renders nothing, matching the dispatch path's empty-rect guard.
@@ -242,7 +251,7 @@ impl RetainedSubview {
         node.prepare_for_measure(renderer);
         #[allow(clippy::cast_possible_truncation)]
         let size = Size::new(rect.width() as f32, rect.height() as f32);
-        self.needs_layout |= structural;
+        self.needs_layout |= structural | node.take_layout_dirty();
         if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
             node.layout(renderer, env, proposal, size);
             self.laid_out = size;
@@ -279,7 +288,7 @@ impl RetainedSubview {
         };
         let structural = Self::patch_built(node, renderer);
         node.prepare_for_measure(renderer);
-        self.needs_layout |= structural;
+        self.needs_layout |= structural | node.take_layout_dirty();
         if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
             node.layout(renderer, env, proposal, size);
             self.laid_out = size;
@@ -309,7 +318,7 @@ impl RetainedSubview {
         };
         let structural = Self::patch_built(node, renderer);
         node.prepare_for_measure(renderer);
-        self.needs_layout |= structural;
+        self.needs_layout |= structural | node.take_layout_dirty();
         let proposal = ProposalSize::new(Some(size.width), Some(size.height));
         if self.needs_layout || size != self.laid_out || self.laid_out_proposal != Some(proposal) {
             node.layout(renderer, env, proposal, size);
@@ -413,6 +422,15 @@ impl<K: Eq + core::hash::Hash + Clone> VisibleSubviewCache<K> {
         self.entries.values_mut().fold(false, |changed, entry| {
             entry.patch_for_parent(renderer) | changed
         })
+    }
+
+    /// Consume the layout-invalidated marks over every currently retained item:
+    /// `true` when any `FixedContainer` inside a visible item's subtree asked
+    /// for a re-measure since the last consume. See [`RenderNode::take_layout_dirty`].
+    pub(crate) fn take_layout_dirty(&mut self) -> bool {
+        self.entries
+            .values_mut()
+            .fold(false, |dirty, entry| entry.take_layout_dirty() | dirty)
     }
 
     /// Add every connected `Dynamic` owned by a visible retained item.
@@ -598,6 +616,13 @@ pub(crate) struct ContainerNode {
     /// Child frames cached by [`RenderNode::layout`]; reused by
     /// [`RenderNode::flush`] so a geometry-static frame pays only re-encode.
     pub(crate) placed: Vec<Rect>,
+    /// Set by this container's `Layout::watch_invalidation` subscription when a
+    /// layout input signal changes (shared with the watcher closure). An outer
+    /// `RetainedSubview` consumes it through [`RenderNode::take_layout_dirty`]
+    /// so a constraint change re-runs `place` even when the slot's rect and
+    /// proposal are unchanged — otherwise the value latched at mount is the
+    /// only one the container ever sees.
+    pub(crate) layout_dirty: Rc<Cell<bool>>,
     /// Precise layout-signal subscriptions owned by this retained container.
     pub(crate) _guards: Vec<BoxWatcherGuard>,
 }

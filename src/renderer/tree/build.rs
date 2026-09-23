@@ -45,10 +45,15 @@ impl RenderNode {
         let view = match view.downcast::<Native<FixedContainer>>() {
             Ok(container) => {
                 let (layout, children) = (*container).into_inner().into_inner();
+                let layout_dirty = Rc::new(Cell::new(false));
                 let signals = renderer.signals.clone();
-                let guards = layout.watch_invalidation(Rc::new(move || {
-                    signals.request_refresh();
-                }));
+                let guards = layout.watch_invalidation({
+                    let layout_dirty = Rc::clone(&layout_dirty);
+                    Rc::new(move || {
+                        layout_dirty.set(true);
+                        signals.request_refresh();
+                    })
+                });
                 #[cfg(feature = "accessibility")]
                 let accessibility_child_env = accessibility_container_child_environment(env);
                 #[cfg(feature = "accessibility")]
@@ -73,6 +78,7 @@ impl RenderNode {
                     #[cfg(feature = "accessibility")]
                     accessibility_child_env,
                     placed: Vec::new(),
+                    layout_dirty,
                     _guards: guards,
                 }));
             }
@@ -82,6 +88,17 @@ impl RenderNode {
             Ok(container) => {
                 let direction = container.as_inner().direction();
                 let (layout, children) = (*container).into_inner().into_inner();
+                // The collection's own layout inputs (stack spacing, absolute
+                // pins, …) are signals too: subscribe them through
+                // `watch_invalidation` like a FixedContainer's, so a change
+                // schedules the refresh that re-derives the collection's
+                // extents and item rects.
+                let layout_guards = {
+                    let signals = renderer.signals.clone();
+                    layout.watch_invalidation(Rc::new(move || {
+                        signals.request_refresh();
+                    }))
+                };
                 // A viewport-virtualizable stack layout (and not opting into a
                 // membership transition, which must retain every item) becomes a
                 // virtualized LazyStack: only visible rows are built/measured.
@@ -91,13 +108,25 @@ impl RenderNode {
                 if let Some(axis) =
                     lazy_stack_axis_config(layout.as_ref(), direction).filter(|_| !wants_transition)
                 {
-                    return RenderNode::build_lazy_stack(axis, children, env, renderer);
+                    return RenderNode::build_lazy_stack(
+                        axis,
+                        children,
+                        env,
+                        renderer,
+                        layout_guards,
+                    );
                 }
                 // A non-virtualizable layout (AbsoluteLayout/ZStack overlay) or a
                 // transition collection: a retained reactive collection that
                 // reconciles membership by id (recursing into each item, so inner
                 // SceneView/Dynamic reach their dedicated nodes).
-                return RenderNode::build_collection(layout, children, env, renderer);
+                return RenderNode::build_collection(
+                    layout,
+                    children,
+                    env,
+                    renderer,
+                    layout_guards,
+                );
             }
             Err(view) => view,
         };
@@ -704,6 +733,7 @@ impl RenderNode {
         views: AnyViews<AnyView>,
         env: &Environment,
         renderer: &mut SemanticCore,
+        layout_guards: Vec<BoxWatcherGuard>,
     ) -> RenderNode {
         let dirty = Rc::new(Cell::new(false));
         let dirty_key = Rc::new(());
@@ -758,6 +788,7 @@ impl RenderNode {
             dirty,
             _dirty_key: dirty_key,
             _guard: guard,
+            _layout_guards: layout_guards,
         }))
     }
 
@@ -769,6 +800,7 @@ impl RenderNode {
         views: AnyViews<AnyView>,
         env: &Environment,
         renderer: &mut SemanticCore,
+        layout_guards: Vec<BoxWatcherGuard>,
     ) -> RenderNode {
         let dirty_key = Rc::new(());
         let dirty = Rc::new(Cell::new(true));
@@ -808,6 +840,7 @@ impl RenderNode {
             _dirty_key: dirty_key,
             _guard: guard,
             _direction_guard: direction_guard,
+            _layout_guards: layout_guards,
         }))
     }
 
