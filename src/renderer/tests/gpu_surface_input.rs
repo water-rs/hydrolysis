@@ -976,11 +976,12 @@ enum Tab {
     Two,
 }
 
-/// Switching the selected tab hides the focused surface: focus is released,
-/// the surface receives `Focus(false)`, nothing focuses the newly shown tab
-/// on its own, and later keystrokes land nowhere.
+/// Switching the selected tab hides the focused surface: the hidden surface
+/// releases focus with `Focus(false)`, the newly shown tab takes it with
+/// `Focus(true)` by the same move rule Tab traversal uses, and typing reaches
+/// the shown tab without another pointer press. water-rs/hydrolysis#126.
 #[test]
-fn hiding_the_focused_tab_releases_its_surface_focus() {
+fn hiding_the_focused_tab_moves_focus_to_the_shown_tab() {
     let log_one = ProbeLog::default();
     let log_two = ProbeLog::default();
     let selected = Binding::container(Tab::One);
@@ -1031,7 +1032,9 @@ fn hiding_the_focused_tab_releases_its_surface_focus() {
     let _ = log_one.drain();
 
     // The user switches tabs: the focused surface is still mounted but no
-    // longer visible — it must not keep keyboard focus.
+    // longer visible — it must not keep keyboard focus. The freed focus
+    // relocates to the next focusable in tree order — the tab the switch
+    // just showed — the same move a Tab press would make.
     selected.set(Tab::Two);
     let _ = runtime.pump_at(false, start + Duration::from_millis(132));
     let _ = runtime.pump_at(false, start + Duration::from_millis(148));
@@ -1042,22 +1045,44 @@ fn hiding_the_focused_tab_releases_its_surface_focus() {
     );
     assert_eq!(
         log_two.drain(),
-        Vec::new(),
-        "focus moves nowhere on its own — the shown tab is not auto-focused"
+        vec![SurfaceInputEvent::Focus(true)],
+        "the shown tab takes the relocated focus — not a click, the move rule"
     );
 
-    // Typing after the switch must not reach the invisible tab.
+    // Typing right after the switch must reach the shown tab — and the
+    // hidden tab must hear none of it.
     runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Pressed));
     runtime.push_input_event(InputEvent::TextInput {
         text: "a".to_owned(),
     });
+    runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Released));
     let _ = runtime.pump_at(false, start + Duration::from_millis(164));
     assert_eq!(
         log_one.drain(),
         Vec::new(),
-        "keys keep going to an invisible surface — the bug #103 reports"
+        "a hidden surface receives no keys — the bug #103 reports"
     );
-    assert_eq!(log_two.drain(), Vec::new());
+    assert_eq!(
+        log_two.drain(),
+        vec![
+            SurfaceInputEvent::Key {
+                pressed: true,
+                key: Key::Character("a".to_owned()),
+                code: Code::KeyA,
+                modifiers: W3cModifiers::empty(),
+                repeat: false,
+            },
+            SurfaceInputEvent::TextInput("a".into()),
+            SurfaceInputEvent::Key {
+                pressed: false,
+                key: Key::Character("a".to_owned()),
+                code: Code::KeyA,
+                modifiers: W3cModifiers::empty(),
+                repeat: false,
+            },
+        ],
+        "typing reaches the newly shown tab right after the switch"
+    );
 }
 
 /// The winit translation this backend delegates to `ui-events-winit` is not
