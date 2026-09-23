@@ -2089,6 +2089,17 @@ mod winit_impl {
         }
     }
 
+    /// Snapshot of the window properties `apply_properties` last pushed to the
+    /// native window, so unchanged syncs cost no platform calls.
+    #[derive(Clone, Debug, PartialEq)]
+    struct AppliedWindowProperties {
+        title: waterui::Str,
+        resizable: bool,
+        decorations: bool,
+        state: WindowState,
+        frame: waterui_core::layout::Rect,
+    }
+
     #[derive(Debug)]
     pub struct WinitWindow {
         window: Arc<NativeWindow>,
@@ -2105,13 +2116,15 @@ mod winit_impl {
             Option<waterui_core::layout::Size>,
             Option<waterui_core::layout::Size>,
         )>,
-        /// The frame rect the last `apply_properties` read from the binding.
-        /// The binding is enforced only when it changed since the previous
-        /// pump: a user-driven resize or move lands in the window server
-        /// before its `Resized`/`Moved` event updates the binding, and
-        /// reading the live geometry against the stale binding would yank
-        /// the window straight back to its old frame.
-        applied_frame: Option<waterui_core::layout::Rect>,
+        /// Last applied window properties. `apply_properties` runs every event
+        /// cycle, and each unconditional winit setter emits X writes whose
+        /// replies wake the loop again — dedupe keeps the loop idle when
+        /// nothing changed. The frame binding in particular is enforced only
+        /// when it changed since the previous pump: a user-driven resize or
+        /// move lands in the window server before its `Resized`/`Moved` event
+        /// updates the binding, and reading the live geometry against the
+        /// stale binding would yank the window straight back to its old frame.
+        applied_properties: Option<AppliedWindowProperties>,
         /// The requested window frame and state held until the window has
         /// actually mapped (`with_visible(false)`): on X11 a request made
         /// of an unmapped window is dropped, so the first mapped-signal
@@ -2158,7 +2171,7 @@ mod winit_impl {
                     text_input_sync: TextInputSync::default(),
                     current_cursor_style: CursorStyle::Arrow,
                     applied_size_limits: None,
-                    applied_frame: None,
+                    applied_properties: None,
                     pending_mapped_request: MappedRequestRetry::default(),
                 },
                 gpu,
@@ -2523,13 +2536,43 @@ mod winit_impl {
         }
 
         fn apply_properties(&mut self, window: &waterui::window::Window) {
-            self.window.set_title(window.display_title().get().as_str());
-            self.window.set_resizable(window.resizable);
-            self.window.set_decorations(!matches!(
-                window.style,
-                waterui::window::WindowStyle::Borderless
-            ));
+            let title = window.display_title().get();
+            let decorations = !matches!(window.style, waterui::window::WindowStyle::Borderless);
+            let state = window.state.get();
             let frame = validated_window_frame(window.frame.get());
+            let properties = AppliedWindowProperties {
+                title: title.clone(),
+                resizable: window.resizable,
+                decorations,
+                state,
+                frame,
+            };
+            let previous = self.applied_properties.replace(properties.clone());
+            let applied = previous.as_ref();
+            if applied.is_none_or(|p| p.title != properties.title) {
+                self.window.set_title(properties.title.as_str());
+            }
+            if applied.is_none_or(|p| p.resizable != properties.resizable) {
+                self.window.set_resizable(properties.resizable);
+            }
+            if applied.is_none_or(|p| p.decorations != properties.decorations) {
+                self.window.set_decorations(properties.decorations);
+            }
+            // The frame binding is pushed to the window only when it changed
+            // since the previous pump. A user-driven resize or move lands in
+            // the window server before its `Resized`/`Moved` event reaches the
+            // binding, so the live geometry legitimately disagrees with the
+            // stale binding in that window — enforcing it then would yank the
+            // window straight back and make user resizes impossible.
+            // Arm the post-map re-apply while the window is still hidden:
+            // the frame and state pushed above reach an unmapped X11 window
+            // and are dropped, so the first mapped event must re-deliver
+            // them — a window manager that stretched the window on map is
+            // put back on the requested frame, and a Fullscreen/Minimized/
+            // Closed request is restored after the window exists. Once the
+            // window is visible the app-requested setup was already
+            // enforced and further changes just flow through the ordinary
+            // path.
             let target_size = LogicalSize::new(frame.width() as f64, frame.height() as f64);
             let mut target_position = LogicalPosition::new(frame.x() as f64, frame.y() as f64);
             if let Some(monitor) = self.window.current_monitor() {
@@ -2543,55 +2586,42 @@ mod winit_impl {
                 target_position.x = target_position.x.clamp(monitor_position.x, max_x);
                 target_position.y = target_position.y.clamp(monitor_position.y, max_y);
             }
-            // The frame binding is pushed to the window only when it changed
-            // since the previous pump. A user-driven resize or move lands in
-            // the window server before its `Resized`/`Moved` event reaches the
-            // binding, so the live geometry legitimately disagrees with the
-            // stale binding in that window — enforcing it then would yank the
-            // window straight back and make user resizes impossible.
-            let applied = self.applied_frame;
-            self.applied_frame = Some(frame);
-            // Arm the post-map re-apply while the window is still hidden:
-            // the frame and state pushed above reach an unmapped X11 window
-            // and are dropped, so the first mapped event must re-deliver
-            // them — a window manager that stretched the window on map is
-            // put back on the requested frame, and a Fullscreen/Minimized/
-            // Closed request is restored after the window exists. Once the
-            // window is visible the app-requested setup was already
-            // enforced and further changes just flow through the ordinary
-            // path.
             self.pending_mapped_request.arm(
                 self.window.is_visible(),
                 target_position,
                 target_size,
-                window.state.get(),
+                state,
             );
-            let size_changed = applied.is_none_or(|applied| *applied.size() != *frame.size());
-            let origin_changed = applied.is_none_or(|applied| applied.origin() != frame.origin());
-            let current_position = self
-                .window
-                .outer_position()
-                .ok()
-                .map(|value| value.to_logical::<f64>(self.window.scale_factor()));
-            if origin_changed
-                && current_position.is_none_or(|current| {
-                    (current.x - target_position.x).abs() > 0.5
-                        || (current.y - target_position.y).abs() > 0.5
-                })
-            {
-                self.window.set_outer_position(target_position);
+            let size_changed = applied.is_none_or(|p| *p.frame.size() != *frame.size());
+            let origin_changed = applied.is_none_or(|p| p.frame.origin() != frame.origin());
+            if size_changed || origin_changed {
+                let current_position = self
+                    .window
+                    .outer_position()
+                    .ok()
+                    .map(|value| value.to_logical::<f64>(self.window.scale_factor()));
+                if origin_changed
+                    && current_position.is_none_or(|current| {
+                        (current.x - target_position.x).abs() > 0.5
+                            || (current.y - target_position.y).abs() > 0.5
+                    })
+                {
+                    self.window.set_outer_position(target_position);
+                }
+                let current_size = self
+                    .window
+                    .inner_size()
+                    .to_logical::<f64>(self.window.scale_factor());
+                if size_changed
+                    && ((current_size.width - target_size.width).abs() > 0.5
+                        || (current_size.height - target_size.height).abs() > 0.5)
+                {
+                    let _ = self.window.request_inner_size(target_size);
+                }
             }
-            let current_size = self
-                .window
-                .inner_size()
-                .to_logical::<f64>(self.window.scale_factor());
-            if size_changed
-                && ((current_size.width - target_size.width).abs() > 0.5
-                    || (current_size.height - target_size.height).abs() > 0.5)
-            {
-                let _ = self.window.request_inner_size(target_size);
+            if applied.is_none_or(|p| p.state != state) {
+                self.apply_window_state(state);
             }
-            self.apply_window_state(window.state.get());
         }
 
         fn drain_events(&mut self) -> Vec<InputEvent> {
