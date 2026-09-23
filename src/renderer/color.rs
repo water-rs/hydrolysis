@@ -48,27 +48,35 @@ impl TargetEncoding {
     /// The clear value for this target.
     ///
     /// `wgpu` hands the value to the attachment untouched, so what it must
-    /// contain depends entirely on what the attachment does with it.
-    pub(crate) fn clear_value(self, color: vello::peniko::Color) -> wgpu::Color {
+    /// contain depends entirely on what the attachment does with it. The
+    /// colour components are scaled by alpha exactly when `premultiply_alpha`
+    /// holds — a surface presented under `CompositeAlphaMode::PreMultiplied`
+    /// stores premultiplied texels, every other target stores straight ones.
+    pub(crate) fn clear_value(
+        self,
+        color: vello::peniko::Color,
+        premultiply_alpha: bool,
+    ) -> wgpu::Color {
         let srgb = Srgb::new(
             color.components[0],
             color.components[1],
             color.components[2],
         );
         let alpha = f64::from(color.components[3]);
+        let scale = if premultiply_alpha { alpha } else { 1.0 };
         if self.stores_encoded_srgb() {
             return wgpu::Color {
-                r: f64::from(srgb.red),
-                g: f64::from(srgb.green),
-                b: f64::from(srgb.blue),
+                r: f64::from(srgb.red) * scale,
+                g: f64::from(srgb.green) * scale,
+                b: f64::from(srgb.blue) * scale,
                 a: alpha,
             };
         }
         let linear = ResolvedColor::from_srgb(srgb).linear_with_headroom();
         wgpu::Color {
-            r: f64::from(linear[0]),
-            g: f64::from(linear[1]),
-            b: f64::from(linear[2]),
+            r: f64::from(linear[0]) * scale,
+            g: f64::from(linear[1]) * scale,
+            b: f64::from(linear[2]) * scale,
             a: alpha,
         }
     }
@@ -137,7 +145,7 @@ mod tests {
             wgpu::TextureFormat::Rgba16Float,
         ] {
             let encoding = TargetEncoding::of(format);
-            let white = encoding.clear_value(vello::peniko::Color::WHITE);
+            let white = encoding.clear_value(vello::peniko::Color::WHITE, false);
             // White is the fixed point of the transfer function, so it pins the
             // plumbing without depending on which branch was taken.
             assert!((white.r - 1.0).abs() < 1e-6, "{format:?}");
@@ -154,8 +162,9 @@ mod tests {
     #[test]
     fn a_mid_tone_differs_between_the_two_kinds_of_target() {
         let mid = vello::peniko::Color::new([0.5, 0.5, 0.5, 1.0]);
-        let stored = TargetEncoding::of(wgpu::TextureFormat::Rgba8Unorm).clear_value(mid);
-        let hardware = TargetEncoding::of(wgpu::TextureFormat::Rgba8UnormSrgb).clear_value(mid);
+        let stored = TargetEncoding::of(wgpu::TextureFormat::Rgba8Unorm).clear_value(mid, false);
+        let hardware =
+            TargetEncoding::of(wgpu::TextureFormat::Rgba8UnormSrgb).clear_value(mid, false);
         assert!((stored.r - 0.5).abs() < 1e-6, "stored sRGB keeps the value");
         assert!(
             (hardware.r - 0.214_04).abs() < 1e-3,
