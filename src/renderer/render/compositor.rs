@@ -75,8 +75,17 @@ fn encode_vello_layers_parallel(
         (index, leased)
     };
 
+    // wgpu-hal's GLES device funnels every device call through one adapter
+    // context lock with a ~1 s timeout: concurrent layer encodes on GL gain
+    // nothing and, under load, a worker times out, panics and poisons the
+    // renderer pool. GL encodes the layers in order; every other backend
+    // encodes them across cores.
     #[cfg(not(target_arch = "wasm32"))]
-    let rendered = scenes.into_par_iter().map(render_layer).collect();
+    let rendered = if backend == wgpu::Backend::Gl {
+        scenes.into_iter().map(render_layer).collect()
+    } else {
+        scenes.into_par_iter().map(render_layer).collect()
+    };
     #[cfg(target_arch = "wasm32")]
     let rendered = scenes.into_iter().map(render_layer).collect();
     rendered
