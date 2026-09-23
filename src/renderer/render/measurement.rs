@@ -1214,7 +1214,12 @@ pub(crate) fn measure_button_view_intrinsic(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
-    let metrics = theme.button_metrics(button.button_style(), button.button_size());
+    let metrics = if crate::widgets::controls::button::label_resolves_icon_only(button.label(), env)
+    {
+        theme.icon_button_metrics(button.button_style(), button.button_size())
+    } else {
+        theme.button_metrics(button.button_style(), button.button_size())
+    };
     let label_size = measure_label_intrinsic(button.label(), state, env, theme);
     let content_width = f64::from(label_size.width) + metrics.padding_x * 2.0;
     let content_height = f64::from(label_size.height) + metrics.padding_y * 2.0;
