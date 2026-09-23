@@ -194,7 +194,7 @@ pub fn run(app: App, style: impl crate::Style) {
     fonts.clone().install(&mut env);
     let mut pending_windows = VecDeque::from(windows);
     while let Some(window) = pending_windows.pop_front() {
-        let frame = window.frame.get();
+        let frame = crate::platform::validated_window_frame(window.frame.get());
         let width = frame.width().max(1.0) as u32;
         let height = frame.height().max(1.0) as u32;
         let mut platform = OffscreenWindow::new(width, height, wgpu::TextureFormat::Rgba8Unorm)

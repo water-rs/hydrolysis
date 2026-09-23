@@ -354,57 +354,32 @@ impl HydrolysisRenderer {
         true
     }
 
-    /// Measures the window content's minimum and maximum sizes, or `None`
-    /// before the tree is built.
+    /// Measures the window content's minimum size, or `None` before the
+    /// tree is built.
     ///
-    /// These are whole-tree measure passes at proposals the frame's own
+    /// This is a whole-tree measure pass at a proposal the frame's own
     /// layout never uses, so it is demand-driven rather than run on every
-    /// refresh: only the runner calls it, and only once it knows the answer will
-    /// reach a window that acts on it (see `apply_window_size_limits`).
-    pub(crate) fn measure_content_size_limits(
-        &mut self,
-        env: &Environment,
-    ) -> Option<ContentSizeLimits> {
+    /// refresh: only the runner calls it, and only once it knows the answer
+    /// will reach a window that acts on it (see `apply_window_size_limits`).
+    /// The window contributes no maximum: content that does not stretch on an
+    /// axis is laid out inside a larger offer per the layout spec, so an app
+    /// pins a maximum only through `Window::max_size`.
+    pub(crate) fn measure_content_minimum(&mut self, env: &Environment) -> Option<Size> {
         let tree = self.render_tree.take()?;
-        let limits = self.content_size_limits_of(&tree, env);
-        self.render_tree = Some(tree);
-        Some(limits)
-    }
-
-    /// Both axes are probed together, not independently: what a view answers on
-    /// one axis depends on what the other was offered — text re-wraps at the
-    /// minimum width and then needs more height than its single-line ideal —
-    /// so a per-axis probe with the cross axis unspecified returns a box the
-    /// content can never actually occupy. `ProposalSize::ZERO` asks for the
-    /// smallest self-consistent box the content can occupy; `INFINITY` asks for
-    /// the largest it ever wants.
-    fn content_size_limits_of(
-        &mut self,
-        tree: &RenderNode,
-        env: &Environment,
-    ) -> ContentSizeLimits {
         let theme = self.theme();
+        // Both axes are probed together, not independently: what a view
+        // answers on one axis depends on what the other was offered — text
+        // re-wraps at the minimum width and then needs more height than its
+        // single-line ideal. `ProposalSize::ZERO` asks for the smallest
+        // self-consistent box the content can occupy.
         let min_box = tree
             .measure(&mut self.state, env, &theme, ProposalSize::ZERO)
             .size;
-        let minimum = Size::new(
+        self.render_tree = Some(tree);
+        Some(Size::new(
             validated_minimum_axis(min_box.width, "width"),
             validated_minimum_axis(min_box.height, "height"),
-        );
-        let max_box = tree
-            .measure(&mut self.state, env, &theme, ProposalSize::INFINITY)
-            .size;
-        let maximum = content_maximum_size(max_box.width, max_box.height).map(|size| {
-            // A finite maximum may legitimately fall below the coupled minimum:
-            // the box at unbounded width is shorter than the box the same
-            // wrapping content needs at its narrowest. Floor each axis at the
-            // minimum so the allowed box is never empty.
-            Size::new(
-                size.width.max(minimum.width),
-                size.height.max(minimum.height),
-            )
-        });
-        ContentSizeLimits { minimum, maximum }
+        ))
     }
 }
 
@@ -414,24 +389,4 @@ fn validated_minimum_axis(value: f32, axis: &str) -> f32 {
         "hydrolysis window layout reported invalid minimum {axis}: {value}"
     );
     value
-}
-
-fn validated_maximum_axis(value: f32, axis: &str) -> Option<f32> {
-    assert!(
-        !value.is_nan() && value >= 0.0,
-        "hydrolysis window layout reported invalid maximum {axis}: {value}"
-    );
-    value.is_finite().then_some(value)
-}
-
-fn content_maximum_size(width: f32, height: f32) -> Option<Size> {
-    let width = validated_maximum_axis(width, "width");
-    let height = validated_maximum_axis(height, "height");
-    if width.is_none() && height.is_none() {
-        return None;
-    }
-    Some(Size::new(
-        width.unwrap_or(f32::MAX),
-        height.unwrap_or(f32::MAX),
-    ))
 }
