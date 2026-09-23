@@ -202,12 +202,6 @@ pub(crate) use input::{
     text_editing,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ContentSizeLimits {
-    pub(crate) minimum: LayoutSize,
-    pub(crate) maximum: Option<LayoutSize>,
-}
-
 /// The GPU-free dispatch core: everything the retained view tree's build,
 /// patch and accessibility emission need, without a device, a scene, or a
 /// style.
