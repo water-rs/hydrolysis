@@ -42,3 +42,63 @@ fn menu_picker_label_material3_snapshots() {
         .mount_offscreen(labelled_menu_picker());
     dark.capture_snapshot("hydrolysis", "menu-picker-label", "dark");
 }
+
+fn labelled_group_picker(style: PickerStyle, hide_label: bool) -> impl Fn() -> AnyView {
+    let selection = binding(0i32);
+    move || {
+        let group = picker(
+            "Size",
+            vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+            &selection,
+        )
+        .style(style);
+        let group = if hide_label {
+            group.hide_label()
+        } else {
+            group
+        };
+        AnyView::new(vstack((group,)).padding())
+    }
+}
+
+/// Visual evidence for water-rs/hydrolysis#101: the radio group's heading
+/// sits above the option rows, styled like the menu field's label.
+#[test]
+fn radio_picker_label_material3_snapshots() {
+    let mut light = ui()
+        .viewport(360, 200)
+        .theme(Material3::with_colors(MaterialColorScheme::baseline_light()))
+        .mount_offscreen(labelled_group_picker(PickerStyle::Radio, false));
+    light.capture_snapshot("hydrolysis", "radio-picker-label", "light");
+
+    let mut dark = ui()
+        .viewport(360, 200)
+        .theme(Material3::dark())
+        .mount_offscreen(labelled_group_picker(PickerStyle::Radio, false));
+    dark.capture_snapshot("hydrolysis", "radio-picker-label", "dark");
+}
+
+/// Visual evidence for water-rs/hydrolysis#101: the segmented group's heading
+/// sits above the segment row, styled like the menu field's label.
+#[test]
+fn segmented_picker_label_material3_snapshots() {
+    let mut light = ui()
+        .viewport(360, 120)
+        .theme(Material3::with_colors(MaterialColorScheme::baseline_light()))
+        .mount_offscreen(labelled_group_picker(PickerStyle::Segmented, false));
+    light.capture_snapshot("hydrolysis", "segmented-picker-label", "light");
+
+    let mut dark = ui()
+        .viewport(360, 120)
+        .theme(Material3::dark())
+        .mount_offscreen(labelled_group_picker(PickerStyle::Segmented, false));
+    dark.capture_snapshot("hydrolysis", "segmented-picker-label", "dark");
+
+    // The same picker with a hidden label: the segment row keeps the exact
+    // height it had before the label work, so the pair can be judged by eye.
+    let mut nolabel = ui()
+        .viewport(360, 120)
+        .theme(Material3::with_colors(MaterialColorScheme::baseline_light()))
+        .mount_offscreen(labelled_group_picker(PickerStyle::Segmented, true));
+    nolabel.capture_snapshot("hydrolysis", "segmented-picker-nolabel", "light");
+}

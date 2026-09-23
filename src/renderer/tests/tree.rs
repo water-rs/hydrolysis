@@ -1325,3 +1325,250 @@ fn menu_picker_draws_its_label_above_the_value() {
         "a hidden label still names the picker's single node exactly once"
     );
 }
+
+/// The radio picker's group label is drawn: its ink band sits above the first
+/// option row inside the group's bounds. A hidden label draws nothing and
+/// takes no space — the option bands alone remain — while the group node
+/// keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn radio_picker_draws_its_label_above_the_option_rows() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let group = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Radio);
+            let group = if hide_label {
+                group.hide_label()
+            } else {
+                group
+            };
+            AnyView::new(vstack((group,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            320,
+            200,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the radio picker's group node must carry bounds");
+    let first_row = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .reduce(|a, b| if a.y0 <= b.y0 { a } else { b })
+        .expect("radio option nodes must carry bounds");
+    let first_option_y = first_row.y0;
+    let labelled_first_row_height = first_row.y1 - first_row.y0;
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        3,
+        "a labelled radio picker draws three text bands — heading above two option labels, got {bands:?}"
+    );
+    assert!(
+        bands[0].1 <= first_option_y,
+        "the heading band {:?} must sit above the first option row at y0={first_option_y}",
+        bands[0]
+    );
+    assert!(
+        bands[0].0 >= group.y0 && bands[2].1 <= group.y1,
+        "all text bands must lie inside the group {group:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the radio picker's group node must carry bounds");
+    let hidden_first_row_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .reduce(|a, b| if a.y0 <= b.y0 { a } else { b })
+        .map(|rect| rect.y1 - rect.y0)
+        .expect("radio option nodes must carry bounds");
+    assert_eq!(
+        labelled_first_row_height, hidden_first_row_height,
+        "the labelled first row must keep exactly the unlabelled row's height"
+    );
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a hidden label draws nothing — only the two option bands remain, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the group's single node exactly once"
+    );
+}
+
+/// The segmented picker's group label is drawn: its ink band sits above the
+/// segment row inside the group's bounds. A hidden label draws nothing and
+/// takes no space — the segment-label band alone remains — while the group
+/// node keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn segmented_picker_draws_its_label_above_the_segment_row() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let group = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Segmented);
+            let group = if hide_label {
+                group.hide_label()
+            } else {
+                group
+            };
+            AnyView::new(vstack((group,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            360,
+            120,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the segmented picker's group node must carry bounds");
+    let segment_y = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a labelled segmented picker draws two text bands — heading above the segment labels' row, got {bands:?}"
+    );
+    assert!(
+        bands[0].1 <= segment_y,
+        "the heading band {:?} must sit above the segment row at y0={segment_y}",
+        bands[0]
+    );
+    assert!(
+        bands[0].0 >= group.y0 && bands[1].1 <= group.y1,
+        "both text bands must lie inside the group {group:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the segmented picker's group node must carry bounds");
+    let hidden_segment_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y1 - rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        1,
+        "a hidden label draws nothing — only the segment labels' band remains, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the group's single node exactly once"
+    );
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result.tree_update.expect("a tree");
+    let labelled_segment_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y1 - rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    assert_eq!(
+        labelled_segment_height, hidden_segment_height,
+        "the labelled segment row must keep exactly the unlabelled row's height"
+    );
+}

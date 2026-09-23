@@ -1242,12 +1242,24 @@ pub(crate) fn measure_picker_intrinsic_with_label_size(
                     total_height += metrics.radio_row_spacing;
                 }
             }
-            let width = (metrics.horizontal_inset * 2.0
-                + metrics.radio_indicator_size
-                + metrics.radio_label_spacing
-                + max_item_width)
-                .max(metrics.min_width);
-            let height = (metrics.vertical_inset * 2.0 + total_height).max(metrics.min_height);
+            // A visible group label heads the picker above the option rows:
+            // inside the horizontal insets, its width competes with a row's
+            // content width, and its height plus the metrics' label spacing
+            // stacks on top of the rows. A zero-height (hidden) label adds
+            // nothing — same presence rule as the menu field label.
+            let content_width =
+                (metrics.radio_indicator_size + metrics.radio_label_spacing + max_item_width)
+                    .max(f64::from(label_size.width));
+            let width = (metrics.horizontal_inset * 2.0 + content_width).max(metrics.min_width);
+            // The minimum height floors the rows block alone: the heading
+            // adds on top of it so the rows keep their unlabelled height.
+            let rows_height = (metrics.vertical_inset * 2.0 + total_height).max(metrics.min_height);
+            let height = rows_height
+                + if label_size.height > 0.0 {
+                    f64::from(label_size.height) + metrics.label_spacing
+                } else {
+                    0.0
+                };
             LayoutSize::new(width as f32, height as f32)
         }
         PickerStyle::Segmented => {
@@ -1261,8 +1273,24 @@ pub(crate) fn measure_picker_intrinsic_with_label_size(
                     .max(metrics.segment_min_width);
                 max_item_height = max_item_height.max(f64::from(size.height));
             }
-            let width = total_width.max(metrics.min_width);
-            let height = (max_item_height + metrics.vertical_inset * 2.0).max(metrics.min_height);
+            // A visible group label heads the segment row edge to edge: its
+            // width competes with the row's total width with no inset term,
+            // and it adds its height plus the metrics' label spacing on top,
+            // so the row keeps its unlabelled height. A zero-height (hidden)
+            // label adds nothing — same presence rule as the menu field label.
+            let width = total_width
+                .max(f64::from(label_size.width))
+                .max(metrics.min_width);
+            // The minimum height floors the row alone: the heading adds on
+            // top of it so the row keeps its unlabelled height.
+            let row_height =
+                (max_item_height + metrics.vertical_inset * 2.0).max(metrics.min_height);
+            let height = row_height
+                + if label_size.height > 0.0 {
+                    f64::from(label_size.height) + metrics.label_spacing
+                } else {
+                    0.0
+                };
             LayoutSize::new(width as f32, height as f32)
         }
         _ => panic!("hydrolysis PickerStyle variant is not implemented"),
