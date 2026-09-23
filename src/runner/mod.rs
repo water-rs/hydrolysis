@@ -161,8 +161,11 @@ pub fn run(app: App, style: impl crate::Style) {
     // any async work a view starts (a `GpuView`'s `setup`, above all) never
     // completes and the frame is rendered against uninitialized state.
     let local_executor = executor::HeadlessMainThreadExecutor::thread_shared();
+    // This host paces frames itself rather than vsyncing against a panel, so
+    // the executor budgets at the headless rate.
     let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
         local_executor.clone(),
+        waterui::task::RefreshRate::HEADLESS,
         inspector_probe,
     ));
 

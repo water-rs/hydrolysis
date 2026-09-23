@@ -883,7 +883,13 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        super::inspector::publish_frame(env, frame_mode, &profile, frame_pump_started_at.elapsed());
+        super::inspector::publish_frame(
+            env,
+            frame_mode,
+            &profile,
+            frame_pump_started_at.elapsed(),
+            runtime.refresh_rate_hz,
+        );
         #[cfg(feature = "accessibility")]
         if let Some(update) = runtime.renderer.peek_accessibility_tree_update() {
             super::inspector::publish_tree(env, update);

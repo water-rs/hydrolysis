@@ -18,11 +18,15 @@ use waterui_inspector_protocol::{Bounds, NodeId, NodeState, TreeNode};
 use super::window::{FrameMode, FrameProfile};
 
 /// Publishes one frame, if an inspector is attached and wants frames.
+///
+/// `refresh_rate_hz` is the rate the window runtime last observed from its
+/// platform; a window with no known rate reports at the headless pacing.
 pub(super) fn publish_frame(
     environment: &Environment,
     mode: FrameMode,
     profile: &FrameProfile,
     total: Duration,
+    refresh_rate_hz: Option<f64>,
 ) {
     let Some(recorder) = environment.get::<FrameRecorder>() else {
         return;
@@ -33,7 +37,7 @@ pub(super) fn publish_frame(
 
     let phases = &profile.phases;
     let counters = &profile.counters;
-    let refresh_hz = waterui::task::max_refresh_rate_hz();
+    let refresh_hz = refresh_rate_hz.unwrap_or_else(|| waterui::task::RefreshRate::HEADLESS.hz());
 
     recorder.record(FrameSample {
         kind: frame_kind(mode),
