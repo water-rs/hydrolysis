@@ -139,6 +139,7 @@ impl LocalExecutor for TestLocalExecutor {
 pub(crate) fn test_environment() -> Environment {
     let _ = executor_core::try_init_local_executor(waterui::task::monitored_local_executor(
         TestLocalExecutor,
+        waterui::task::RefreshRate::HEADLESS,
     ));
     themed_test_environment()
 }
