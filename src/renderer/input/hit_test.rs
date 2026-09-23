@@ -763,12 +763,16 @@ impl HydrolysisRenderer {
                     let mut items = popup_menu_nodes(&menu_target.items.get());
                     self.append_inspect_element_item(&mut items, point);
                     if !items.is_empty() {
+                        // The menu opens in the declaring view's environment
+                        // layered over this dispatch's, so `.state(&value)`
+                        // overlays reach the item actions.
+                        let menu_env = menu_target.env.layered_on(env);
                         let metrics = self.theme().text_context_menu_metrics();
                         self.show_popup_menu_nodes(
                             items,
                             LayoutPoint::new(point.x as f32, point.y as f32),
                             metrics,
-                            env,
+                            &menu_env,
                         );
                         return true;
                     }
@@ -850,8 +854,9 @@ impl HydrolysisRenderer {
 
         if button != PointerButton::Primary {
             if button == PointerButton::Secondary {
-                let mut items = self
-                    .topmost_context_menu_target_at_point(point)
+                let menu_target = self.topmost_context_menu_target_at_point(point);
+                let mut items = menu_target
+                    .as_ref()
                     .map(|target| popup_menu_nodes(&target.items.get()))
                     .unwrap_or_default();
                 self.append_inspect_element_item(&mut items, point);
@@ -859,12 +864,18 @@ impl HydrolysisRenderer {
                     if self.set_focused_text_input(focused) {
                         refresh_requested = true;
                     }
+                    // Same inheritance as the embedded-surface arm: the
+                    // declaring view's environment layers over this
+                    // dispatch's.
+                    let menu_env = menu_target
+                        .as_ref()
+                        .map_or_else(|| env.clone(), |target| target.env.layered_on(env));
                     let metrics = self.theme().text_context_menu_metrics();
                     let changed = self.show_popup_menu_nodes(
                         items,
                         LayoutPoint::new(point.x as f32, point.y as f32),
                         metrics,
-                        env,
+                        &menu_env,
                     );
                     return refresh_requested || visual_changed || changed;
                 }

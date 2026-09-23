@@ -403,6 +403,7 @@ fn text_input_target(
         order: 0,
         model,
         selection,
+        env: test_environment(),
         focus_binding: None,
         #[cfg(feature = "accessibility")]
         accessibility_node_id: None,
@@ -2500,6 +2501,7 @@ fn shaped_text_input_target(
     target.text_clip_bounds = target.text_bounds;
     target.cursor_area = target.text_bounds;
     target.layout = layout;
+    target.env = env.clone();
     target
 }
 

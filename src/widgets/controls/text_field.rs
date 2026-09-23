@@ -500,6 +500,7 @@ pub(crate) fn render_text_field_parts(
                 purpose: TextInputPurpose::Normal,
                 model: input_model,
                 selection: selection_slot,
+                env: env.clone(),
             });
     }
 }
@@ -767,6 +768,7 @@ pub(crate) fn render_secure_field_parts(
                 purpose: TextInputPurpose::Password,
                 model: input_model,
                 selection: selection_slot,
+                env: env.clone(),
             });
     }
 }
@@ -1044,6 +1046,7 @@ pub(crate) fn emit_text_field_accessibility(
                     selection_menu,
                 },
                 selection: Rc::clone(&state.selection_slot),
+                env: env.clone(),
             });
         }
     }
@@ -1132,6 +1135,7 @@ pub(crate) fn emit_secure_field_accessibility(
                     value: value_binding.clone(),
                 },
                 selection: Rc::clone(&state.selection_slot),
+                env: env.clone(),
             });
         }
     }

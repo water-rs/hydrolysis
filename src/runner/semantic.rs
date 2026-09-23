@@ -569,6 +569,7 @@ mod tests {
     use super::*;
     use accesskit::{Action, ActionRequest, Node as AccessibilityNode, NodeId, Role, TreeId};
     use nami::Binding;
+    use waterui::ViewExt as _;
     use waterui_controls::button::button;
     use waterui_controls::menu::{CommandExt, Menu, MenuItem};
     use waterui_core::handler::AnyViewBuilder;
@@ -707,6 +708,53 @@ mod tests {
         assert!(
             find_by_label(&update, Role::Button, "Save").is_none(),
             "a dismissed menu must leave the merged tree"
+        );
+    }
+
+    /// water-rs/hydrolysis#140: a popup runs in the environment of the view
+    /// that opened it, so `.state(&store)` on an ancestor reaches the item
+    /// action's extractors.
+    #[test]
+    fn semantic_menu_item_action_reads_state_inherited_from_the_opening_view() {
+        #[waterui::prelude::state]
+        #[derive(Clone)]
+        struct Store {
+            hits: Binding<u32>,
+        }
+
+        let store = Store {
+            hits: Binding::container(0),
+        };
+        let store_for_view = store.clone();
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let store = store_for_view.clone();
+            AnyView::new(
+                vstack((Menu::new(
+                    "File",
+                    vec![MenuItem::Command("Bump".action(|store: Store| {
+                        store.hits.set(store.hits.get() + 1);
+                    }))],
+                ),))
+                .state(&store),
+            )
+        });
+        let mut runtime = SemanticRuntime::new(semantic_environment(), builder, 800, 600);
+
+        let update =
+            pump_until_settled(&mut runtime).expect("the initial pump emitted no tree update");
+        let (menu, _) = find_by_label(&update, Role::Button, "File")
+            .expect("the File menu trigger is missing from the semantic tree");
+        assert!(click(&mut runtime, menu), "menu activation changed nothing");
+
+        let update =
+            pump_until_settled(&mut runtime).expect("opening the menu emitted no tree update");
+        let (bump, _) = find_by_label(&update, Role::Button, "Bump")
+            .expect("Bump menu item missing after the menu opened");
+        assert!(click(&mut runtime, bump), "Bump click changed nothing");
+        assert_eq!(
+            store.hits.get(),
+            1,
+            "the item action did not reach the injected store"
         );
     }
 
