@@ -1418,9 +1418,13 @@ impl SemanticCore {
             self.hit_test
                 .pointer_targets
                 .iter()
-                .filter_map(|target| target.press_slot.as_ref())
-                .find(|slot| &slot.key == focused)
-                .map(|slot| slot.order)
+                .find(|target| {
+                    target
+                        .press_slot
+                        .as_ref()
+                        .is_some_and(|slot| &slot.key == focused)
+                })
+                .map(|target| target.order)
                 .or_else(|| {
                     self.text_editing
                         .text_input_targets

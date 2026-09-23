@@ -22,6 +22,21 @@ pub(crate) fn inset_rect(rect: vello::kurbo::Rect, dx: f64, dy: f64) -> vello::k
     )
 }
 
+/// The rect a label is flushed into inside button chrome: its measured size,
+/// capped to `rect` and centred, so a label smaller than the chrome's content
+/// rect sits in the middle — the same centred-content placement Compose
+/// applies inside a button's minimum bounds.
+pub(crate) fn centered_label_rect(
+    rect: vello::kurbo::Rect,
+    size: waterui_core::layout::Size,
+) -> vello::kurbo::Rect {
+    let width = f64::from(size.width).min(rect.width());
+    let height = f64::from(size.height).min(rect.height());
+    let x0 = rect.x0 + (rect.width() - width) * 0.5;
+    let y0 = rect.y0 + (rect.height() - height) * 0.5;
+    vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
+}
+
 /// The rect for a label that sits beside its control on a row — a toggle's
 /// label next to its switch or checkbox, a stepper's label next to its
 /// buttons. The label keeps the horizontal extent the widget picked for it,

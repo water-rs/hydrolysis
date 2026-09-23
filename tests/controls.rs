@@ -9,7 +9,7 @@
 use waterui::Binding;
 use waterui::View;
 use waterui::ViewExt as _;
-use waterui::component::vstack;
+use waterui::component::{hstack, vstack};
 use waterui::graphics::color::Srgb;
 use waterui_controls::{Menu, button, label, slider::slider, toggle};
 use waterui_testing::{OffscreenApp, Role, Styled, UiBuilder};
@@ -187,6 +187,141 @@ fn disabled_button_ignores_action(ui: UiBuilder<Styled<hydrolysis_m3::Material3>
         .label("Submit")
         .tap_at(0.5, 0.5);
     assert_eq!(count.get(), 0, "disabled-button: action must not run");
+}
+
+// water-rs/hydrolysis#115: an icon-only label resolves the button through
+// the theme's icon-button metrics — the M3 icon-button touch target (48×48),
+// with the 40dp state layer drawn centred inside. The layout bounds are the
+// hit area.
+fn icon_only_button_view() -> impl waterui::View {
+    control_shell(
+        vstack((
+            button(label("Search").icon(()).icon_only()),
+            button("Cancel"),
+        ))
+        .spacing(12.0),
+    )
+}
+
+#[waterui::test(icon_only_button_view, theme = hydrolysis_m3::Material3::defaults(), viewport = (320, 240), offscreen)]
+fn icon_only_button_measures_the_icon_button_touch_target(app: &mut OffscreenApp) {
+    let icon_button = app.query().role(Role::BUTTON).label("Search").single();
+    let bounds = icon_button.bounds();
+    assert_close(
+        f64::from(bounds.width()),
+        48.0,
+        0.5,
+        "icon-only button layout width",
+    );
+    assert_close(
+        f64::from(bounds.height()),
+        48.0,
+        0.5,
+        "icon-only button layout height",
+    );
+
+    // A text button beside it keeps the text-button metrics.
+    let text_button = app.query().role(Role::BUTTON).label("Cancel").single();
+    let bounds = text_button.bounds();
+    assert!(
+        f64::from(bounds.width()) >= 58.0,
+        "text button width must keep the text-button minimum: {bounds:?}"
+    );
+    assert_close(f64::from(bounds.height()), 40.0, 0.5, "text button height");
+}
+
+#[waterui::test(icon_only_button_view, theme = hydrolysis_m3::Material3::defaults(), viewport = (320, 240), offscreen)]
+fn icon_only_button_draws_the_state_layer_centred_in_its_bounds(app: &mut OffscreenApp) {
+    let bounds = app
+        .query()
+        .role(Role::BUTTON)
+        .label("Search")
+        .single()
+        .bounds();
+    let snapshot = app.snapshot();
+
+    // The only drawn pixels inside the button's black-background bounds are
+    // the icon-button state layer — a 40dp circle centred in the 48dp touch
+    // target. Measure its rasterised bounding box.
+    let x0 = bounds.x().max(0.0) as usize;
+    let y0 = bounds.y().max(0.0) as usize;
+    let x1 = ((bounds.x() + bounds.width()) as usize).min(snapshot.width as usize);
+    let y1 = ((bounds.y() + bounds.height()) as usize).min(snapshot.height as usize);
+    let mut min_x = usize::MAX;
+    let mut min_y = usize::MAX;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let px = &snapshot.rgba8[(y * snapshot.width as usize + x) * 4..][..4];
+            if px[0].max(px[1]).max(px[2]) > 32 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    assert!(
+        min_x <= max_x,
+        "the state layer drew no pixels in {bounds:?}"
+    );
+    let drawn_w = (max_x - min_x + 1) as f64;
+    let drawn_h = (max_y - min_y + 1) as f64;
+    assert_close(drawn_w, 40.0, 1.5, "drawn state-layer width");
+    assert_close(drawn_h, 40.0, 1.5, "drawn state-layer height");
+    assert_close(
+        (min_x + max_x + 1) as f64 / 2.0,
+        f64::from(bounds.x() + bounds.width() / 2.0),
+        1.0,
+        "state-layer horizontal centre",
+    );
+    assert_close(
+        (min_y + max_y + 1) as f64 / 2.0,
+        f64::from(bounds.y() + bounds.height() / 2.0),
+        1.0,
+        "state-layer vertical centre",
+    );
+}
+
+// A row of icon-only buttons lays out at the touch-target width plus
+// spacing — no text-button minimum width is applied to any of them.
+fn icon_button_row_view() -> impl waterui::View {
+    control_shell(
+        hstack((
+            button(label("First").icon(()).icon_only()),
+            button(label("Second").icon(()).icon_only()),
+            button(label("Third").icon(()).icon_only()),
+            button(label("Fourth").icon(()).icon_only()),
+            button(label("Fifth").icon(()).icon_only()),
+        ))
+        .spacing(12.0),
+    )
+}
+
+#[waterui::test(icon_button_row_view, theme = hydrolysis_m3::Material3::defaults(), viewport = (320, 240), offscreen)]
+fn a_row_of_icon_only_buttons_lays_out_at_touch_target_width(app: &mut OffscreenApp) {
+    let buttons = app.query().role(Role::BUTTON).all();
+    assert_eq!(buttons.len(), 5, "the row must expose five buttons");
+
+    let mut xs: Vec<(f32, f32)> = buttons
+        .iter()
+        .map(|button| {
+            let bounds = button.bounds();
+            assert_close(
+                f64::from(bounds.width()),
+                48.0,
+                0.5,
+                "each icon button's layout width",
+            );
+            (bounds.x(), bounds.x() + bounds.width())
+        })
+        .collect();
+    xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let span = f64::from(xs[4].1 - xs[0].0);
+    // 5 × 48dp touch target + 4 × 12dp spacing.
+    assert_close(span, 5.0 * 48.0 + 4.0 * 12.0, 0.5, "row span");
 }
 
 fn actions_menu_view() -> impl waterui::View {
