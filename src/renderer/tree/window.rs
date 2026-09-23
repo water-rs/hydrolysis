@@ -345,9 +345,11 @@ impl HydrolysisRenderer {
             self.prune_dynamic_measurements(&tree.collect_dynamic_identities());
         }
         self.lifecycle.finish_rebuild_frame();
-        // Drop focus or drag targets that are no longer emitted, then publish the
-        // refreshed accessibility tree.
+        // Drop focus or drag targets that are no longer emitted, relocate the
+        // focus a dropped view released, then publish the refreshed
+        // accessibility tree.
         self.validate_focused_text_input_after_flush();
+        self.relocate_dropped_focus();
         #[cfg(feature = "accessibility")]
         self.finalize_accessibility_tree_update();
         self.render_tree = Some(tree);

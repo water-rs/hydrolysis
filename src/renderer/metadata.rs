@@ -271,6 +271,9 @@ impl HydrolysisRenderer {
             .embedded_input_targets
             .truncate(embedded_start);
         if embedded_focus_was_dropped {
+            // The hidden surface releases focus now; the end of the frame
+            // relocates it to the next focusable.
+            renderer.hit_test.focus_dropped_this_frame = true;
             renderer.set_focused_embedded_key(None);
         }
     }
