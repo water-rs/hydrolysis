@@ -289,9 +289,12 @@ pub fn run(app: App, style: impl crate::Style) {
             schedule_frame: browser_schedule.clone(),
         };
         // Nothing probes the browser executor: the inspector endpoint is a TCP
-        // server the page cannot host, so no probe exists to hand it.
+        // server the page cannot host, so no probe exists to hand it. The
+        // browser's rAF rate is not queryable up front, so the executor budgets
+        // at the headless rate.
         let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
             local_executor,
+            waterui::task::RefreshRate::HEADLESS,
             None,
         ));
 

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::mem;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
@@ -212,16 +213,7 @@ pub fn run(
         runnable_tx: local_runnable_tx,
         event_proxy: event_proxy.clone(),
     };
-    let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
-        local_executor,
-        inspector
-            .as_ref()
-            .map(waterui::inspector::InspectorRuntime::runtime_probe),
-    ));
 
-    // Locale changes reach views through a mailbox, whose pump needs the
-    // executor installed just above.
-    waterui_locale::start_system_locale_listener();
     // The reactive graph is thread-confined, so its observer is installed here,
     // on the thread that owns the event loop, and lives as long as the loop.
     #[cfg(feature = "inspector-signals")]
@@ -285,6 +277,7 @@ pub fn run(
         gpu_context: None,
         accesskit_adapters: HashMap::new(),
         last_accessibility_updates: HashMap::new(),
+        local_executor: Some(local_executor),
         local_runnable_rx,
         event_proxy,
         render_diagnostics_config,
@@ -315,6 +308,10 @@ struct WinitRunner {
     gpu_context: Option<WinitGpuContext>,
     accesskit_adapters: HashMap<WindowId, AccessKitAdapter>,
     last_accessibility_updates: HashMap<WindowId, accesskit::TreeUpdate>,
+    /// The executor is installed the first time the active event loop is
+    /// reachable (the first `resumed`), which is the earliest winit 0.30
+    /// exposes monitor enumeration.
+    local_executor: Option<WinitMainThreadExecutor>,
     local_runnable_rx: mpsc::Receiver<Runnable>,
     event_proxy: winit::event_loop::EventLoopProxy<RunnerEvent>,
     render_diagnostics_config: RenderDiagnosticsConfig,
@@ -489,7 +486,45 @@ impl WinitRunner {
         (runtime, adapter)
     }
 
+    /// Installs the monitored main-thread executor on the first active event
+    /// loop callback, still ahead of the first window mount.
+    ///
+    /// `available_monitors` exists only on `ActiveEventLoop`/`Window` in winit
+    /// 0.30, so the highest connected refresh rate can only be read here.
+    fn start_main_thread_executor(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(local_executor) = self.local_executor.take() else {
+            return;
+        };
+        let refresh_rate = event_loop
+            .available_monitors()
+            .filter_map(|monitor| monitor.refresh_rate_millihertz())
+            .max()
+            .and_then(NonZeroU32::new)
+            .map_or_else(
+                || {
+                    // Some Wayland compositors report no rate (winit returns
+                    // None); pace the executor's frame budget at the headless rate.
+                    tracing::debug!(
+                        "hydrolysis runner: no monitor reported a refresh rate, executor paced at the headless rate"
+                    );
+                    waterui::task::RefreshRate::HEADLESS
+                },
+                waterui::task::RefreshRate::from_millihertz,
+            );
+        let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
+            local_executor,
+            refresh_rate,
+            self.env
+                .get::<waterui::inspector::InspectorRuntime>()
+                .map(waterui::inspector::InspectorRuntime::runtime_probe),
+        ));
+        // Locale changes reach views through a mailbox, whose pump needs the
+        // executor installed just above.
+        waterui_locale::start_system_locale_listener();
+    }
+
     fn mount_pending_windows(&mut self, event_loop: &ActiveEventLoop) {
+        self.start_main_thread_executor(event_loop);
         let mut pending = mem::take(&mut self.pending_windows);
         pending.extend(self.pending_window_queue.borrow_mut().drain(..));
         for pending in pending {

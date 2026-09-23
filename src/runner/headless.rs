@@ -290,8 +290,11 @@ impl HeadlessRuntime {
             .with_writer(std::io::stderr)
             .try_init();
         let local_executor = HeadlessMainThreadExecutor::thread_shared();
+        // A headless host paces frames itself, so the executor budgets at the
+        // headless rate.
         let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
             local_executor.clone(),
+            waterui::task::RefreshRate::HEADLESS,
             inspector_probe,
         ));
 
