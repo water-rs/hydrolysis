@@ -135,10 +135,12 @@ impl AppliedFilterRuntime {
             height,
             // `COPY_DST`: the tree flush captures the child into an atlas page
             // and copies the slot into this texture.
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+            crate::scene_renderer::storage_usage_if_supported(
+                device,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST,
+            ),
         )
     }
 
@@ -150,7 +152,7 @@ impl AppliedFilterRuntime {
     pub(super) fn prepare_output(
         &mut self,
         device: &wgpu::Device,
-        vello_renderer: &mut vello::Renderer,
+        window_renderer: &mut WindowSceneRenderer,
         width: u32,
         height: u32,
     ) -> vello::peniko::ImageData {
@@ -161,7 +163,7 @@ impl AppliedFilterRuntime {
             .clone();
         register_or_override_output_image(
             &mut self.output_image,
-            vello_renderer,
+            window_renderer,
             output_texture,
             output_width,
             output_height,
@@ -180,10 +182,12 @@ impl AppliedFilterRuntime {
             "hydrolysis_applied_filter_output",
             width,
             height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::STORAGE_BINDING,
+            crate::scene_renderer::storage_usage_if_supported(
+                device,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            ),
         )
     }
 
@@ -208,7 +212,7 @@ impl AppliedFilterRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        vello_renderer: &mut vello::Renderer,
+        window_renderer: &mut WindowSceneRenderer,
         width: u32,
         height: u32,
         encoder: &mut wgpu::CommandEncoder,
@@ -253,7 +257,7 @@ impl AppliedFilterRuntime {
 
         let image = register_or_override_output_image(
             &mut self.output_image,
-            vello_renderer,
+            window_renderer,
             output_texture,
             output_width,
             output_height,
@@ -320,7 +324,7 @@ impl CachedEffectTexture {
 /// identity is stable.
 fn register_or_override_output_image(
     output_image: &mut Option<vello::peniko::ImageData>,
-    vello_renderer: &mut vello::Renderer,
+    window_renderer: &mut WindowSceneRenderer,
     output_texture: wgpu::Texture,
     output_width: u32,
     output_height: u32,
@@ -335,10 +339,10 @@ fn register_or_override_output_image(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         };
-        let _ = vello_renderer.override_image(image, Some(texture_base));
+        window_renderer.override_image(image, Some(texture_base));
         image.clone()
     } else {
-        let image = vello_renderer.register_texture(output_texture);
+        let image = window_renderer.register_texture(output_texture);
         *output_image = Some(image.clone());
         image
     }
@@ -375,10 +379,12 @@ impl ViewEffectRuntime {
             "hydrolysis_view_effect_input",
             width,
             height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+            crate::scene_renderer::storage_usage_if_supported(
+                device,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            ),
         )
     }
 
@@ -403,14 +409,14 @@ impl ViewEffectRuntime {
 
     pub(super) fn register_output_image(
         &mut self,
-        vello_renderer: &mut vello::Renderer,
+        window_renderer: &mut WindowSceneRenderer,
         output_texture: wgpu::Texture,
         output_width: u32,
         output_height: u32,
     ) -> vello::peniko::ImageData {
         register_or_override_output_image(
             &mut self.output_image,
-            vello_renderer,
+            window_renderer,
             output_texture,
             output_width,
             output_height,
@@ -554,7 +560,7 @@ impl HydrolysisRenderer {
                 .encode_output(
                     device,
                     queue,
-                    &mut self.vello_renderer,
+                    &mut self.window_renderer,
                     width,
                     height,
                     encoder,

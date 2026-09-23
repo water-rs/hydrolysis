@@ -27,9 +27,8 @@ pub(crate) fn duration_micros_u64(duration: Duration) -> u64 {
 /// `Encoding::is_empty` only checks the path stream; glyph runs are deferred
 /// resources that resolve to paths at render time, so a scene containing only
 /// text would otherwise read as empty and be dropped by the compositor.
-pub(crate) fn scene_has_content(scene: &vello::Scene) -> bool {
-    let encoding = scene.encoding();
-    !encoding.is_empty() || !encoding.resources.glyph_runs.is_empty()
+pub(crate) fn scene_has_content(scene: &WindowScene) -> bool {
+    scene.has_content()
 }
 
 impl HydrolysisRenderer {
@@ -76,18 +75,18 @@ impl HydrolysisRenderer {
         &mut self.state
     }
 
-    pub(crate) fn state_and_scene_mut(&mut self) -> (&mut HydroState, &mut vello::Scene) {
+    pub(crate) fn state_and_scene_mut(&mut self) -> (&mut HydroState, &mut WindowScene) {
         (&mut self.state, &mut self.scene)
     }
 
     #[must_use]
-    pub fn scene(&self) -> &vello::Scene {
+    pub fn scene(&self) -> &WindowScene {
         &self.scene
     }
 
     pub fn reset_scene(&mut self) {
         for image in self.compositor.active_filter_images.drain(..) {
-            self.vello_renderer.unregister_texture(image);
+            self.window_renderer.unregister_texture(image);
         }
         self.hit_test.reset_scene();
         self.gesture_engine.clear_targets();
@@ -230,16 +229,12 @@ impl HydrolysisRenderer {
         self.finalize_accessibility_tree_update();
     }
 
-    pub fn scene_mut(&mut self) -> &mut vello::Scene {
+    pub fn scene_mut(&mut self) -> &mut WindowScene {
         &mut self.scene
     }
 
     pub(crate) fn draw_context(&mut self, ctx: RenderContext) -> VelloDrawContext<'_> {
         VelloDrawContext::with_root_transform(&mut self.scene, ctx.transform)
-    }
-
-    pub fn vello_renderer(&mut self) -> &mut vello::Renderer {
-        &mut self.vello_renderer
     }
 
     pub fn set_frame_resources(
@@ -346,10 +341,9 @@ impl HydrolysisRenderer {
 
     pub(super) fn flush_vello_scene_layer(&mut self) {
         assert!(
-            (self.scene.encoding().n_open_clips as usize)
-                == self.compositor.active_scene_layers.len(),
+            self.scene.open_layer_count() as usize == self.compositor.active_scene_layers.len(),
             "hydrolysis renderer: scene clip count {} does not match tracked scene layers {}",
-            self.scene.encoding().n_open_clips,
+            self.scene.open_layer_count(),
             self.compositor.active_scene_layers.len()
         );
 
@@ -357,7 +351,7 @@ impl HydrolysisRenderer {
             self.scene.pop_layer();
         }
 
-        if !scene_has_content(&self.scene) {
+        if !self.scene.has_content() {
             for layer in &self.compositor.active_scene_layers {
                 layer.push_to_scene(&mut self.scene);
             }

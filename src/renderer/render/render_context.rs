@@ -1,4 +1,5 @@
 use super::HydrolysisRenderer;
+use crate::WindowScene;
 use crate::engine::vello_backend::VelloDrawContext;
 use crate::renderer::HydroState;
 use crate::renderer::navigation::{
@@ -157,7 +158,7 @@ impl<'a> WidgetRenderContext<'a> {
         );
     }
 
-    pub(crate) fn append_scene(&mut self, scene: &vello::Scene) {
+    pub(crate) fn append_scene(&mut self, scene: &WindowScene) {
         self.renderer
             .scene_mut()
             .append(scene, Some(self.transform));

@@ -276,14 +276,14 @@ impl RenderNode {
                 emit_graphics_image_accessibility(renderer, ctx, env, content_label);
                 #[cfg(feature = "accessibility")]
                 renderer.pop_accessibility_owner();
-                let mut scene = vello::Scene::new();
+                let mut scene = WindowScene::new();
                 // Scope `scene2d` so its `&mut scene` borrow ends before `&scene` is
                 // appended below.
+                #[allow(clippy::cast_possible_truncation)]
                 let needs_next = {
-                    let mut scene2d = VelloScene2D::new(&mut scene);
-                    #[allow(clippy::cast_possible_truncation)]
+                    let scene2d: &mut dyn waterui_graphics::Scene2D = &mut scene;
                     node.content.borrow_mut().build_scene(
-                        &mut scene2d,
+                        scene2d,
                         ctx.bounds.width() as f32,
                         ctx.bounds.height() as f32,
                     )
@@ -421,7 +421,7 @@ fn flush_navigation_transition_element(
         child.flush(renderer, ctx, env);
         return;
     }
-    let mut scene = vello::Scene::new();
+    let mut scene = WindowScene::new();
     core::mem::swap(renderer.scene_mut(), &mut scene);
     child.flush(renderer, ctx, env);
     core::mem::swap(renderer.scene_mut(), &mut scene);

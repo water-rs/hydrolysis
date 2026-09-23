@@ -330,6 +330,7 @@ pub fn run(app: App) {
             let handle = handle.clone();
             Rc::new(move || handle.schedule_frame())
         });
+        waterui_locale::start_system_locale_listener();
         handle.schedule_frame();
     });
 }

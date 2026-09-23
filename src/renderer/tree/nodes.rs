@@ -238,7 +238,7 @@ impl RetainedSubview {
     }
 
     /// Build (once), lay out at `size`, and flush the sub-view into a fresh,
-    /// standalone [`vello::Scene`] in identity (local) coordinates — the retained
+    /// standalone [`WindowScene`] in identity (local) coordinates — the retained
     /// analogue of [`HydrolysisRenderer::render_subtree_scene`] for a node that
     /// must survive across flushes (the navigation-stack root). The renderer's
     /// scene is swapped out, the node flushes into the temporary scene, then the
@@ -251,7 +251,7 @@ impl RetainedSubview {
         size: Size,
     ) -> NavigationCapturedScene {
         self.ensure_built(renderer, env);
-        let mut scene = vello::Scene::new();
+        let mut scene = WindowScene::new();
         let Some(node) = &mut self.node else {
             return NavigationCapturedScene::default();
         };
@@ -718,7 +718,7 @@ impl ViewEffectNode {
         }
 
         let image = runtime.register_output_image(
-            &mut renderer.vello_renderer,
+            &mut renderer.window_renderer,
             output_texture,
             output_width,
             output_height,
@@ -782,7 +782,7 @@ impl AppliedFilterNode {
 
         let image = self.runtime.borrow_mut().prepare_output(
             &device,
-            &mut renderer.vello_renderer,
+            &mut renderer.window_renderer,
             width,
             height,
         );

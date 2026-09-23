@@ -473,11 +473,15 @@ impl OffscreenGpuContext {
             request_hydrolysis_adapter(&instance, None, "hydrolysis offscreen surface", selection)
                 .await;
 
-        ensure_compute_capable_adapter(
-            &adapter,
-            "hydrolysis offscreen surface",
-            "failed to find compute-capable wgpu adapter",
-        );
+        if waterui_graphics::SceneEngine::for_adapter(&adapter)
+            == waterui_graphics::SceneEngine::Classic
+        {
+            ensure_compute_capable_adapter(
+                &adapter,
+                "hydrolysis offscreen surface",
+                "failed to find compute-capable wgpu adapter",
+            );
+        }
         let required_limits = required_device_limits(&adapter);
         let required_features =
             waterui_graphics::shared_context::required_media_features(adapter.features());
@@ -639,7 +643,9 @@ async fn request_hydrolysis_adapter(
                 force_fallback_adapter: selection.force_fallback_adapter(),
             })
             .await
-            .expect("hydrolysis adapter selection: failed to find web adapter");
+            .expect(
+                    "hydrolysis adapter selection: browser exposes neither a WebGPU nor a WebGL2 adapter",
+                );
         log_selected_adapter(context, &adapter);
         adapter
     }
@@ -670,6 +676,7 @@ async fn request_hydrolysis_adapter(
                 .is_none_or(|surface| adapter.is_surface_supported(surface));
             let limits = adapter.limits();
             let compute_capable = is_compute_capable_adapter(&adapter);
+            let scene_engine = waterui_graphics::SceneEngine::for_adapter(&adapter);
 
             tracing::info!(
                 target: "hydrolysis::gpu",
@@ -677,6 +684,7 @@ async fn request_hydrolysis_adapter(
                 adapter = ?info,
                 surface_supported,
                 compute_capable,
+                ?scene_engine,
                 max_compute_workgroups_per_dimension = limits.max_compute_workgroups_per_dimension,
                 "hydrolysis adapter candidate"
             );
@@ -686,7 +694,7 @@ async fn request_hydrolysis_adapter(
             }
 
             inspected_adapters.push(format!(
-                "'{}' ({:?}, {:?}, compute={}, max_compute_workgroups_per_dimension={})",
+                "'{}' ({:?}, {:?}, compute={}, engine={scene_engine:?}, max_compute_workgroups_per_dimension={})",
                 info.name,
                 info.backend,
                 info.device_type,
@@ -707,7 +715,7 @@ async fn request_hydrolysis_adapter(
                 continue;
             }
 
-            if !compute_capable {
+            if !compute_capable && scene_engine == waterui_graphics::SceneEngine::Classic {
                 continue;
             }
 
@@ -728,7 +736,7 @@ Set WGPU_BACKEND to an available backend or install/update the platform GPU driv
             }
 
             panic!(
-                "{context}: failed to find a compute-capable modern adapter. \
+                "{context}: failed to find a scene-compatible adapter. \
 Surface-compatible adapters inspected: {}. \
 Set WATER_HYDROLYSIS_FORCE_FALLBACK_ADAPTER=1 to explicitly allow software fallback adapters for diagnostics.",
                 inspected_adapters.join("; ")
@@ -890,10 +898,12 @@ impl SurfaceProvider for OffscreenSurface {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: self.format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC
-                        | wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage: crate::scene_renderer::storage_usage_if_supported(
+                        &self.gpu.inner.device,
+                        wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    ),
                     view_formats: &[],
                 })
         });
@@ -1091,6 +1101,8 @@ impl PlatformWindow for OffscreenWindow {
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 mod web_impl;
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web")))]
+mod web_keyboard;
 
 #[cfg(all(feature = "winit", target_os = "macos"))]
 mod macos_display_link;
@@ -1227,11 +1239,15 @@ mod winit_impl {
                     )
                     .await;
 
-                    super::ensure_compute_capable_adapter(
-                        &adapter,
-                        "hydrolysis winit surface",
-                        "failed to find compute-capable wgpu adapter",
-                    );
+                    if waterui_graphics::SceneEngine::for_adapter(&adapter)
+                        == waterui_graphics::SceneEngine::Classic
+                    {
+                        super::ensure_compute_capable_adapter(
+                            &adapter,
+                            "hydrolysis winit surface",
+                            "failed to find compute-capable wgpu adapter",
+                        );
+                    }
                     let required_limits = super::required_device_limits(&adapter);
                     let required_features =
                         waterui_graphics::shared_context::required_media_features(

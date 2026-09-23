@@ -1,3 +1,4 @@
+use crate::WindowScene;
 use waterui::navigation::{
     AnyNavigationTransition, NavigationTransitionDirection,
     NavigationTransitionFrame as ResolvedNavigationTransitionFrame, NavigationTransitionLayer,
@@ -8,7 +9,7 @@ use waterui_backend_core::widget::NavigationMotion;
 use super::{NavigationCapturedScene, NavigationMatchedElement};
 
 pub(crate) struct NavigationTransitionFrame<'a> {
-    pub(crate) scene: &'a mut vello::Scene,
+    pub(crate) scene: &'a mut WindowScene,
     pub(crate) transform: vello::kurbo::Affine,
     pub(crate) bounds: vello::kurbo::Rect,
     pub(crate) style: AnyNavigationTransition,
@@ -177,7 +178,7 @@ fn interpolate_rect(
 }
 
 fn append_matched_element(
-    scene: &mut vello::Scene,
+    scene: &mut WindowScene,
     transform: vello::kurbo::Affine,
     element: &NavigationMatchedElement,
     target: vello::kurbo::Rect,
@@ -204,10 +205,10 @@ fn append_matched_element(
 }
 
 fn append_scene_with_opacity(
-    scene: &mut vello::Scene,
+    scene: &mut WindowScene,
     transform: vello::kurbo::Affine,
     clip_bounds: vello::kurbo::Rect,
-    content: &vello::Scene,
+    content: &WindowScene,
     opacity: f32,
 ) {
     append_scene_layer(
@@ -223,10 +224,10 @@ fn append_scene_with_opacity(
 }
 
 fn append_scene_layer(
-    scene: &mut vello::Scene,
+    scene: &mut WindowScene,
     transform: vello::kurbo::Affine,
     clip_bounds: vello::kurbo::Rect,
-    content: &vello::Scene,
+    content: &WindowScene,
     layer: NavigationTransitionLayer,
 ) {
     if layer.opacity <= 0.0 {

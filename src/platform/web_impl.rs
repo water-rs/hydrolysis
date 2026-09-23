@@ -23,6 +23,15 @@ struct PendingResize {
     scale_factor: f64,
 }
 
+#[derive(Debug)]
+struct BrowserDisplayHandle;
+
+impl wgpu::rwh::HasDisplayHandle for BrowserDisplayHandle {
+    fn display_handle(&self) -> Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        Ok(wgpu::rwh::DisplayHandle::web())
+    }
+}
+
 pub struct BrowserSurface {
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -42,28 +51,49 @@ impl core::fmt::Debug for BrowserSurface {
 
 impl BrowserSurface {
     pub async fn new(canvas: HtmlCanvasElement, width: u32, height: u32) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::util::new_instance_with_webgpu_detection(
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(BrowserDisplayHandle)),
+        )
+        .await;
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
             .expect("hydrolysis web surface: failed to create canvas surface");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect(
-                "hydrolysis web surface: browser WebGPU adapter unavailable; ensure WebGPU is enabled",
-            );
+        let adapter = super::request_hydrolysis_adapter(
+            &instance,
+            Some(&surface),
+            "hydrolysis web surface",
+            super::AdapterSelection::PRODUCTION,
+        )
+        .await;
 
+        let required_limits = super::required_device_limits(&adapter);
+        let required_features =
+            waterui_graphics::shared_context::required_media_features(adapter.features());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("hydrolysis-web-device"),
-                ..Default::default()
+                required_features,
+                required_limits,
+                memory_hints: wgpu::MemoryHints::Performance,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                trace: wgpu::Trace::default(),
             })
             .await
-            .expect("hydrolysis web surface: failed to request WebGPU device");
+            .expect("hydrolysis web surface: failed to request WebGPU/WebGL2 device");
+
+        let scene_engine = waterui_graphics::SceneEngine::for_adapter(&adapter);
+        let enabled_limits = device.limits();
+        tracing::info!(
+            target: "hydrolysis::gpu",
+            backend = ?adapter.get_info().backend,
+            ?scene_engine,
+            max_texture_dimension_2d = enabled_limits.max_texture_dimension_2d,
+            max_storage_textures_per_shader_stage =
+                enabled_limits.max_storage_textures_per_shader_stage,
+            max_compute_workgroups_per_dimension =
+                enabled_limits.max_compute_workgroups_per_dimension,
+            "hydrolysis web device ready"
+        );
 
         let caps = surface.get_capabilities(&adapter);
         let config = wgpu::SurfaceConfiguration {
@@ -670,8 +700,8 @@ fn register_listeners(
             pending_events.borrow_mut().push(InputEvent::Scroll {
                 x,
                 y,
-                dx: event.delta_x() as f32,
-                dy: event.delta_y() as f32,
+                dx: -event.delta_x() as f32,
+                dy: -event.delta_y() as f32,
                 is_line_delta: event.delta_mode() != WheelEvent::DOM_DELTA_PIXEL,
             });
             redraw_requested.set(true);
@@ -683,51 +713,45 @@ fn register_listeners(
         let pending_events = pending_events.clone();
         let redraw_requested = redraw_requested.clone();
         let schedule_frame = schedule_frame.clone();
-        listeners.push(add_event_listener(
-            ime_input.as_ref(),
-            "keydown",
-            move |event| {
-                let event = event
-                    .dyn_into::<KeyboardEvent>()
-                    .expect("hydrolysis web platform: keydown event had unexpected type");
-                let modifiers = map_modifiers_from_keyboard(&event);
-                match event.key().as_str() {
-                    "Backspace" => {
-                        event.prevent_default();
-                        pending_events.borrow_mut().push(InputEvent::Key {
-                            key: KeyCode::Named("Backspace".to_string()),
-                            logical_key: keyboard_types::Key::Named(
-                                keyboard_types::NamedKey::Backspace,
-                            ),
-                            physical_code: keyboard_types::Code::Backspace,
-                            repeat: event.repeat(),
-                            state: KeyState::Pressed,
-                            modifiers,
-                        });
+        let composing = composing.clone();
+        for event_name in ["keydown", "keyup"] {
+            let pending_events = pending_events.clone();
+            let redraw_requested = redraw_requested.clone();
+            let schedule_frame = schedule_frame.clone();
+            let composing = composing.clone();
+            listeners.push(add_event_listener(
+                ime_input.as_ref(),
+                event_name,
+                move |event| {
+                    let event = event
+                        .dyn_into::<KeyboardEvent>()
+                        .expect("hydrolysis web platform: key event had unexpected type");
+                    let modifiers = map_modifiers_from_keyboard(&event);
+                    if !super::web_keyboard::should_forward_ime_key(
+                        &event.key(),
+                        modifiers,
+                        composing.get() || event.is_composing(),
+                    ) {
+                        return;
                     }
-                    "Enter" => {
-                        event.prevent_default();
-                        pending_events.borrow_mut().push(InputEvent::ImeCommit {
-                            text: "\n".to_string(),
-                        });
-                    }
-                    "Tab" => {
-                        event.prevent_default();
-                        pending_events.borrow_mut().push(InputEvent::Key {
-                            key: KeyCode::Named("Tab".to_string()),
-                            logical_key: keyboard_types::Key::Named(keyboard_types::NamedKey::Tab),
-                            physical_code: keyboard_types::Code::Tab,
-                            repeat: event.repeat(),
-                            state: KeyState::Pressed,
-                            modifiers,
-                        });
-                    }
-                    _ => return,
-                }
-                redraw_requested.set(true);
-                schedule_frame();
-            },
-        ));
+                    event.prevent_default();
+                    pending_events.borrow_mut().push(InputEvent::Key {
+                        key: map_keyboard_key(&event),
+                        logical_key: map_w3c_key(&event),
+                        physical_code: map_w3c_code(&event),
+                        repeat: event.repeat(),
+                        state: if event_name == "keydown" {
+                            KeyState::Pressed
+                        } else {
+                            KeyState::Released
+                        },
+                        modifiers,
+                    });
+                    redraw_requested.set(true);
+                    schedule_frame();
+                },
+            ));
+        }
     }
 
     {

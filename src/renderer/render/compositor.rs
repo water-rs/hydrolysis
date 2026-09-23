@@ -11,15 +11,20 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use shaderloom::WgslModuleCache;
+use waterui_graphics::SceneEngine;
 use waterui_graphics::input::SurfaceInputEvent;
+
+use crate::scene_renderer::RegisteredImage;
 
 const GPU_SURFACE_COMPOSITOR_SHADER: CompiledShader =
     include!(concat!(env!("OUT_DIR"), "/gpu_surface_compositor.rs"));
 
-/// Builds a fresh `vello::Renderer` for the parallel-encode pool, matching the main
-/// renderer's options (GPU-only, area AA, multi-core init).
-fn build_pooled_vello_renderer(device: &wgpu::Device) -> vello::Renderer {
-    vello::Renderer::new(
+/// Builds a fresh [`WindowSceneRenderer`] for the parallel-encode pool on the
+/// window's engine, matching the main renderer's options (GPU-only, area AA,
+/// multi-core init).
+fn build_pooled_scene_renderer(engine: SceneEngine, device: &wgpu::Device) -> WindowSceneRenderer {
+    WindowSceneRenderer::for_engine(
+        engine,
         device,
         vello::RendererOptions {
             use_cpu: false,
@@ -28,34 +33,39 @@ fn build_pooled_vello_renderer(device: &wgpu::Device) -> vello::Renderer {
             pipeline_cache: None,
         },
     )
-    .expect("hydrolysis renderer: failed to create pooled vello renderer")
 }
 
-/// C2: encode independent Vello layers to per-layer textures across CPU cores.
+/// C2: encode independent scene layers to per-layer textures across CPU cores.
 ///
-/// Each worker checks a `vello::Renderer` out of `pool` (creating one on first use),
-/// renders its scene to its own texture, and returns the texture + view tagged with the
-/// originating `render_layers` index so the caller can composite in painter's order.
-/// `vello::Renderer` is `!Sync`, so per-worker ownership (not sharing) is what makes this
-/// sound; the GPU `Queue` is `Send + Sync` and each layer targets an independent texture,
-/// so submission order is irrelevant.
-fn encode_vello_layers_parallel(
-    pool: &std::sync::Mutex<Vec<vello::Renderer>>,
+/// Each worker checks a [`WindowSceneRenderer`] out of `pool` (creating one on
+/// first use), synchronizes the frame's image registrations into it, renders
+/// its scene to its own texture, and returns the texture + view tagged with
+/// the originating `render_layers` index so the caller can composite in
+/// painter's order. A rasterizer is `!Sync`, so per-worker ownership (not
+/// sharing) is what makes this sound; the GPU `Queue` is `Send + Sync` and
+/// each layer targets an independent texture, so submission order is
+/// irrelevant.
+#[allow(clippy::too_many_arguments)]
+fn encode_scene_layers_parallel(
+    pool: &std::sync::Mutex<Vec<WindowSceneRenderer>>,
+    engine: SceneEngine,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)>,
+    images: &std::collections::HashMap<u64, RegisteredImage>,
+    scenes: Vec<(usize, &WindowScene, PooledLayerTexture)>,
     width: u32,
     height: u32,
 ) -> Vec<(usize, PooledLayerTexture)> {
     #[cfg(not(target_arch = "wasm32"))]
     use rayon::prelude::*;
 
-    let render_layer = |(index, scene, leased): (usize, &vello::Scene, PooledLayerTexture)| {
+    let render_layer = |(index, scene, leased): (usize, &WindowScene, PooledLayerTexture)| {
         let mut renderer = pool
             .lock()
-            .expect("hydrolysis renderer: vello renderer pool poisoned")
+            .expect("hydrolysis renderer: scene renderer pool poisoned")
             .pop()
-            .unwrap_or_else(|| build_pooled_vello_renderer(device));
+            .unwrap_or_else(|| build_pooled_scene_renderer(engine, device));
+        renderer.sync_registered_images(images);
 
         let params = vello::RenderParams {
             base_color: vello::peniko::Color::TRANSPARENT,
@@ -63,12 +73,10 @@ fn encode_vello_layers_parallel(
             height,
             antialiasing_method: vello::AaConfig::Area,
         };
-        renderer
-            .render_to_texture(device, queue, scene, &leased.view, &params)
-            .expect("hydrolysis renderer: failed to render vello layer scene");
+        renderer.render_to_texture(device, queue, scene, &leased.view, &params);
 
         pool.lock()
-            .expect("hydrolysis renderer: vello renderer pool poisoned")
+            .expect("hydrolysis renderer: scene renderer pool poisoned")
             .push(renderer);
 
         (index, leased)
@@ -88,11 +96,11 @@ pub(crate) struct Compositor {
     /// layer per frame is exactly the churn the pool exists to avoid; entries
     /// whose size no longer matches the target are dropped on acquire.
     pub(crate) layer_texture_pool: Vec<PooledLayerTexture>,
-    /// Pool of `vello::Renderer` instances reused across frames for C2's parallel
-    /// per-layer encoding. `vello::Renderer` is `!Sync` (it holds a `RefCell`), so each
-    /// worker checks out its own instance; the `Mutex` only guards the free-list, not the
+    /// Pool of scene rasterizers reused across frames for C2's parallel
+    /// per-layer encoding. A rasterizer is `!Sync`, so each worker checks out
+    /// its own instance; the `Mutex` only guards the free-list, not the
     /// (parallel) encode itself.
-    pub(crate) vello_renderer_pool: std::sync::Mutex<Vec<vello::Renderer>>,
+    pub(crate) scene_renderer_pool: std::sync::Mutex<Vec<WindowSceneRenderer>>,
     pub(crate) gpu_surface_compositor: Option<GpuSurfaceCompositorState>,
     pub(crate) render_layers: Vec<RenderLayer>,
     pub(crate) active_scene_layers: Vec<ActiveSceneLayer>,
@@ -127,9 +135,10 @@ impl Compositor {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: crate::scene_renderer::storage_usage_if_supported(
+                    device,
+                    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                ),
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -312,7 +321,7 @@ pub(crate) struct NativeViewLayer {
 }
 
 pub(crate) enum RenderLayer {
-    Vello(vello::Scene),
+    Vello(WindowScene),
     GpuSurface(GpuSurfaceLayer),
     #[cfg(hydrolysis_macos_system_webview)]
     NativeView(NativeViewLayer),
@@ -327,7 +336,7 @@ pub(crate) struct HybridRenderSegment {
 pub(crate) struct HybridComposition {
     pub(crate) segments: Vec<HybridRenderSegment>,
     pub(crate) native_views: Vec<NativeViewLayer>,
-    pub(crate) transient_scene: Option<vello::Scene>,
+    pub(crate) transient_scene: Option<WindowScene>,
 }
 
 pub(crate) struct PreparedGpuSurfaceLayer {
@@ -428,7 +437,7 @@ struct ReadyLayerComposite {
 }
 
 impl ActiveSceneLayer {
-    pub(crate) fn push_to_scene(&self, scene: &mut vello::Scene) {
+    pub(crate) fn push_to_scene(&self, scene: &mut WindowScene) {
         match &self.shape {
             LayerShape::Rect(rect) => {
                 scene.push_layer(
@@ -1309,7 +1318,7 @@ impl HydrolysisRenderer {
     pub(crate) fn render_hybrid_segment_to_surface(
         &mut self,
         segment: &mut HybridRenderSegment,
-        transient_scene: Option<vello::Scene>,
+        transient_scene: Option<WindowScene>,
         target: HydrolysisRenderTarget<'_>,
     ) {
         assert!(
@@ -1423,7 +1432,7 @@ impl HydrolysisRenderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &vello::Scene,
+        scene: &WindowScene,
         width: u32,
         height: u32,
     ) -> PooledLayerTexture {
@@ -1434,9 +1443,8 @@ impl HydrolysisRenderer {
             height,
             antialiasing_method: vello::AaConfig::Area,
         };
-        self.vello_renderer
-            .render_to_texture(device, queue, scene, &leased.view, &params)
-            .expect("hydrolysis renderer: failed to render vello layer scene");
+        self.window_renderer
+            .render_to_texture(device, queue, scene, &leased.view, &params);
         leased
     }
 
@@ -1452,7 +1460,7 @@ impl HydrolysisRenderer {
             !active_layers.is_empty(),
             "hydrolysis renderer: active layer mask requires at least one layer"
         );
-        let mut mask_scene = vello::Scene::new();
+        let mut mask_scene = WindowScene::new();
         for layer in active_layers {
             layer.push_to_scene(&mut mask_scene);
         }
@@ -1749,7 +1757,7 @@ impl HydrolysisRenderer {
                 })
                 .collect();
             if vello_indices.len() > 1 {
-                let vello_scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)> = vello_indices
+                let vello_scenes: Vec<(usize, &WindowScene, PooledLayerTexture)> = vello_indices
                     .iter()
                     .map(|&index| {
                         let leased = self.compositor.acquire_layer_texture(
@@ -1763,10 +1771,12 @@ impl HydrolysisRenderer {
                         (index, scene, leased)
                     })
                     .collect();
-                for (index, leased) in encode_vello_layers_parallel(
-                    &self.compositor.vello_renderer_pool,
+                for (index, leased) in encode_scene_layers_parallel(
+                    &self.compositor.scene_renderer_pool,
+                    self.window_renderer.engine(),
                     target.device,
                     target.queue,
+                    &self.window_renderer.images_snapshot(),
                     vello_scenes,
                     target.width,
                     target.height,
@@ -1782,9 +1792,8 @@ impl HydrolysisRenderer {
                 RenderLayer::Vello(scene) => {
                     tracing::trace!(
                         layer_index,
-                        paths = scene.encoding().n_paths,
-                        segments = scene.encoding().n_path_segments,
-                        "compositing Hydrolysis Vello layer"
+                        parts = scene.part_count(),
+                        "compositing Hydrolysis scene layer"
                     );
                     let leased = match encoded_vello[layer_index].take() {
                         Some(leased) => leased,

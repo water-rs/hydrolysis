@@ -10,6 +10,7 @@ use executor_core::async_task::{self, AsyncTask, Runnable};
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
+mod hybrid_scene;
 mod perf_full_rebuild;
 mod perf_scroll;
 mod retained_scene;
@@ -350,6 +351,9 @@ fn text_input_target(
         text_clip_bounds: Rect::ZERO,
         content_alpha: 1.0,
         layout: std::sync::Arc::new(parley::Layout::default()),
+        layout_text: Str::new(),
+        layout_max_width: None,
+        layout_env: test_environment(),
         purpose: TextInputPurpose::Normal,
         depth: 0,
         order: 0,
@@ -2212,6 +2216,185 @@ fn text_input_focus_stays_on_its_field_when_a_row_is_inserted_above_it() {
         model.plain_text(),
         "focused",
         "typing must reach the field the user focused, not the one now at its old position"
+    );
+}
+
+fn shaped_text_input_target(
+    renderer: &mut HydrolysisRenderer,
+    model: TextInputModel,
+    selection: Rc<RefCell<TextSelectionSlot>>,
+    committed_text: &str,
+) -> TextInputTarget {
+    let env = test_environment();
+    let mut target = text_input_target(model, selection);
+    let input = resolve_text_layout_input(
+        &StyledStr::plain(committed_text.to_owned()),
+        HorizontalAlignment::Leading,
+        &env,
+    );
+    target.layout = renderer.state.text.shape(&input, None);
+    target.layout_text = Str::from(committed_text.to_owned());
+    target.layout_env = env;
+    target
+}
+
+#[test]
+fn caret_movement_after_same_frame_text_commit_uses_current_layout() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let selection = Rc::new(RefCell::new(TextSelectionSlot {
+        anchor: 1,
+        focus: 1,
+        initialized: true,
+    }));
+    let target = shaped_text_input_target(
+        &mut renderer,
+        text_field_model("Y", None),
+        Rc::clone(&selection),
+        "Y",
+    );
+    renderer.text_editing.text_input_targets.push(target);
+    assert!(renderer.set_focused_text_input(Some(0)));
+
+    assert!(renderer.handle_key(
+        &KeyCode::Character("a".to_owned()),
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    ));
+    assert!(renderer.insert_text_into_focused_target("abcd"));
+    assert!(renderer.move_focused_caret_horizontal(true, false));
+    assert!(renderer.move_focused_caret_horizontal(true, false));
+    assert!(renderer.move_focused_caret_horizontal(true, true));
+    assert!(renderer.insert_text_into_focused_target("X"));
+    assert_eq!(
+        renderer.text_editing.text_input_targets[0]
+            .model
+            .plain_text(),
+        "aXcd"
+    );
+}
+
+#[test]
+fn caret_movement_after_same_frame_commit_uses_current_layout_for_combining_marks() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let selection = Rc::new(RefCell::new(TextSelectionSlot {
+        anchor: 1,
+        focus: 1,
+        initialized: true,
+    }));
+    let target = shaped_text_input_target(
+        &mut renderer,
+        text_field_model("Y", None),
+        Rc::clone(&selection),
+        "Y",
+    );
+    renderer.text_editing.text_input_targets.push(target);
+    assert!(renderer.set_focused_text_input(Some(0)));
+
+    assert!(renderer.handle_key(
+        &KeyCode::Character("a".to_owned()),
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    ));
+    assert!(renderer.insert_text_into_focused_target("a\u{0301}b"));
+    assert!(renderer.move_focused_caret_horizontal(true, false));
+    assert_eq!(
+        (selection.borrow().anchor, selection.borrow().focus),
+        (3, 3)
+    );
+    assert!(renderer.move_focused_caret_horizontal(true, true));
+    assert_eq!(
+        (selection.borrow().anchor, selection.borrow().focus),
+        (3, 0)
+    );
+    assert!(renderer.insert_text_into_focused_target("X"));
+    assert_eq!(
+        renderer.text_editing.text_input_targets[0]
+            .model
+            .plain_text(),
+        "Xb"
+    );
+}
+
+#[test]
+fn secure_field_caret_movement_after_same_frame_commit_uses_masked_layout() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let text = "a你b";
+    let selection = Rc::new(RefCell::new(TextSelectionSlot {
+        anchor: text.len(),
+        focus: text.len(),
+        initialized: true,
+    }));
+    let target = shaped_text_input_target(
+        &mut renderer,
+        secure_field_model(text),
+        Rc::clone(&selection),
+        "**",
+    );
+    renderer.text_editing.text_input_targets.push(target);
+    assert!(renderer.set_focused_text_input(Some(0)));
+
+    assert!(renderer.move_focused_caret_horizontal(true, false));
+    assert!(renderer.move_focused_caret_horizontal(true, true));
+    assert!(renderer.insert_text_into_focused_target("X"));
+    assert_eq!(
+        renderer.text_editing.text_input_targets[0]
+            .model
+            .plain_text(),
+        "aXb"
+    );
+    assert_eq!(
+        renderer.text_editing.text_input_targets[0]
+            .layout_text
+            .as_str(),
+        "***",
+        "stored layout text must stay masked"
+    );
+}
+
+#[test]
+fn caret_layout_refresh_compares_full_text_not_length() {
+    let mut renderer = test_renderer();
+    renderer.set_text_caret_motion(MinimalTestTheme.text_caret_motion());
+    let selection = Rc::new(RefCell::new(TextSelectionSlot {
+        anchor: 4,
+        focus: 4,
+        initialized: true,
+    }));
+    let target = shaped_text_input_target(
+        &mut renderer,
+        text_field_model("abcd", None),
+        Rc::clone(&selection),
+        "abcd",
+    );
+    renderer.text_editing.text_input_targets.push(target);
+    assert!(renderer.set_focused_text_input(Some(0)));
+
+    assert!(renderer.handle_key(
+        &KeyCode::Character("a".to_owned()),
+        Modifiers {
+            control: true,
+            ..Modifiers::default()
+        }
+    ));
+    assert!(renderer.insert_text_into_focused_target("wxyz"));
+    assert!(renderer.move_focused_caret_horizontal(true, false));
+    assert_eq!(
+        renderer.text_editing.text_input_targets[0]
+            .layout_text
+            .as_str(),
+        "wxyz",
+        "same-length replacement must still refresh the stored layout text"
+    );
+    assert_eq!(
+        (selection.borrow().anchor, selection.borrow().focus),
+        (3, 3)
     );
 }
 

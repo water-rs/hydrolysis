@@ -118,6 +118,9 @@ pub(crate) struct TextInputTarget {
     pub(crate) text_clip_bounds: vello::kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
+    pub(crate) layout_text: Str,
+    pub(crate) layout_max_width: Option<f32>,
+    pub(crate) layout_env: Environment,
     pub(crate) purpose: TextInputPurpose,
     pub(crate) depth: usize,
     pub(crate) order: usize,
@@ -137,6 +140,9 @@ pub(crate) struct TextInputTargetRegistration {
     pub(crate) text_clip_bounds: vello::kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
+    pub(crate) layout_text: Str,
+    pub(crate) layout_max_width: Option<f32>,
+    pub(crate) layout_env: Environment,
     pub(crate) purpose: TextInputPurpose,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
@@ -800,7 +806,7 @@ impl HydrolysisRenderer {
     ) {
         let focused = self.text_editing.focused_index();
         let menu_target = self.active_text_context_menu_target();
-        let mut scene = vello::Scene::new();
+        let mut scene = WindowScene::new();
         let theme = widget_theme(env);
         {
             let mut draw = VelloDrawContext::with_root_transform(&mut scene, transform);
@@ -1286,18 +1292,61 @@ impl HydrolysisRenderer {
         true
     }
 
+    fn refresh_text_target_layout(&mut self, index: usize) {
+        let target = &mut self.text_editing.text_input_targets[index];
+        let plain = target.model.plain_text();
+        let text = if target.model.is_secure() {
+            "*".repeat(plain.chars().count())
+        } else {
+            plain
+        };
+        if target.layout_text.as_str() == text.as_str() {
+            return;
+        }
+        let styled = StyledStr::plain(text.clone());
+        let input =
+            resolve_text_layout_input(&styled, HorizontalAlignment::Leading, &target.layout_env);
+        target.layout = self.state.text.shape(&input, target.layout_max_width);
+        target.layout_text = text.into();
+    }
+
     pub(crate) fn move_focused_caret_horizontal(&mut self, backward: bool, extend: bool) -> bool {
         let Some((index, model, selection)) = self.focused_text_target_data() else {
             return false;
         };
+        self.refresh_text_target_layout(index);
         let target = &self.text_editing.text_input_targets[index];
         let mut slot = selection.borrow_mut();
         let current = selection_for_target_layout(&model, &target.layout, &slot);
-        let next = if backward {
+        let mut next = if backward {
             current.previous_visual(&target.layout, extend)
         } else {
             current.next_visual(&target.layout, extend)
         };
+        if !model.is_secure() {
+            let plain = model.plain_text();
+            loop {
+                let index = model.plain_index_from_layout_index(next.focus().index());
+                if index == plain.len()
+                    || plain
+                        .grapheme_indices(true)
+                        .any(|(boundary, _)| boundary == index)
+                {
+                    break;
+                }
+                let previous_focus = next.focus();
+                next = if backward {
+                    next.previous_visual(&target.layout, extend)
+                } else {
+                    next.next_visual(&target.layout, extend)
+                };
+                assert_ne!(
+                    next.focus(),
+                    previous_focus,
+                    "text caret navigation stopped inside a grapheme"
+                );
+            }
+        }
         let anchor = model.plain_index_from_layout_index(next.anchor().index());
         let focus = model.plain_index_from_layout_index(next.focus().index());
         let changed = slot.anchor != anchor || slot.focus != focus || !slot.initialized;

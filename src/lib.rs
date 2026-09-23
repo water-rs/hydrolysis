@@ -11,6 +11,8 @@ mod platform;
 mod readback;
 mod renderer;
 mod runner;
+mod scene;
+mod scene_renderer;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod view_renderer;
@@ -39,6 +41,7 @@ pub use runner::run;
 pub use runner::{
     FrameCounters, FramePhases, FrameProfile, HeadlessPumpResult, HeadlessRuntime, HeadlessSnapshot,
 };
+pub use scene::WindowScene;
 pub use view_renderer::HydrolysisViewRenderer;
 #[cfg(hydrolysis_macos_system_webview)]
 pub use widgets::platform::webview::MacSystemWebViewController;

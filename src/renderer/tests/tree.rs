@@ -25,7 +25,7 @@ fn export_path(case: &str, stage: &str) -> std::path::PathBuf {
 use waterui_layout::stack::{VStackLayout, vstack};
 use waterui_text::styled::StyledStr;
 
-fn text_node(content: &'static str) -> RenderNode {
+pub(crate) fn text_node(content: &'static str) -> RenderNode {
     RenderNode::Text(Box::new(TextNode {
         #[cfg(feature = "accessibility")]
         accessibility_identity: Rc::new(()),

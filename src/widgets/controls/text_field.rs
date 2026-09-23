@@ -408,6 +408,9 @@ pub(crate) fn render_text_field_parts(
                 text_clip_bounds: transformed_rect(hit_transform, text_clip_bounds),
                 content_alpha,
                 layout: committed_layout,
+                layout_text: value.clone(),
+                layout_max_width: Some(text_bounds.width() as f32),
+                layout_env: env.clone(),
                 purpose: TextInputPurpose::Normal,
                 model: input_model,
                 selection: selection_slot,
@@ -587,7 +590,7 @@ pub(crate) fn render_secure_field_parts(
     let masked_display = StyledStr::plain(masked.clone());
     let committed_layout = HydrolysisRenderer::build_text_layout(
         ctx.state_mut(),
-        StyledStr::plain(masked),
+        StyledStr::plain(masked.clone()),
         HorizontalAlignment::Leading,
         env,
         Some(text_bounds.width() as f32),
@@ -675,6 +678,9 @@ pub(crate) fn render_secure_field_parts(
                 text_clip_bounds: transformed_rect(hit_transform, text_clip_bounds),
                 content_alpha,
                 layout: committed_layout,
+                layout_text: masked.into(),
+                layout_max_width: Some(text_bounds.width() as f32),
+                layout_env: env.clone(),
                 purpose: TextInputPurpose::Password,
                 model: input_model,
                 selection: selection_slot,

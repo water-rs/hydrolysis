@@ -378,7 +378,7 @@ fn view_has_plain_alignment_dimensions(view: &AnyView) -> bool {
 impl HydrolysisRenderer {
     pub(crate) fn render_styled_text(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut WindowScene,
         ctx: RenderContext,
         styled: StyledStr,
         alignment: HorizontalAlignment,
@@ -389,7 +389,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn render_styled_text_limited(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut WindowScene,
         ctx: RenderContext,
         styled: StyledStr,
         alignment: HorizontalAlignment,
@@ -411,7 +411,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn render_styled_text_single_line_centered(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut WindowScene,
         ctx: RenderContext,
         styled: StyledStr,
         env: &Environment,
@@ -441,7 +441,7 @@ impl HydrolysisRenderer {
     /// caller positions the result by appending it under a transform, which is
     /// what makes the encoded fragment reusable across frames.
     fn encode_text_layout(
-        scene: &mut vello::Scene,
+        scene: &mut WindowScene,
         layout: &parley::Layout<[u8; 4]>,
         max_lines: Option<usize>,
     ) {
@@ -456,29 +456,33 @@ impl HydrolysisRenderer {
                 if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
                     let run = glyph_run.run();
                     let style = glyph_run.style();
-                    let brush = rgba8_to_peniko(style.brush);
-                    let normalized_coords = run.normalized_coords();
+                    let brush = vello::peniko::Brush::Solid(rgba8_to_peniko(style.brush));
 
                     let mut run_x = glyph_run.offset();
                     let run_y = glyph_run.baseline();
-                    let glyphs = glyph_run.glyphs().map(move |glyph| {
-                        let x = run_x + glyph.x;
-                        let y = run_y - glyph.y;
-                        run_x += glyph.advance;
-                        vello::Glyph { id: glyph.id, x, y }
-                    });
+                    let glyphs: Vec<waterui_graphics::Glyph> = glyph_run
+                        .glyphs()
+                        .map(move |glyph| {
+                            let x = run_x + glyph.x;
+                            let y = run_y - glyph.y;
+                            run_x += glyph.advance;
+                            waterui_graphics::Glyph { id: glyph.id, x, y }
+                        })
+                        .collect();
 
-                    let glyph_run_builder = scene
-                        .draw_glyphs(run.font())
-                        .brush(brush)
-                        .font_size(run.font_size());
-                    if normalized_coords.is_empty() {
-                        glyph_run_builder.draw(vello::peniko::Fill::NonZero, glyphs);
-                    } else {
-                        glyph_run_builder
-                            .normalized_coords(normalized_coords)
-                            .draw(vello::peniko::Fill::NonZero, glyphs);
-                    }
+                    waterui_graphics::Scene2D::draw_glyph_run(
+                        scene,
+                        &waterui_graphics::GlyphRun {
+                            font: run.font(),
+                            font_size: run.font_size(),
+                            normalized_coords: run.normalized_coords(),
+                            transform: vello::kurbo::Affine::IDENTITY,
+                            brush: &brush,
+                            brush_alpha: 1.0,
+                            style: vello::peniko::Fill::NonZero.into(),
+                            glyphs: &glyphs,
+                        },
+                    );
                 }
             }
         }

@@ -222,7 +222,25 @@ pub fn run(app: App) {
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub fn run(app: App) {
     init_global_executor();
+    initialize_web_logging();
     web_runner::run(app);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+fn initialize_web_logging() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&info.to_string()));
+        previous(info);
+    }));
+    use tracing_subscriber::layer::SubscriberExt;
+    let mut config = tracing_wasm::WASMLayerConfigBuilder::new();
+    config
+        .set_max_level(tracing::Level::INFO)
+        .set_report_logs_in_timings(false);
+    let subscriber =
+        tracing_subscriber::registry().with(tracing_wasm::WASMLayer::new(config.build()));
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "winit"))]

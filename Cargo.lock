@@ -1932,9 +1932,9 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "filtrate"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bd2ecaa0fba4ef2c21f6a773d5b4530ff6038a5138ac6a6a5498d30bcfb2e64"
+checksum = "16b2d5dcd0f9ccfb26c5db8447b7371e9957ddd7893a8a8c077c9c077b55d7d3"
 dependencies = [
  "bytemuck",
  "filtrate-core",
@@ -1944,6 +1944,7 @@ dependencies = [
  "shaderloom",
  "thiserror 2.0.20",
  "tracing",
+ "web-time",
  "wgpu",
 ]
 
@@ -2657,6 +2658,7 @@ dependencies = [
  "cookie",
  "ctrlc",
  "executor-core",
+ "filtrate",
  "futures",
  "hydrolysis-m3",
  "image",
@@ -2683,9 +2685,12 @@ dependencies = [
  "tiny_http",
  "tracing",
  "tracing-subscriber",
+ "tracing-wasm",
  "ui-events-winit",
  "unicode-segmentation",
  "vello",
+ "vello_common",
+ "vello_hybrid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "waterkit-clipboard",
@@ -6925,6 +6930,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-wasm"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4575c663a174420fa2d78f4108ff68f65bf2fbb7dd89f33749b6e826b3626e07"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "tree-sitter"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8303,6 +8319,7 @@ dependencies = [
  "thiserror 2.0.20",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
+ "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal",
  "wgpu-naga-bridge",
@@ -8323,6 +8340,15 @@ name = "wgpu-core-deps-emscripten"
 version = "29.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01e09be551dc939498bdd5f6b2c66e55ab275dad25825267a08605a80fc9f0af"
+dependencies = [
+ "wgpu-hal",
+]
+
+[[package]]
+name = "wgpu-core-deps-wasm"
+version = "29.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af1fb1798be2a912497d4c224f72d39bb0cb34af50e8bcc29865bc339c943059"
 dependencies = [
  "wgpu-hal",
 ]

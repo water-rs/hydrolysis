@@ -14,8 +14,8 @@
 //! by the time the page holding its parent is rendered.
 
 use super::*;
+use crate::time::Instant;
 use core::mem;
-use std::time::Instant;
 
 /// Pages are padded up to this granularity so that a layout that jitters by a
 /// few pixels between frames keeps hitting the same pooled page texture.
@@ -56,9 +56,9 @@ struct CapturePage {
 /// out of the renderer around each slot flush and the page render.
 #[derive(Default)]
 struct CapturePageContent {
-    scene: vello::Scene,
+    scene: WindowScene,
     render_layers: Vec<RenderLayer>,
-    transient_scene: Option<vello::Scene>,
+    transient_scene: Option<WindowScene>,
 }
 
 struct CaptureSlot {
@@ -200,10 +200,12 @@ impl SubtreeCaptures {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: crate::scene_renderer::storage_usage_if_supported(
+                device,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            ),
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -360,7 +362,7 @@ impl HydrolysisRenderer {
                 let (_image, needs_redraw) = pending.runtime.borrow_mut().encode_output(
                     &device,
                     &queue,
-                    &mut self.vello_renderer,
+                    &mut self.window_renderer,
                     pending.width,
                     pending.height,
                     &mut encoder,

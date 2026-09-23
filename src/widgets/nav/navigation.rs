@@ -1,3 +1,4 @@
+use crate::WindowScene;
 use crate::engine::Brush;
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
@@ -1205,7 +1206,7 @@ fn render_navigation_page_scene(
             entry.content.render_built_scene(renderer, env, size)
         }
     };
-    let mut scene = vello::Scene::new();
+    let mut scene = WindowScene::new();
     let bounds = vello::kurbo::Rect::new(0.0, 0.0, f64::from(size.width), f64::from(size.height));
     scene.fill(
         vello::peniko::Fill::NonZero,

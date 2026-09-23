@@ -1,15 +1,16 @@
 use super::{Brush, DrawContext};
+use crate::WindowScene;
 use vello::kurbo::{
     Affine, BezPath, Circle, Line, Point, Rect, RoundedRect, RoundedRectRadii, Shape,
 };
 
 pub struct VelloDrawContext<'a> {
-    scene: &'a mut vello::Scene,
+    scene: &'a mut WindowScene,
     transform_stack: Vec<Affine>,
 }
 
 impl<'a> VelloDrawContext<'a> {
-    pub fn with_root_transform(scene: &'a mut vello::Scene, transform: Affine) -> Self {
+    pub fn with_root_transform(scene: &'a mut WindowScene, transform: Affine) -> Self {
         Self {
             scene,
             transform_stack: vec![Affine::IDENTITY, transform],

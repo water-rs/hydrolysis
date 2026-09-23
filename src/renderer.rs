@@ -142,8 +142,8 @@ use waterui_form::picker::date::DatePickerConfig;
 use waterui_form::secure::{Secure as FormSecure, SecureFieldConfig};
 use waterui_graphics::color::{Color, ResolvedColor};
 
+use filtrate::{EffectContext, EffectInput, EffectOutput};
 use shaderloom::WgslModuleCache;
-use waterui_graphics::filter_view::{EffectContext, EffectInput, EffectOutput};
 use waterui_graphics::gpu_surface::GestureState;
 use waterui_graphics::view_effect::{
     ViewEffectContext, ViewEffectErased, ViewEffectInput, ViewEffectOutput,
@@ -151,7 +151,6 @@ use waterui_graphics::view_effect::{
 use waterui_graphics::{
     AppliedFilter, GpuContext, GpuFrame, GpuSurface, GradientType, PointerState, RedrawHandle,
     ResolvedGradient, ResolvedGradientStop, SceneEngine, SceneView, SharedSceneRenderer,
-    VelloScene2D,
 };
 
 use waterui_icon::SystemIcon;
@@ -177,6 +176,8 @@ use crate::gesture::GestureEngine;
 use crate::platform::{
     KeyCode, Modifiers, PointerButton, PointerKind, TextInputPurpose, TextInputState, TouchPhase,
 };
+use crate::scene::WindowScene;
+use crate::scene_renderer::WindowSceneRenderer;
 #[cfg(feature = "accessibility")]
 use crate::scroll::ScrollHandle;
 use crate::time::Instant;
@@ -211,9 +212,9 @@ pub(crate) struct ContentSizeLimits {
 /// Core hydrolysis renderer state.
 pub struct HydrolysisRenderer {
     state: HydroState,
-    vello_renderer: vello::Renderer,
-    scene: vello::Scene,
-    transient_scene: Option<vello::Scene>,
+    window_renderer: WindowSceneRenderer,
+    scene: WindowScene,
+    transient_scene: Option<WindowScene>,
     compositor: Compositor,
     hit_test: HitTestState,
     gesture_engine: GestureEngine,
@@ -361,13 +362,13 @@ impl HydrolysisRenderer {
         device: &wgpu::Device,
         options: vello::RendererOptions,
     ) -> Self {
-        let vello_renderer =
-            vello::Renderer::new(device, options).expect("failed to create hydrolysis renderer");
+        let engine = SceneEngine::for_adapter(adapter);
+        let window_renderer = WindowSceneRenderer::for_engine(engine, device, options);
         let frame_instant = Instant::now();
         Self {
             state: HydroState::default(),
-            vello_renderer,
-            scene: vello::Scene::new(),
+            window_renderer,
+            scene: WindowScene::default(),
             transient_scene: None,
             compositor: Compositor::default(),
             hit_test: HitTestState::default(),
@@ -382,7 +383,7 @@ impl HydrolysisRenderer {
             signals: FrameSignals::new(frame_instant),
             host_redraw_handle: None,
             shader_cache: Arc::new(WgslModuleCache::new()),
-            scene_renderer: Arc::new(SharedSceneRenderer::new(SceneEngine::for_adapter(adapter))),
+            scene_renderer: Arc::new(SharedSceneRenderer::new(engine)),
             lifecycle: LifecycleState::default(),
             animation_controller: AnimationController::default(),
             frame_instant,
