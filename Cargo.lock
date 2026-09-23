@@ -2921,6 +2921,7 @@ dependencies = [
  "futures",
  "futures-lite",
  "hydrolysis-m3",
+ "icu_provider",
  "image",
  "jiff",
  "js-sys",
@@ -2945,6 +2946,7 @@ dependencies = [
  "tiny_http",
  "toml",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "ui-events-winit",
  "unicode-segmentation",
@@ -3319,6 +3321,7 @@ checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
+ "log",
  "serde",
  "stable_deref_trait",
  "writeable",
