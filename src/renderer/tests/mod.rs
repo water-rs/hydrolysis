@@ -23,6 +23,8 @@ mod scroll_frames;
 mod semantic_runtime;
 mod shadow;
 mod tree;
+#[cfg(not(target_arch = "wasm32"))]
+mod window_background;
 use vello::kurbo::{Affine, BezPath, Point, Rect};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;

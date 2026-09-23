@@ -440,6 +440,7 @@ impl WinitRunner {
         let (mut platform, gpu_context) = pollster::block_on(WinitWindow::new_with_shared_gpu(
             native_window,
             self.gpu_context.as_ref(),
+            super::window_requires_transparency(&window, &self.env),
         ));
         if self.gpu_context.is_none() {
             self.gpu_context = Some(gpu_context);

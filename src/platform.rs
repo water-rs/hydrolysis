@@ -339,6 +339,13 @@ pub trait SurfaceProvider {
     fn size(&self) -> (u32, u32);
     fn format(&self) -> wgpu::TextureFormat;
     fn resize(&mut self, width: u32, height: u32);
+    /// Whether the pixels written into this surface's textures are consumed
+    /// as premultiplied-alpha. True only for an OS surface configured
+    /// `CompositeAlphaMode::PreMultiplied`; offscreen/readback targets keep
+    /// their straight-alpha bytes and stay `false`.
+    fn premultiply_alpha(&self) -> bool {
+        false
+    }
 }
 
 /// Window abstraction consumed by hydrolysis runner.
@@ -1243,26 +1250,61 @@ mod winit_impl {
     }
 
     impl WinitSurface {
+        /// The composite alpha mode a surface is configured with.
+        ///
+        /// A window the compositor must see through needs a mode whose alpha
+        /// channel reaches it — premultiplied, postmultiplied, or the
+        /// platform-inherited mode compositors honour on alpha-capable
+        /// visuals — in that preference order. An opaque window takes
+        /// whatever the surface prefers first. An adapter offering a
+        /// transparent window none of the transparency-capable modes cannot
+        /// present it at all: under an opaque composite the pixels' alpha
+        /// never reaches the compositor and the window reads as fully
+        /// transparent, which is a window-creation error naming the adapter
+        /// and the modes it reported, not a silently opaque window.
+        fn select_alpha_mode(
+            caps: &wgpu::SurfaceCapabilities,
+            requires_transparency: bool,
+            adapter_info: &wgpu::AdapterInfo,
+        ) -> wgpu::CompositeAlphaMode {
+            if !requires_transparency {
+                // An opaque window's alpha channel never reaches the
+                // compositor, so the surface's preferred mode is fine.
+                return caps.alpha_modes[0];
+            }
+            const TRANSPARENT_MODES: [wgpu::CompositeAlphaMode; 3] = [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+            ];
+            for wanted in TRANSPARENT_MODES {
+                if caps.alpha_modes.contains(&wanted) {
+                    return wanted;
+                }
+            }
+            let info = adapter_info;
+            panic!(
+                "hydrolysis winit surface: a transparent window needs a \
+                 transparency-capable composite alpha mode, but adapter {:?} \
+                 ({:?}, driver {:?} {:?}) offers only {:?} — presented pixels \
+                 would carry no alpha and the window would draw nothing. \
+                 Transparent windows require a compositing window manager and \
+                 an adapter that reports a non-opaque alpha mode.",
+                info.name, info.backend, info.driver, info.driver_info, caps.alpha_modes
+            );
+        }
+
         fn from_surface(
             surface: wgpu::Surface<'static>,
             gpu: WinitGpuContext,
             width: u32,
             height: u32,
+            requires_transparency: bool,
         ) -> Self {
             let caps = surface.get_capabilities(&gpu.adapter);
             let format = super::select_hydrolysis_surface_format(&caps);
-            let alpha_mode = caps
-                .alpha_modes
-                .iter()
-                .copied()
-                .find(|mode| {
-                    matches!(
-                        mode,
-                        wgpu::CompositeAlphaMode::PreMultiplied
-                            | wgpu::CompositeAlphaMode::PostMultiplied
-                    )
-                })
-                .unwrap_or(caps.alpha_modes[0]);
+            let alpha_mode =
+                Self::select_alpha_mode(&caps, requires_transparency, &gpu.adapter.get_info());
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -1284,6 +1326,7 @@ mod winit_impl {
         pub async fn new(
             window: Arc<NativeWindow>,
             shared_gpu: Option<&WinitGpuContext>,
+            requires_transparency: bool,
         ) -> (Self, WinitGpuContext) {
             let (gpu, surface) = match shared_gpu {
                 Some(gpu) => {
@@ -1344,7 +1387,13 @@ mod winit_impl {
 
             let size = window.inner_size();
             (
-                Self::from_surface(surface, gpu.clone(), size.width, size.height),
+                Self::from_surface(
+                    surface,
+                    gpu.clone(),
+                    size.width,
+                    size.height,
+                    requires_transparency,
+                ),
                 gpu,
             )
         }
@@ -1367,7 +1416,7 @@ mod winit_impl {
                     .create_surface_unsafe(target)
                     .expect("Hydrolysis failed to create a Metal overlay surface")
             };
-            Self::from_surface(surface, gpu.clone(), width, height)
+            Self::from_surface(surface, gpu.clone(), width, height, true)
         }
     }
 
@@ -1420,6 +1469,10 @@ mod winit_impl {
             self.config.width = width.max(1);
             self.config.height = height.max(1);
             self.surface.configure(&self.gpu.device, &self.config);
+        }
+
+        fn premultiply_alpha(&self) -> bool {
+            self.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied
         }
     }
 
@@ -1968,15 +2021,19 @@ mod winit_impl {
     }
 
     impl WinitWindow {
-        pub async fn new(window: Arc<NativeWindow>) -> Self {
-            Self::new_with_shared_gpu(window, None).await.0
+        pub async fn new(window: Arc<NativeWindow>, requires_transparency: bool) -> Self {
+            Self::new_with_shared_gpu(window, None, requires_transparency)
+                .await
+                .0
         }
 
         pub async fn new_with_shared_gpu(
             window: Arc<NativeWindow>,
             shared_gpu: Option<&WinitGpuContext>,
+            requires_transparency: bool,
         ) -> (Self, WinitGpuContext) {
-            let (surface, gpu) = WinitSurface::new(window.clone(), shared_gpu).await;
+            let (surface, gpu) =
+                WinitSurface::new(window.clone(), shared_gpu, requires_transparency).await;
             (
                 Self {
                     #[cfg(target_os = "macos")]
@@ -2711,6 +2768,79 @@ mod winit_impl {
                 let _ = map_cursor_position(&PhysicalPosition::new(120.0, 80.0), 0.0);
             });
             assert!(result.is_err());
+        }
+
+        fn caps_with_alpha_modes(
+            alpha_modes: &[wgpu::CompositeAlphaMode],
+        ) -> wgpu::SurfaceCapabilities {
+            wgpu::SurfaceCapabilities {
+                alpha_modes: alpha_modes.to_vec(),
+                ..wgpu::SurfaceCapabilities::default()
+            }
+        }
+
+        fn fake_adapter_info() -> wgpu::AdapterInfo {
+            wgpu::AdapterInfo {
+                name: "fake adapter".to_string(),
+                vendor: 0,
+                device: 0,
+                device_type: wgpu::DeviceType::Cpu,
+                device_pci_bus_id: String::new(),
+                driver: String::new(),
+                driver_info: String::new(),
+                backend: wgpu::Backend::Gl,
+                subgroup_min_size: 4,
+                subgroup_max_size: 128,
+                transient_saves_memory: false,
+            }
+        }
+
+        #[test]
+        fn a_transparent_window_gets_the_first_transparent_alpha_mode_the_surface_offers() {
+            use wgpu::CompositeAlphaMode as Mode;
+            assert_eq!(
+                super::WinitSurface::select_alpha_mode(
+                    &caps_with_alpha_modes(&[Mode::Opaque, Mode::Inherit, Mode::PreMultiplied]),
+                    true,
+                    &fake_adapter_info(),
+                ),
+                Mode::PreMultiplied
+            );
+            // X11 compositing on a 32-bit visual reports exactly this pair:
+            // with no explicit multiplied mode the inherited mode is the only
+            // one whose alpha reaches the compositor.
+            assert_eq!(
+                super::WinitSurface::select_alpha_mode(
+                    &caps_with_alpha_modes(&[Mode::Opaque, Mode::Inherit]),
+                    true,
+                    &fake_adapter_info(),
+                ),
+                Mode::Inherit
+            );
+        }
+
+        #[test]
+        fn an_opaque_window_keeps_the_surface_preferred_alpha_mode() {
+            use wgpu::CompositeAlphaMode as Mode;
+            assert_eq!(
+                super::WinitSurface::select_alpha_mode(
+                    &caps_with_alpha_modes(&[Mode::Opaque, Mode::PreMultiplied]),
+                    false,
+                    &fake_adapter_info(),
+                ),
+                Mode::Opaque
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "fake adapter")]
+        fn a_transparent_window_on_an_opaque_only_adapter_fails_at_creation() {
+            use wgpu::CompositeAlphaMode as Mode;
+            let _ = super::WinitSurface::select_alpha_mode(
+                &caps_with_alpha_modes(&[Mode::Opaque]),
+                true,
+                &fake_adapter_info(),
+            );
         }
     }
 }
