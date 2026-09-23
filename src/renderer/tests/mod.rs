@@ -1912,11 +1912,16 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
+    fn icon_button_metrics(&self, _style: ButtonStyle, _size: ButtonSize) -> ButtonMetrics {
+        ButtonMetrics::new(0.0, 0.0, 41.0, 43.0)
+    }
+
     fn draw_button_chrome(
         &self,
         _draw: &mut dyn DrawContext,
         _bounds: Rect,
         _style: ButtonStyle,
+        _icon_only: bool,
         _state: WidgetInteractionState,
     ) {
     }

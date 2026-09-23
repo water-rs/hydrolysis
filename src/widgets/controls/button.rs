@@ -26,7 +26,7 @@ use waterui_core::{AnyView, Environment, Native};
 use waterui_graphics::color::Color;
 use waterui_text::styled::StyledStr;
 
-use crate::widgets::util::{inset_rect, widget_disabled};
+use crate::widgets::util::{centered_label_rect, inset_rect, widget_disabled};
 
 /// The retained render state of a button. A `TitleOnly` label is rendered as
 /// centered styled text fresh each frame (so its reactive title stays live); any
@@ -231,6 +231,7 @@ pub(crate) fn measure_button_node(
         theme,
         render_state.config.style,
         render_state.config.size,
+        label_resolves_icon_only(&render_state.config.label, env),
         env.get::<InteractionStyle>(),
         env.get::<FloatingScope>().map(|scope| &scope.0),
     );
@@ -491,6 +492,19 @@ pub(crate) fn render_button_parts(
         let signal = widget_disabled(env);
         ctx.renderer_mut().read_signal(&signal)
     };
+    // The label's own resolved display mode selects the presentation: an
+    // icon-only button lays out at the theme's icon-button touch target and
+    // its bounds are the hit area — the theme draws the smaller icon-button
+    // container centred inside them.
+    let icon_only = label_resolves_icon_only(&state.borrow().config.label, env);
+    let metrics = button_metrics(
+        &theme,
+        style,
+        size,
+        icon_only,
+        interaction_style.as_ref(),
+        floating_style.as_ref(),
+    );
     let bounds = ctx.bounds;
     let hit_bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
@@ -502,16 +516,9 @@ pub(crate) fn render_button_parts(
     );
     if interaction_style.is_none() && floating_style.is_none() {
         let mut draw = ctx.draw_context();
-        theme.draw_button_chrome(&mut draw, bounds, style, interaction);
+        theme.draw_button_chrome(&mut draw, bounds, style, icon_only, interaction);
     }
 
-    let metrics = button_metrics(
-        &theme,
-        style,
-        size,
-        interaction_style.as_ref(),
-        floating_style.as_ref(),
-    );
     let label_bounds = inset_rect(bounds, metrics.padding_x, metrics.padding_y);
     // A degenerate padded rect (a button smaller than its padding) falls back to the
     // full bounds so the label still shows — matching the old dispatch fallback.
@@ -526,7 +533,14 @@ pub(crate) fn render_button_parts(
             // General label: a retained node sub-view re-flushed at its rect (reactive
             // content stays live through the node's own re-flush). Its semantics are
             // merged into the button's own node by `button_accessibility`, so the
-            // sub-view flushes visual-only.
+            // sub-view flushes visual-only. The label is placed centred in the
+            // content rect, so a label smaller than the chrome sits in the middle.
+            let proposal = ProposalSize::new(
+                Some(label_target.width() as f32),
+                Some(label_target.height() as f32),
+            );
+            let (label_size, _) = subview.patch_and_measure(ctx.renderer_mut(), env, proposal);
+            let label_target = centered_label_rect(label_target, label_size);
             let render_ctx = ctx.render_context();
             ctx.renderer_mut()
                 .with_suppressed_accessibility(|renderer| {
@@ -589,7 +603,7 @@ pub(crate) fn render_button_parts(
             );
         } else {
             let mut draw = ctx.draw_context();
-            theme.draw_button_state_layer(&mut draw, bounds, style, interaction);
+            theme.draw_button_state_layer(&mut draw, bounds, style, icon_only, interaction);
         }
     }
 
@@ -628,7 +642,7 @@ pub(crate) fn render_menu_parts(
             .bind_interaction_target(interaction_key, hit_bounds, env);
     {
         let mut draw = ctx.draw_context();
-        theme.draw_button_chrome(&mut draw, bounds, style, interaction);
+        theme.draw_button_chrome(&mut draw, bounds, style, false, interaction);
     }
 
     let metrics = theme.button_metrics(style, ButtonSize::default());
@@ -649,6 +663,13 @@ pub(crate) fn render_menu_parts(
             MenuLabel::View(subview) => {
                 // The trigger's semantics are merged into the menu's own node by
                 // `menu_accessibility`, so the label sub-view flushes visual-only.
+                // Like a button's label, it sits centred in the content rect.
+                let proposal = ProposalSize::new(
+                    Some(label_bounds.width() as f32),
+                    Some(label_bounds.height() as f32),
+                );
+                let (label_size, _) = subview.patch_and_measure(ctx.renderer_mut(), env, proposal);
+                let label_bounds = centered_label_rect(label_bounds, label_size);
                 let render_ctx = ctx.render_context();
                 ctx.renderer_mut()
                     .with_suppressed_accessibility(|renderer| {
@@ -667,7 +688,7 @@ pub(crate) fn render_menu_parts(
         // Hover/focus/press state layers over the menu trigger chrome.
         let interaction = local_interaction_state(interaction, ctx.hit_transform);
         let mut draw = ctx.draw_context();
-        theme.draw_button_state_layer(&mut draw, bounds, style, interaction);
+        theme.draw_button_state_layer(&mut draw, bounds, style, false, interaction);
     }
 
     let items = state.borrow().items.clone();
@@ -700,6 +721,7 @@ pub(crate) fn measure_button_intrinsic(
         theme,
         button.style,
         button.size,
+        label_resolves_icon_only(&button.label, env),
         env.get::<InteractionStyle>(),
         env.get::<FloatingScope>().map(|scope| &scope.0),
     );
@@ -771,13 +793,20 @@ fn button_metrics(
     theme: &Rc<dyn crate::engine::WidgetTheme>,
     style: ButtonStyle,
     size: ButtonSize,
+    icon_only: bool,
     interaction_style: Option<&InteractionStyle>,
     floating_style: Option<&FloatingStyle>,
 ) -> ButtonMetrics {
     interaction_style.map_or_else(
         || {
             floating_style.map_or_else(
-                || theme.button_metrics(style, size),
+                || {
+                    if icon_only {
+                        theme.icon_button_metrics(style, size)
+                    } else {
+                        theme.button_metrics(style, size)
+                    }
+                },
                 |style| {
                     ButtonMetrics::new(
                         style.content_inset_x,
@@ -873,6 +902,18 @@ fn measure_button_label_intrinsic(
 fn renders_as_plain_title(label: &Label) -> bool {
     matches!(label.display_mode_preference(), LabelDisplayMode::TitleOnly)
         && !label.has_custom_content()
+}
+
+/// Whether the label's own configuration resolves to an icon-only
+/// presentation. The label resolves its effective display mode — its
+/// preference, the `LabelDisplayMode` it inherits from the environment, and
+/// whether it carries an icon — so the chrome agrees with what the label
+/// draws without inspecting rendered children.
+pub(crate) fn label_resolves_icon_only(label: &Label, env: &Environment) -> bool {
+    matches!(
+        label.effective_display_mode(env),
+        LabelDisplayMode::IconOnly
+    )
 }
 
 fn styled_button_title(
