@@ -894,6 +894,37 @@ impl SemanticCore {
     ) {
     }
 
+    /// The topmost context-menu target that covers `point` and wholly
+    /// contains `rect`. A `.context_menu` attached to the surface at the point
+    /// — or to any ancestor covering it — registers bounds that enclose the
+    /// surface's window rect (a directly wrapping menu's bounds *are* the
+    /// surface's, both computed as `hit_transform * layout bounds`). A menu
+    /// whose bounds only overlap the surface belongs to a sibling and does not
+    /// claim its secondary press.
+    pub(crate) fn topmost_context_menu_target_enclosing(
+        &self,
+        point: vello::kurbo::Point,
+        rect: vello::kurbo::Rect,
+    ) -> Option<ContextMenuTarget> {
+        self.hit_test
+            .context_menu_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| {
+                target.bounds.contains(point)
+                    && target.bounds.x0 <= rect.x0
+                    && target.bounds.y0 <= rect.y0
+                    && target.bounds.x1 >= rect.x1
+                    && target.bounds.y1 >= rect.y1
+            })
+            .max_by(|(left_index, left), (right_index, right)| {
+                Self::target_hit_priority(left.depth, left.order, *left_index).cmp(
+                    &Self::target_hit_priority(right.depth, right.order, *right_index),
+                )
+            })
+            .map(|(_, target)| target.clone())
+    }
+
     pub(crate) fn topmost_context_menu_target_at_point(
         &self,
         point: vello::kurbo::Point,

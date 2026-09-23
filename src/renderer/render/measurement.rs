@@ -900,6 +900,29 @@ pub(crate) fn measure_text_field_intrinsic_with_label_size(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
+    measure_text_field_size_with_label_size(
+        text_field,
+        label_size,
+        state,
+        env,
+        theme,
+        ProposalSize::UNSPECIFIED,
+    )
+}
+
+/// Measures a text field's size under a concrete proposal, from a precomputed
+/// label size. The field is a `Horizontal` leaf: a finite width proposal is
+/// answered with that width, a `0` probe with the content minimum (no ideal
+/// floor), and `None` with the intrinsic width — where the theme's
+/// `min_width` applies as the ideal. Height is always the intrinsic height.
+pub(crate) fn measure_text_field_size_with_label_size(
+    text_field: &ResolvedTextFieldConfig,
+    label_size: LayoutSize,
+    state: &mut HydroState,
+    env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
+    proposal: ProposalSize,
+) -> LayoutSize {
     let metrics = theme.input_field_metrics();
     let line_limit = text_field.line_limit.map(NonZeroUsize::get);
     let prompt = text_field.prompt.content.get();
@@ -914,11 +937,26 @@ pub(crate) fn measure_text_field_intrinsic_with_label_size(
     let text_height = prompt_size.height.max(value_size.height);
     let content_width =
         f64::from(prompt_size.width.max(value_size.width)) + metrics.horizontal_inset * 2.0;
+    let label_width = f64::from(label_size.width) + metrics.horizontal_inset * 2.0;
 
-    let field_width = content_width.max(metrics.min_width);
     let field_height = measured_input_field_height(text_height, label_height, metrics);
-    let width = (f64::from(label_size.width) + metrics.horizontal_inset * 2.0).max(field_width);
+    let width = input_field_width(
+        proposal.width,
+        label_width.max(content_width.max(metrics.min_width)),
+        label_width.max(content_width),
+    );
     LayoutSize::new(width as f32, field_height as f32)
+}
+
+/// Resolves an input field's width from a proposal: a finite proposal is
+/// answered exactly, a `0` probe answers the content minimum, and `None` or
+/// an unbounded probe answers the ideal (theme `min_width` floor applied).
+fn input_field_width(proposal: Option<f32>, ideal: f64, minimum: f64) -> f64 {
+    match proposal {
+        Some(0.0) => minimum,
+        Some(width) if width.is_finite() => f64::from(width.max(0.0)),
+        _ => ideal,
+    }
 }
 
 pub(crate) fn measure_secure_field_intrinsic(
@@ -942,6 +980,28 @@ pub(crate) fn measure_secure_field_intrinsic_with_label_size(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
+    measure_secure_field_size_with_label_size(
+        secure_field,
+        label_size,
+        state,
+        env,
+        theme,
+        ProposalSize::UNSPECIFIED,
+    )
+}
+
+/// Measures a secure field's size under a concrete proposal, from a
+/// precomputed label size. Same `Horizontal`-leaf contract as the text field:
+/// a finite width proposal is answered exactly, `0` probes the content
+/// minimum, `None` the intrinsic width with the theme's `min_width` ideal.
+pub(crate) fn measure_secure_field_size_with_label_size(
+    secure_field: &SecureFieldConfig,
+    label_size: LayoutSize,
+    state: &mut HydroState,
+    env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
+    proposal: ProposalSize,
+) -> LayoutSize {
     let metrics = theme.input_field_metrics();
     let secure_len = secure_field.value.get().expose().chars().count();
     let masked = if secure_len == 0 {
@@ -951,10 +1011,14 @@ pub(crate) fn measure_secure_field_intrinsic_with_label_size(
     };
     let value_size = HydrolysisRenderer::measure_text_intrinsic_size(state, masked, env);
     let label_height = measured_input_label_height(label_size, metrics.label_height);
-    let field_width =
-        (f64::from(value_size.width) + metrics.horizontal_inset * 2.0).max(metrics.min_width);
+    let content_width = f64::from(value_size.width) + metrics.horizontal_inset * 2.0;
+    let label_width = f64::from(label_size.width) + metrics.horizontal_inset * 2.0;
     let field_height = measured_input_field_height(value_size.height, label_height, metrics);
-    let width = (f64::from(label_size.width) + metrics.horizontal_inset * 2.0).max(field_width);
+    let width = input_field_width(
+        proposal.width,
+        label_width.max(content_width.max(metrics.min_width)),
+        label_width.max(content_width),
+    );
     LayoutSize::new(width as f32, field_height as f32)
 }
 

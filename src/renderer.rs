@@ -400,6 +400,20 @@ impl SemanticCore {
     }
 }
 
+/// Pipeline-init thread count for a `vello::Renderer` on `backend`.
+///
+/// wgpu-hal's GLES device serialises every shader compile through one context
+/// lock with a ~1 s timeout, so handing Vello a parallel init pool on GL
+/// deadlocks under CPU load — a worker times out, panics, and poisons the
+/// renderer pool. GL therefore gets a single init thread; Vulkan, Metal and
+/// DX12 compile pipelines concurrently and keep full parallelism.
+pub(crate) fn vello_init_threads(backend: wgpu::Backend) -> Option<NonZeroUsize> {
+    match backend {
+        wgpu::Backend::Gl => Some(NonZeroUsize::MIN),
+        _ => std::thread::available_parallelism().ok(),
+    }
+}
+
 impl HydrolysisRenderer {
     /// A renderer for `device`, which `adapter` produced, drawing with `theme`.
     ///
@@ -420,10 +434,7 @@ impl HydrolysisRenderer {
             vello::RendererOptions {
                 use_cpu: false,
                 antialiasing_support: vello::AaSupport::area_only(),
-                // Hydrolysis is the high-end, multi-core renderer: let vello parallelize
-                // pipeline initialization across all available cores instead of pinning
-                // it to a single thread.
-                num_init_threads: std::thread::available_parallelism().ok(),
+                num_init_threads: vello_init_threads(adapter.get_info().backend),
                 pipeline_cache: None,
             },
         )
