@@ -311,3 +311,85 @@ fn compressed_button_labels_stay_on_one_line(ui: UiBuilder<Styled<hydrolysis_m3:
         "buttons disagree about line count, so a label folded: {heights:?}"
     );
 }
+
+/// A text field is a `Horizontal` leaf: inside an hstack offered 340 wide,
+/// two fields split the row instead of overflowing at the 280-pt intrinsic
+/// floor. water-rs/hydrolysis#107.
+fn text_field_row_view() -> impl View {
+    let first = Binding::container(Str::from(""));
+    let last = Binding::container(Str::from(""));
+    hstack((field("First name", &first), field("Last name", &last))).size(340.0, 60.0)
+}
+
+#[waterui::test(text_field_row_view, theme = hydrolysis_m3::Material3::defaults(), offscreen, viewport = (400, 120))]
+fn text_fields_share_a_340_row(app: &mut OffscreenApp) {
+    let first = app
+        .query()
+        .role(Role::TEXT_INPUT)
+        .label("First name")
+        .single()
+        .bounds();
+    let last = app
+        .query()
+        .role(Role::TEXT_INPUT)
+        .label("Last name")
+        .single()
+        .bounds();
+    let half = (340.0_f32 - 10.0) / 2.0;
+    assert!(
+        (first.width() - half).abs() <= 1.0 && (last.width() - half).abs() <= 1.0,
+        "each field should get about half of the row: first={first:?} last={last:?}"
+    );
+    assert!(
+        first.x() + first.width() <= last.x(),
+        "fields should share the row without overlapping: first={first:?} last={last:?}"
+    );
+    assert!(
+        last.x() + last.width() - first.x() <= 340.0,
+        "fields should stay inside the 340-wide row: first={first:?} last={last:?}"
+    );
+}
+
+/// With no width proposal on its stretch axis the field keeps its intrinsic
+/// width — the theme's ideal `min_width` (280 under Material 3), not a hard
+/// floor. A horizontal scroll is the container that measures content at
+/// `None` on the scrolling axis; a viewport narrower than 280 keeps the field
+/// at its ideal and lets it overflow into scrollable content.
+fn lone_text_field_view() -> impl View {
+    let value = Binding::container(Str::from(""));
+    scroll_horizontal(field("Field", &value))
+}
+
+#[waterui::test(lone_text_field_view, theme = hydrolysis_m3::Material3::defaults(), offscreen, viewport = (200, 120))]
+fn lone_text_field_keeps_ideal_width(app: &mut OffscreenApp) {
+    let field = app
+        .query()
+        .role(Role::TEXT_INPUT)
+        .label("Field")
+        .single()
+        .bounds();
+    assert!(
+        (field.width() - 280.0).abs() <= 1.0,
+        "an unproposed field should keep the 280-pt ideal width: {field:?}"
+    );
+}
+
+/// In a 600-wide container the field answers the proposal and fills it.
+fn text_field_in_container_view() -> impl View {
+    let value = Binding::container(Str::from(""));
+    field("Field", &value).size(600.0, 60.0)
+}
+
+#[waterui::test(text_field_in_container_view, theme = hydrolysis_m3::Material3::defaults(), offscreen, viewport = (640, 120))]
+fn text_field_fills_wide_container(app: &mut OffscreenApp) {
+    let field = app
+        .query()
+        .role(Role::TEXT_INPUT)
+        .label("Field")
+        .single()
+        .bounds();
+    assert!(
+        (field.width() - 600.0).abs() <= 1.0,
+        "a field should fill its 600-wide container: {field:?}"
+    );
+}

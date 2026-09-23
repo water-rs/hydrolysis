@@ -3,8 +3,9 @@ use crate::platform::TextInputPurpose;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RetainedSubview, TextInputModel,
     TextInputTargetRegistration, TextSelectionSlot, WidgetRenderContext, clamp_to_char_boundary,
-    measure_secure_field_intrinsic, measure_secure_field_intrinsic_with_label_size,
-    measure_text_field_intrinsic, measure_text_field_intrinsic_with_label_size, transformed_rect,
+    measure_label_intrinsic, measure_secure_field_intrinsic,
+    measure_secure_field_size_with_label_size, measure_text_field_intrinsic,
+    measure_text_field_size_with_label_size, transformed_rect,
 };
 use core::num::NonZeroUsize;
 use nami::Signal;
@@ -107,6 +108,20 @@ impl HydroNativeView for Native<ResolvedTextFieldConfig> {
     ) -> LayoutSize {
         measure_text_field_intrinsic(view.as_inner(), state, env, theme)
     }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
+        let text_field = view.as_inner();
+        let label_size = measure_label_intrinsic(&text_field.label, state, env, theme);
+        ViewDimensions::new(measure_text_field_size_with_label_size(
+            text_field, label_size, state, env, theme, proposal,
+        ))
+    }
 }
 
 impl HydroNativeView for Native<SecureFieldConfig> {
@@ -117,6 +132,25 @@ impl HydroNativeView for Native<SecureFieldConfig> {
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
         measure_secure_field_intrinsic(view.as_inner(), state, env, theme)
+    }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
+        let secure_field = view.as_inner();
+        let label_size = measure_label_intrinsic(&secure_field.label, state, env, theme);
+        ViewDimensions::new(measure_secure_field_size_with_label_size(
+            secure_field,
+            label_size,
+            state,
+            env,
+            theme,
+            proposal,
+        ))
     }
 }
 
@@ -742,18 +776,19 @@ pub(crate) fn render_secure_field_parts(
 /// [`RetainedSubview`] so layout and the floating-label render agree.
 pub(crate) fn measure_text_field_node(
     render_state: &TextFieldRenderState,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let label_size = render_state.label_view.measure_built(state, env, theme);
-    ViewDimensions::new(measure_text_field_intrinsic_with_label_size(
+    ViewDimensions::new(measure_text_field_size_with_label_size(
         &render_state.config,
         label_size,
         state,
         env,
         theme,
+        proposal,
     ))
 }
 
@@ -762,18 +797,19 @@ pub(crate) fn measure_text_field_node(
 /// already-built [`RetainedSubview`] so layout and the floating-label render agree.
 pub(crate) fn measure_secure_field_node(
     render_state: &SecureFieldRenderState,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let label_size = render_state.label_view.measure_built(state, env, theme);
-    ViewDimensions::new(measure_secure_field_intrinsic_with_label_size(
+    ViewDimensions::new(measure_secure_field_size_with_label_size(
         &render_state.config,
         label_size,
         state,
         env,
         theme,
+        proposal,
     ))
 }
 
