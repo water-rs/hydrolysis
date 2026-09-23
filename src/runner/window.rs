@@ -563,10 +563,11 @@ fn render_to_surface(
     surface: &mut dyn crate::platform::SurfaceProvider,
     clear_color: vello::peniko::Color,
     capture_snapshot: bool,
-    render: impl FnOnce(&mut HydrolysisRenderer, crate::renderer::HydrolysisRenderTarget<'_>),
+    render: impl FnOnce(&mut HydrolysisRenderer, crate::renderer::HydrolysisRenderTarget<'_>, bool),
 ) -> Result<SurfaceRenderResult, crate::platform::SurfaceError> {
     let (width, height) = surface.size();
     let format = surface.format();
+    let premultiply_alpha = surface.premultiply_alpha();
     let acquire_started_at = Instant::now();
     let frame = acquire_surface_frame(surface)?;
     let acquire = acquire_started_at.elapsed();
@@ -585,6 +586,7 @@ fn render_to_surface(
             height,
             base_color: clear_color,
         },
+        premultiply_alpha,
     );
     #[cfg(not(target_arch = "wasm32"))]
     let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
@@ -708,8 +710,13 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                     surface,
                     segment_clear_color,
                     false,
-                    |renderer, target| {
-                        renderer.render_hybrid_segment_to_surface(segment, transient_scene, target);
+                    |renderer, target, premultiply_alpha| {
+                        renderer.render_hybrid_segment_to_surface(
+                            segment,
+                            transient_scene,
+                            target,
+                            premultiply_alpha,
+                        );
                     },
                 ) {
                     Ok(rendered) => {
@@ -736,7 +743,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 runtime.platform.surface(),
                 clear_color,
                 capture_snapshot,
-                HydrolysisRenderer::render_scene_to_surface,
+                HydrolysisRenderer::render_scene_to_surface_with_alpha_mode,
             )
         };
 
@@ -746,7 +753,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
             runtime.platform.surface(),
             clear_color,
             capture_snapshot,
-            HydrolysisRenderer::render_scene_to_surface,
+            HydrolysisRenderer::render_scene_to_surface_with_alpha_mode,
         );
 
         #[cfg(hydrolysis_macos_system_webview)]
