@@ -198,6 +198,35 @@ impl HeadlessRuntime {
         )
     }
 
+    /// Same as [`Self::new`] around a caller-built [`Window`] — the mount the
+    /// window runner performs.
+    ///
+    /// `Self::new` mounts a synthetic default window, so the application's own
+    /// `Window` — its `frame`, `state`, `min_size`/`max_size`, title, and
+    /// background — is the runtime's: the viewport writes `Window::frame` at
+    /// mount and on every `Moved`/`Resized` event land on the app's binding,
+    /// and content reading the app's frame binding (a responsive layout, a
+    /// `when()` keyed on width, a size derived from the window) agrees with the
+    /// window runner for the same tree.
+    #[must_use]
+    pub fn new_with_window(
+        env: Environment,
+        window: Window,
+        width: u32,
+        height: u32,
+        style: impl crate::Style,
+    ) -> Self {
+        Self::on_gpu_context(
+            pollster::block_on(OffscreenGpuContext::new()),
+            env,
+            window,
+            width,
+            height,
+            style,
+            native_resource_fonts,
+        )
+    }
+
     /// Renders at `scale_factor` physical pixels per logical pixel.
     ///
     /// The layout is unchanged — it stays in logical units — so this only makes
