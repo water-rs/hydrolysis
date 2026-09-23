@@ -25,6 +25,8 @@ pub(super) struct ResourceFontFamilies {
     hani_korean: Vec<FamilyId>,
     arabic: Vec<FamilyId>,
     hebrew: Vec<FamilyId>,
+    thai: Vec<FamilyId>,
+    devanagari: Vec<FamilyId>,
 }
 
 fn extend_family_ids(target: &mut Vec<FamilyId>, families: &[(FamilyId, Vec<FontInfo>)]) {
@@ -63,6 +65,10 @@ impl ResourceFontFamilies {
             extend_family_ids(&mut self.arabic, families);
         } else if key.contains("notosanshebrew") {
             extend_family_ids(&mut self.hebrew, families);
+        } else if key.contains("notosansthai") {
+            extend_family_ids(&mut self.thai, families);
+        } else if key.contains("notosansdevanagari") {
+            extend_family_ids(&mut self.devanagari, families);
         }
     }
 
@@ -86,8 +92,21 @@ impl ResourceFontFamilies {
         }
         set_fallbacks(collection, (hani, "ja"), &self.hani_japanese);
         set_fallbacks(collection, (hani, "ko"), &self.hani_korean);
+        // Hangul text selects the Hang script, not Hani: the KR face a host
+        // bundles for Korean must answer that key too or it sits unreachable.
+        set_fallbacks(
+            collection,
+            Script::from_str_unchecked("Hang"),
+            &self.hani_korean,
+        );
         set_fallbacks(collection, Script::from_str_unchecked("Arab"), &self.arabic);
         set_fallbacks(collection, Script::from_str_unchecked("Hebr"), &self.hebrew);
+        set_fallbacks(collection, Script::from_str_unchecked("Thai"), &self.thai);
+        set_fallbacks(
+            collection,
+            Script::from_str_unchecked("Deva"),
+            &self.devanagari,
+        );
     }
 }
 
@@ -114,30 +133,70 @@ const TEST_FONTS: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// The faces that answer what the bundled Roboto cannot cover, subsetted from
+/// the Noto Sans families the runner ships to applications and classified
+/// through the same [`ResourceFontFamilies`] path — so a cluster Roboto has no
+/// glyph for resolves to a known face on every host, not to whatever the
+/// platform happened to install.
+///
+/// Each file is a `pyftsubset` of the corresponding full face kept to the
+/// sample strings the suite shapes: a host with no CJK, Hangul, Thai, or
+/// Devanagari faces installed — a clean CI image counts — still answers every
+/// script a `WaterUI` application is expected to draw. They are registered
+/// like any other resource font but never pinned to a generic family, which
+/// is what keeps them "not bundled" for the fallback assertions.
+#[cfg(any(test, feature = "testing"))]
+const TEST_FALLBACK_FONTS: &[(&str, &[u8])] = &[
+    (
+        "NotoSansCJKsc-Regular.otf",
+        include_bytes!("../../test-fonts/NotoSansCJKsc-Regular.otf"),
+    ),
+    (
+        "NotoSansCJKkr-Regular.otf",
+        include_bytes!("../../test-fonts/NotoSansCJKkr-Regular.otf"),
+    ),
+    (
+        "NotoSansArabic-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansArabic-Regular.ttf"),
+    ),
+    (
+        "NotoSansHebrew-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansHebrew-Regular.ttf"),
+    ),
+    (
+        "NotoSansThai-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansThai-Regular.ttf"),
+    ),
+    (
+        "NotoSansDevanagari-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansDevanagari-Regular.ttf"),
+    ),
+];
+
 /// The collection a test host shapes with: the bundled Roboto for everything it
-/// covers, the platform's own faces for everything it does not.
+/// covers, the bundled Noto subsets for everything it does not.
 ///
 /// Test text used to shape against whatever the host OS discovered first, so a
 /// layout assertion tuned on one platform's metrics failed on another's fonts.
 /// Pinning the generic families to exactly the Roboto files bundled with this
-/// crate is what fixed that, and it is why Latin and Cyrillic still measure
-/// identically on every runner: a family the collection registered itself is
-/// matched ahead of any system family of the same generic.
+/// crate is what fixed the half of that about selection: Latin and Cyrillic
+/// measure identically on every runner because a family the collection
+/// registered itself is matched ahead of any system family of the same generic.
 ///
-/// Turning system discovery off on top of that pinning did not help and cost
-/// the platform *fallback*, which is the only thing that can answer a cluster
-/// the pinned face has no glyph for. Every script outside Roboto's coverage —
-/// Han, Hangul, Arabic, Hebrew, Thai, Devanagari — therefore shaped to
-/// `.notdef` and drew as tofu, which is how the avatar gallery came to render
-/// `山田 太郎`'s monogram as two empty boxes while `Ольга Ладыженская`'s read
-/// correctly, and why no non-Latin text could be tested or reviewed by eye
-/// anywhere in the framework.
+/// The fallback half had the same disease one layer down. System discovery
+/// stays on so a cluster the pinned face has no glyph for can be answered, but
+/// the host's font set is not deterministic either — a clean Linux image
+/// carries no CJK, Hangul, Thai, or Devanagari face at all, so every script
+/// outside Roboto's coverage shaped to `.notdef` and drew as tofu, which is how
+/// the avatar gallery came to render `山田 太郎`'s monogram as two empty boxes
+/// while `Ольга Ладыженская`'s read correctly.
 ///
-/// So discovery stays on and the pinning does the deterministic half of the
-/// job by itself. Only what Roboto cannot cover reaches the platform's
-/// fallback — the same path the shipping runner's own collection takes, which
-/// is what makes a script exercised here evidence about the renderer rather
-/// than about the test host.
+/// So the test host installs the same kind of fallback an application does:
+/// [`TEST_FALLBACK_FONTS`] registers through the same `ResourceFontFamilies`
+/// classify/install path the shipping runner's own collection takes, which is
+/// what makes a script exercised here evidence about the renderer rather than
+/// about the test host. Only a cluster no bundled face maps reaches the
+/// platform — the last resort, as in the shipping runner.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) fn deterministic_test_fonts() -> parley::FontContext {
     use parley::fontique::{Blob, CollectionOptions};
@@ -154,7 +213,7 @@ pub(crate) fn deterministic_test_fonts() -> parley::FontContext {
         source_cache: parley::fontique::SourceCache::default(),
     };
     let mut resource_fonts = ResourceFontFamilies::default();
-    for (name, bytes) in TEST_FONTS {
+    for (name, bytes) in TEST_FONTS.iter().chain(TEST_FALLBACK_FONTS.iter()) {
         let families = font_cx
             .collection
             .register_fonts(Blob::new(Arc::new(*bytes)), None);
