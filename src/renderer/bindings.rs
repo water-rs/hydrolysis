@@ -131,11 +131,11 @@ impl SemanticCore {
     }
 
     /// The focused text input's accessibility node — UI focus is the text
-    /// caret's home. The caret follows the semantic tree's focus
-    /// (`accessibility.focus`, reported as `TreeUpdate::focus`): a move onto
-    /// a text input takes editing focus, and a move onto a non-text node
-    /// (or none) ends editing and clears this — exactly as a pointer press
-    /// on one does.
+    /// caret's home, deliberately separate from the semantic tree's focus
+    /// (`accessibility.focus`, reported as `TreeUpdate::focus`): the tree's
+    /// focus landing on a non-text node leaves the caret on the field it
+    /// belongs to, while a move that carries keyboard focus — traversal or
+    /// a pointer press — ends editing (#95).
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn focused_ui_node(&self) -> Option<AccessibilityNodeId> {
