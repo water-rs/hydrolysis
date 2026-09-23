@@ -17,14 +17,14 @@ const GPU_SURFACE_COMPOSITOR_SHADER: CompiledShader =
     include!(concat!(env!("OUT_DIR"), "/gpu_surface_compositor.rs"));
 
 /// Builds a fresh `vello::Renderer` for the parallel-encode pool, matching the main
-/// renderer's options (GPU-only, area AA, multi-core init).
-fn build_pooled_vello_renderer(device: &wgpu::Device) -> vello::Renderer {
+/// renderer's options (GPU-only, area AA, backend-appropriate init parallelism).
+fn build_pooled_vello_renderer(device: &wgpu::Device, backend: wgpu::Backend) -> vello::Renderer {
     vello::Renderer::new(
         device,
         vello::RendererOptions {
             use_cpu: false,
             antialiasing_support: vello::AaSupport::area_only(),
-            num_init_threads: std::thread::available_parallelism().ok(),
+            num_init_threads: crate::renderer::vello_init_threads(backend),
             pipeline_cache: None,
         },
     )
@@ -43,6 +43,7 @@ fn encode_vello_layers_parallel(
     pool: &std::sync::Mutex<Vec<vello::Renderer>>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    backend: wgpu::Backend,
     scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)>,
     width: u32,
     height: u32,
@@ -55,7 +56,7 @@ fn encode_vello_layers_parallel(
             .lock()
             .expect("hydrolysis renderer: vello renderer pool poisoned")
             .pop()
-            .unwrap_or_else(|| build_pooled_vello_renderer(device));
+            .unwrap_or_else(|| build_pooled_vello_renderer(device, backend));
 
         let params = vello::RenderParams {
             base_color: vello::peniko::Color::TRANSPARENT,
@@ -1803,6 +1804,7 @@ impl HydrolysisRenderer {
                     &self.compositor.vello_renderer_pool,
                     target.device,
                     target.queue,
+                    target.adapter.get_info().backend,
                     vello_scenes,
                     target.width,
                     target.height,
