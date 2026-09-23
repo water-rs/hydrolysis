@@ -571,10 +571,11 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
-    // `frame` drives `apply_properties` below: keep it subscribed so an app
-    // write to the binding schedules a pump instead of needing an unrelated
-    // event to wake the loop.
+    // `frame` and `state` drive `apply_properties` below: keep them
+    // subscribed so an app write to either binding schedules a pump
+    // instead of needing an unrelated event to wake the loop.
     let _ = runtime.renderer.read_signal(&runtime.window.frame);
+    let _ = runtime.renderer.read_signal(&runtime.window.state);
     runtime.platform.apply_properties(&runtime.window);
     #[cfg(feature = "winit")]
     runtime
@@ -708,6 +709,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     drain_local_tasks: &mut dyn FnMut() -> bool,
 ) -> RenderWindowResult {
     let _ = runtime.renderer.read_signal(&runtime.window.frame);
+    let _ = runtime.renderer.read_signal(&runtime.window.state);
     runtime.platform.apply_properties(&runtime.window);
     #[cfg(feature = "winit")]
     runtime
