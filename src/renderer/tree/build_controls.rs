@@ -227,13 +227,22 @@ impl RenderNode {
         Self::build_widget(state, stretch, env)
     }
 
-    /// Build a persistent picker node: retain the config (its `items`/`selection`
-    /// signals are read through `read_signal` each frame so a membership or selection
-    /// change schedules a frame). Stretch is content-sized (read from the config).
-    pub(super) fn build_picker(config: PickerConfig, env: &Environment) -> RenderNode {
+    /// Build a persistent picker node: its field label is pre-built into a
+    /// [`RetainedSubview`] (the measure path has only `&mut HydroState`, no
+    /// renderer to build on); the cloneable config drives the field +
+    /// accessibility, and its `items`/`selection` signals are read through
+    /// `read_signal` each frame so a membership or selection change schedules a
+    /// frame. Stretch is content-sized (read from the config).
+    pub(super) fn build_picker(
+        config: PickerConfig,
+        env: &Environment,
+        renderer: &mut SemanticCore,
+    ) -> RenderNode {
         use crate::widgets::controls::picker::PickerRenderState;
         let stretch = waterui_core::NativeView::stretch_axis(&config);
-        let state = Rc::new(RefCell::new(PickerRenderState::new(config)));
+        let mut state = PickerRenderState::from_config(config);
+        state.prebuild(renderer, env);
+        let state = Rc::new(RefCell::new(state));
         Self::build_widget(state, stretch, env)
     }
 
