@@ -704,7 +704,12 @@ impl GpuSurfaceNode {
     /// `Rc` (no cursor-ordered slot). Mirrors the dispatch path's
     /// [`HydrolysisRenderer::render_gpu_surface`] exactly, but with an `Owned`
     /// layer source so a per-frame re-flush re-binds the same runtime.
-    pub(crate) fn flush(&self, renderer: &mut HydrolysisRenderer, ctx: RenderContext) {
+    pub(crate) fn flush(
+        &self,
+        renderer: &mut HydrolysisRenderer,
+        ctx: RenderContext,
+        #[cfg(feature = "accessibility")] focus_node: Option<AccessibilityNodeId>,
+    ) {
         let hit_rect = transformed_rect(ctx.hit_transform, ctx.bounds);
         renderer.push_gpu_surface_layer(
             GpuSurfaceSource::Owned(Rc::clone(&self.runtime)),
@@ -721,6 +726,8 @@ impl GpuSurfaceNode {
                 ctx.bounds,
                 ctx.hit_transform,
                 Rc::clone(&self.runtime),
+                #[cfg(feature = "accessibility")]
+                focus_node,
             );
             return;
         }
@@ -971,23 +978,30 @@ pub(super) fn emit_graphics_image_accessibility(
     env: &Environment,
     default_label: Option<String>,
     default_value: Option<String>,
-) {
+    focusable: bool,
+) -> Option<AccessibilityNodeId> {
     if env
         .get::<AccessibilityHidden>()
         .is_some_and(AccessibilityHidden::is_hidden)
     {
-        return;
+        return None;
     }
     let mut node = AccessibilityNode::new(
         renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Image),
     );
+    if focusable {
+        // A surface that takes input is a keyboard-focus target like any
+        // other focusable control: assistive `Focus` requests and Tab
+        // traversal reach it through this action.
+        node.add_action(AccessibilityAction::Focus);
+    }
     if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
         node.set_label(label);
     }
     if let Some(value) = renderer.resolve_accessibility_value(env, default_value) {
         node.set_value(value);
     }
-    let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
+    renderer.register_accessibility_leaf(ctx, node, env, None)
 }
 
 #[cfg(not(feature = "accessibility"))]
@@ -997,5 +1011,6 @@ pub(super) fn emit_graphics_image_accessibility(
     _env: &Environment,
     _default_label: Option<String>,
     _default_value: Option<String>,
+    _focusable: bool,
 ) {
 }

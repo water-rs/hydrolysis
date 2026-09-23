@@ -186,6 +186,11 @@ pub(crate) struct HitTestState {
     pub(crate) active_embedded_target: Option<EmbeddedInputTarget>,
     /// The sink holding keyboard focus, kept across frames.
     pub(crate) focused_embedded_sink: Option<Rc<dyn EmbeddedInputSink>>,
+    /// The interaction identity of the surface holding embedded focus —
+    /// `None` when no surface does. Kept alongside `focused_embedded_sink`
+    /// so keyboard traversal and `.focused(binding)` writes resolve the
+    /// same owner the pointer focused.
+    pub(crate) focused_embedded_key: Option<InteractionKey>,
     /// Whether an input-method composition session is open on the focused
     /// sink, so pre-edit updates and commits form a well-formed W3C session.
     pub(crate) embedded_composing: bool,
@@ -256,6 +261,47 @@ impl HitTestState {
         self.publish_native_view_occlusion(text_inputs);
     }
 
+    /// Moves embedded focus to `index` — the single transition every
+    /// focus path (pointer press, keyboard traversal, `.focused(binding)`,
+    /// structural retirement) shares. Sends `Focus(false)` to the outgoing
+    /// sink — cancelling an open composition first — then `Focus(true)` to
+    /// the incoming one, and mirrors the move into the surfaces'
+    /// `.focused()` bindings where they exist. `None` releases focus
+    /// entirely. Returns whether the focused owner changed.
+    pub(crate) fn set_embedded_focus_index(&mut self, index: Option<usize>) -> bool {
+        let next_key = index.map(|i| self.embedded_input_targets[i].interaction_key.clone());
+        if self.focused_embedded_key == next_key {
+            return false;
+        }
+        let binding_of = |key: Option<&InteractionKey>| {
+            key.and_then(|key| {
+                self.embedded_input_targets
+                    .iter()
+                    .find(|target| &target.interaction_key == key)
+            })
+            .and_then(|target| target.focus_binding.clone())
+        };
+        if let Some(binding) = binding_of(self.focused_embedded_key.as_ref()) {
+            binding.set(false);
+        }
+        if let Some(sink) = self.focused_embedded_sink.take() {
+            if self.embedded_composing {
+                self.embedded_composing = false;
+                sink.composition_cancel();
+            }
+            sink.set_focus(false);
+        }
+        self.focused_embedded_key = next_key;
+        self.focused_embedded_sink = index.map(|i| Rc::clone(&self.embedded_input_targets[i].sink));
+        if let Some(binding) = binding_of(self.focused_embedded_key.as_ref()) {
+            binding.set(true);
+        }
+        if let Some(sink) = self.focused_embedded_sink.as_ref() {
+            sink.set_focus(true);
+        }
+        true
+    }
+
     /// Drops keyboard focus and pointer capture held by an embedded surface
     /// that is no longer in the scene.
     ///
@@ -283,12 +329,14 @@ impl HitTestState {
             .active_embedded_target
             .as_ref()
             .is_some_and(|target| !present(&target.sink));
-        if focus_left && let Some(sink) = self.focused_embedded_sink.take() {
-            if self.embedded_composing {
-                self.embedded_composing = false;
-                sink.composition_cancel();
+        if focus_left {
+            // The retired surface may hold the keyboard-focus slot — drop
+            // it or a stale `InteractionKey` would still sit there.
+            let retired_key = self.focused_embedded_key.clone();
+            self.set_embedded_focus_index(None);
+            if self.keyboard_focus == retired_key {
+                self.keyboard_focus = None;
             }
-            sink.set_focus(false);
         }
         if capture_left {
             self.active_embedded_target = None;
@@ -678,30 +726,16 @@ impl HydrolysisRenderer {
             let target = &self.text_editing.text_input_targets[index];
             SemanticCore::target_hit_priority(target.depth, target.order, index)
         });
-        if let Some((target, local_position)) =
+        if let Some((_index, target, local_position)) =
             self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
         {
-            if self
-                .hit_test
-                .focused_embedded_sink
-                .as_ref()
-                .is_none_or(|focused| focused.identity() != target.sink.identity())
-            {
-                if let Some(focused) = self
-                    .hit_test
-                    .focused_embedded_sink
-                    .replace(Rc::clone(&target.sink))
-                {
-                    if self.hit_test.embedded_composing {
-                        self.hit_test.embedded_composing = false;
-                        focused.composition_cancel();
-                    }
-                    focused.set_focus(false);
-                }
-                target.sink.set_focus(true);
-                self.set_focused_text_input(None);
-                self.set_keyboard_focus(None, false);
-            }
+            // A press on a surface focuses it through the keyboard-focus
+            // machinery — the same path Tab traversal and `.focused(binding)`
+            // take — not a parallel one: keyboard focus lands on the
+            // surface's own interaction identity, which drives the
+            // `Focus(true)`/`Focus(false)` sink transition.
+            self.set_keyboard_focus(Some(target.interaction_key.clone()), false);
+            self.set_focused_text_input(None);
             target.sink.pointer_move(local_position);
             // A secondary press still focuses the surface, but a context menu
             // enclosing it claims the button: the menu's actions act on the
@@ -734,12 +768,11 @@ impl HydrolysisRenderer {
             self.hit_test.active_embedded_target = Some(target);
             return true;
         }
-        if let Some(focused) = self.hit_test.focused_embedded_sink.take() {
-            if self.hit_test.embedded_composing {
-                self.hit_test.embedded_composing = false;
-                focused.composition_cancel();
-            }
-            focused.set_focus(false);
+        if self.hit_test.focused_embedded_sink.is_some() {
+            // The press landed off every surface: drop the surface's focus
+            // through the shared path — its sink gets `Focus(false)` and the
+            // surface's keyboard-focus slot clears with it.
+            self.set_keyboard_focus(None, false);
         }
         let focus_wins = matches!(
             (focused_priority, top_pointer_priority),
@@ -1136,6 +1169,9 @@ struct KeyboardFocusCandidate {
     #[cfg(feature = "accessibility")]
     node: AccessibilityNodeId,
     text_input: Option<usize>,
+    /// The candidate's index in `embedded_input_targets`, when it names an
+    /// input surface — the keyboard-focus slot such a surface occupies.
+    embedded: Option<usize>,
     /// Emission order — only consulted when the candidate list itself is not
     /// already in tree order (the pointer/text-input path).
     #[cfg(not(feature = "accessibility"))]
@@ -1158,10 +1194,17 @@ impl SemanticCore {
                     .find(|target| &target.interaction_key == key)
                     .and_then(|target| target.accessibility_node_id)
             })
+            .or_else(|| {
+                self.hit_test
+                    .embedded_input_targets
+                    .iter()
+                    .find(|target| &target.interaction_key == key)
+                    .and_then(|target| target.accessibility_node_id)
+            })
     }
 
-    /// The interaction identity behind `node` — the press slot or text-input
-    /// target the widget linked its emitted node to.
+    /// The interaction identity behind `node` — the press slot, text-input
+    /// target or embedded surface the widget linked its emitted node to.
     #[cfg(feature = "accessibility")]
     fn focus_key_for_node(&self, node: AccessibilityNodeId) -> Option<InteractionKey> {
         self.accessibility
@@ -1172,6 +1215,13 @@ impl SemanticCore {
             .or_else(|| {
                 self.text_editing
                     .text_input_targets
+                    .iter()
+                    .find(|target| target.accessibility_node_id == Some(node))
+                    .map(|target| target.interaction_key.clone())
+            })
+            .or_else(|| {
+                self.hit_test
+                    .embedded_input_targets
                     .iter()
                     .find(|target| target.accessibility_node_id == Some(node))
                     .map(|target| target.interaction_key.clone())
@@ -1199,7 +1249,9 @@ impl SemanticCore {
                 .iter()
                 .position(|target| target.accessibility_node_id == Some(node))
         });
+        let embedded = node.and_then(|node| self.embedded_index_for_node(node));
         let mut changed = self.set_keyboard_focus_impl(key, node, visible);
+        changed |= self.hit_test.set_embedded_focus_index(embedded);
         changed |= self.set_focused_text_input(text_input);
         changed
     }
@@ -1232,12 +1284,16 @@ impl SemanticCore {
                 .iter()
                 .position(|target| &target.interaction_key == key)
         });
+        let embedded = focus
+            .as_ref()
+            .and_then(|key| self.embedded_index_for_key(key));
         let mut changed = self.set_keyboard_focus_impl(
             focus,
             #[cfg(feature = "accessibility")]
             node,
             visible,
         );
+        changed |= self.hit_test.set_embedded_focus_index(embedded);
         // This setter claims the caret only for a text-input key. Ending
         // editing is the caller's decision — traversal and pointer presses
         // clear it through `set_focused_text_input(None)`.
@@ -1292,6 +1348,18 @@ impl SemanticCore {
                     });
                 }
                 self.accessibility.focus = node.unwrap_or(ACCESSIBILITY_ROOT_NODE_ID);
+            }
+            if self.hit_test.keyboard_focus_binding.is_none() {
+                self.hit_test.keyboard_focus_binding = self
+                    .hit_test
+                    .keyboard_focus
+                    .as_ref()
+                    .and_then(|focused| self.embedded_index_for_key(focused))
+                    .and_then(|index| {
+                        self.hit_test.embedded_input_targets[index]
+                            .focus_binding
+                            .clone()
+                    });
             }
             if let Some(binding) = self.hit_test.keyboard_focus_binding.as_ref() {
                 binding.set(true);
@@ -1360,10 +1428,12 @@ impl SemanticCore {
                         return None;
                     }
                 }
+                let embedded = self.embedded_index_for_node(node_id);
                 Some(KeyboardFocusCandidate {
                     key,
                     node: node_id,
                     text_input,
+                    embedded,
                 })
             })
             .collect()
@@ -1397,6 +1467,7 @@ impl SemanticCore {
             candidates.push(KeyboardFocusCandidate {
                 key: Some(slot.key.clone()),
                 text_input: None,
+                embedded: None,
                 order: target.order,
             });
         }
@@ -1411,6 +1482,22 @@ impl SemanticCore {
             candidates.push(KeyboardFocusCandidate {
                 key: Some(target.interaction_key.clone()),
                 text_input: Some(index),
+                embedded: None,
+                order: target.order,
+            });
+        }
+        for (index, target) in self.hit_test.embedded_input_targets.iter().enumerate() {
+            if modal_active
+                || candidates
+                    .iter()
+                    .any(|candidate| candidate.key.as_ref() == Some(&target.interaction_key))
+            {
+                continue;
+            }
+            candidates.push(KeyboardFocusCandidate {
+                key: Some(target.interaction_key.clone()),
+                text_input: None,
+                embedded: Some(index),
                 order: target.order,
             });
         }
@@ -1450,14 +1537,20 @@ impl SemanticCore {
         let candidate = &candidates[next];
         let text_input = candidate.text_input;
         #[cfg(feature = "accessibility")]
+        let embedded = candidate.embedded;
+        #[cfg(feature = "accessibility")]
         let changed =
             self.set_keyboard_focus_impl(candidate.key.clone(), Some(candidate.node), true);
         #[cfg(not(feature = "accessibility"))]
         let changed = self.set_keyboard_focus(candidate.key.clone(), true);
+        let mut changed = changed;
+        #[cfg(feature = "accessibility")]
+        {
+            changed |= self.hit_test.set_embedded_focus_index(embedded);
+        }
         // The caret follows keyboard focus: traversal onto a field focuses
         // it for editing, and a non-text candidate ends editing exactly as
         // a pointer press on one does.
-        let mut changed = changed;
         changed |= self.set_focused_text_input(text_input);
         changed
     }
@@ -1499,8 +1592,12 @@ impl SemanticCore {
                 return true;
             }
         }
+        // Tab traversal, including the Ctrl-modified chord: Ctrl+Tab is
+        // the way keyboard focus leaves an input surface that consumes
+        // plain Tab as input (GTK's text-view convention), so it traverses
+        // everywhere. Alt and Super stay reserved for the window system.
         if matches!(key, KeyCode::Named(value) if value == "Tab")
-            && !(modifiers.control || modifiers.alt || modifiers.super_key)
+            && !(modifiers.alt || modifiers.super_key)
         {
             return self.move_keyboard_focus(modifiers.shift);
         }
