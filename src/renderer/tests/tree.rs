@@ -2,8 +2,8 @@
 
 use super::{MinimalTestTheme, test_environment, test_renderer};
 use crate::renderer::{ContainerNode, RenderContext, RenderNode, TextNode};
+use core::cell::Cell;
 use nami::Computed;
-#[cfg(feature = "accessibility")]
 use std::rc::Rc;
 use vello::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
@@ -51,6 +51,7 @@ fn render_node_container_lays_out_and_flushes_text() {
         #[cfg(feature = "accessibility")]
         accessibility_child_env: None,
         placed: Vec::new(),
+        layout_dirty: Rc::new(Cell::new(false)),
         _guards: Vec::new(),
     }));
 
@@ -109,6 +110,7 @@ fn geometry_static_flush_reuses_cached_placement() {
         #[cfg(feature = "accessibility")]
         accessibility_child_env: None,
         placed: Vec::new(),
+        layout_dirty: Rc::new(Cell::new(false)),
         _guards: Vec::new(),
     }));
 

@@ -226,6 +226,55 @@ fn retained_scene_capture_preserves_proposal_and_viewport_boundaries() {
     renderer.pop_lazy_viewport("test outer viewport");
 }
 
+/// A `FixedContainer` inside a `RetainedSubview` must re-run `place` when one of
+/// its layout signals invalidates — even when the slot's rect and proposal are
+/// unchanged — or the constraint latched at mount is the only one it ever sees
+/// (water-rs/waterui#1214).
+#[test]
+fn retained_subview_relayouts_when_a_layout_signal_invalidates() {
+    use crate::renderer::{RenderContext, tree::RetainedSubview};
+    use vello::kurbo::{Affine, Rect as SceneRect};
+    use waterui_layout::frame::Frame;
+
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let max_width = nami::Binding::container(120.0f32);
+    let constraint = max_width.clone();
+    let trace = Rc::new(RefCell::new(Vec::new()));
+    let mut retained = RetainedSubview::new(AnyView::new(
+        Frame::new(ProbeContent {
+            vertical: false,
+            trace: Rc::clone(&trace),
+            builds: Rc::new(Cell::new(0)),
+        })
+        .max_width(constraint),
+    ));
+    let rect = SceneRect::new(0.0, 0.0, 800.0, 600.0);
+    let ctx = RenderContext::with_transforms(rect, Affine::IDENTITY, Affine::IDENTITY);
+    let proposal = ProposalSize::new(Some(800.0), Some(600.0));
+    retained.flush_in_rect(&mut renderer, ctx, &env, proposal, rect);
+    assert_eq!(
+        trace.borrow().last().expect("mount places").proposal.width,
+        Some(120.0)
+    );
+    max_width.set(400.0);
+    assert!(
+        renderer.has_patch_request(),
+        "the constraint signal must still schedule a refresh"
+    );
+    retained.flush_in_rect(&mut renderer, ctx, &env, proposal, rect);
+    assert_eq!(
+        trace
+            .borrow()
+            .last()
+            .expect("a layout-signal change must re-place")
+            .proposal
+            .width,
+        Some(400.0),
+        "max_width 120 → 400 must re-place the retained subtree at the same rect"
+    );
+}
+
 #[test]
 fn scroll_preserves_its_unconstrained_content_axis() {
     let env = test_environment();
