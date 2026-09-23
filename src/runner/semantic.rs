@@ -48,7 +48,10 @@ impl SemanticWindow {
         let mut core = SemanticCore::new(Instant::now());
         seed_core(&mut core, fonts);
         #[cfg(feature = "accessibility")]
-        core.use_semantic_keyboard_activation();
+        {
+            core.use_semantic_keyboard_activation();
+            core.use_semantic_walk();
+        }
         Self {
             window,
             core,

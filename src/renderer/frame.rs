@@ -80,6 +80,18 @@ impl SemanticCore {
         if !focus_is_live {
             self.set_focused_text_input_key(None);
         }
+        // The semantic focus node must still be emitted and hittable: a node
+        // that went hidden or disabled — itself or through an ancestor —
+        // releases focus rather than keeping it on an inert view.
+        #[cfg(feature = "accessibility")]
+        {
+            if !self
+                .keyboard_focus_node()
+                .is_none_or(|node| self.emitted_node_is_live(node))
+            {
+                self.set_keyboard_focus_node(None, false);
+            }
+        }
         let keyboard_focus_is_live =
             self.hit_test.keyboard_focus.as_ref().is_none_or(|focused| {
                 self.hit_test.pointer_targets.iter().any(|target| {
@@ -90,19 +102,30 @@ impl SemanticCore {
                             .is_some_and(|slot| &slot.key == focused)
                 }) || self.text_editing.text_input_targets.iter().any(|target| {
                     (!modal_active || target.modal) && &target.interaction_key == focused
-                }) || {
-                    // A key resolved through the semantic focus link stays
-                    // live while its node emits — the semantic runtime
-                    // registers no pointer targets at all.
-                    #[cfg(feature = "accessibility")]
-                    {
-                        self.focus_node_for_key(focused).is_some()
+                }) || self
+                    .hit_test
+                    .embedded_input_targets
+                    .iter()
+                    .any(|target| &target.interaction_key == focused)
+                    || {
+                        // A key resolved through the semantic focus link stays
+                        // live while its node emits — the semantic walk emits
+                        // no pointer machinery to back a key. In the rendered
+                        // runtime a key backed by no target is dead: its widget
+                        // went non-hittable and the emitted node cannot
+                        // resurrect it.
+                        #[cfg(feature = "accessibility")]
+                        {
+                            self.semantic_walk
+                                && self
+                                    .focus_node_for_key(focused)
+                                    .is_some_and(|node| self.emitted_node_is_live(node))
+                        }
+                        #[cfg(not(feature = "accessibility"))]
+                        {
+                            false
+                        }
                     }
-                    #[cfg(not(feature = "accessibility"))]
-                    {
-                        false
-                    }
-                }
             });
         if !keyboard_focus_is_live {
             self.set_keyboard_focus(None, false);
@@ -115,6 +138,16 @@ impl SemanticCore {
         if !selection_drag_is_live {
             self.text_editing.active_text_selection_drag = None;
         }
+    }
+
+    /// Whether `node` was emitted this frame and still accepts focus: not
+    /// hidden and not disabled, itself or through an ancestor's state.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn emitted_node_is_live(&self, node: AccessibilityNodeId) -> bool {
+        self.accessibility
+            .nodes
+            .iter()
+            .any(|(id, emitted)| *id == node && !emitted.is_hidden() && !emitted.is_disabled())
     }
 
     /// The shared frame-trigger handle for closures that outlive a borrow of
