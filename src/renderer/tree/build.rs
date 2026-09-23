@@ -575,7 +575,7 @@ impl RenderNode {
         };
         let view = match view.downcast::<Native<PickerConfig>>() {
             Ok(picker) => {
-                return RenderNode::build_picker((*picker).into_inner(), env);
+                return RenderNode::build_picker((*picker).into_inner(), env, renderer);
             }
             Err(view) => view,
         };
