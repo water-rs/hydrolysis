@@ -45,6 +45,14 @@ pub(super) struct RuntimeWindow<P: PlatformWindow> {
     /// Last display refresh rate (Hz) observed from the platform, used to detect changes
     /// and re-derive the diagnostics frame budget. `None` until first observed.
     pub(super) refresh_rate_hz: Option<f64>,
+    /// The (min, max) inner-size limits most recently pushed to the platform
+    /// window. Only a change in them may move the window — an unchanged
+    /// re-measure leaves the user's size untouched — so `None` until the
+    /// first apply has run.
+    pub(super) applied_size_limits: Option<(
+        Option<waterui_core::layout::Size>,
+        Option<waterui_core::layout::Size>,
+    )>,
 }
 
 impl<P: PlatformWindow> RuntimeWindow<P> {
@@ -65,6 +73,7 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
             pointer_position: None,
             render_diagnostics: RenderDiagnostics::new(render_diagnostics_config),
             refresh_rate_hz: None,
+            applied_size_limits: None,
         }
     }
 
@@ -79,15 +88,17 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
     }
 }
 
-/// Applies the window's effective content-size limits to the platform window:
-/// the explicit `Window::min_size`/`max_size` signals when set (read through the
-/// renderer so a change schedules a frame), with the content's measured layout
-/// limits as the defaults.
-/// Push this frame's window size limits to the platform window.
+/// Applies the window's effective inner-size limits to the platform window:
+/// the explicit `Window::min_size`/`max_size` signals when set (read through
+/// the renderer so a change schedules a frame). The minimum defaults to the
+/// content's measured minimum; the maximum stays unbounded unless the app
+/// pins one — content never contributes one, since content that does not
+/// stretch on an axis is laid out inside a larger offer per the layout spec
+/// rather than capping the window.
 ///
-/// Content-derived limits cost four whole-tree measure passes, so they are only
-/// measured when the answer will be used: never for a window that does not act
-/// on limits at all, and never when the app has pinned both axes explicitly.
+/// The content probe costs a whole-tree measure pass, so it is only taken
+/// when the answer will be used: never for a window that does not act on
+/// limits at all, and never when the app pins the minimum itself.
 pub(super) fn apply_window_size_limits<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
@@ -99,20 +110,86 @@ pub(super) fn apply_window_size_limits<P: PlatformWindow>(
         .window
         .min_size
         .clone()
-        .map(|signal| runtime.renderer.read_signal(&signal));
+        .map(|signal| validated_min_size(runtime.renderer.read_signal(&signal)));
     let explicit_max = runtime
         .window
         .max_size
         .clone()
-        .map(|signal| runtime.renderer.read_signal(&signal));
-    let content_limits = if explicit_min.is_some() && explicit_max.is_some() {
-        None
-    } else {
-        runtime.renderer.measure_content_size_limits(env)
+        .map(|signal| validated_max_size(runtime.renderer.read_signal(&signal)));
+    let min = match explicit_min {
+        Some(min) => Some(min),
+        None => runtime.renderer.measure_content_minimum(env),
     };
-    let min = explicit_min.or_else(|| content_limits.map(|limits| limits.minimum));
-    let max = explicit_max.or_else(|| content_limits.and_then(|limits| limits.maximum));
+    let max = explicit_max;
+    // A limit apply never moves the window onto the content's size — installing
+    // or re-installing limits only constrains the sizes it can take. The size
+    // the user settled on survives a re-measure: the window is clamped into
+    // the new limits only when the applied limits themselves changed, and only
+    // on the axes that fell outside them. The first apply installs limits on
+    // the geometry the window was created with, untouched.
+    let limits = (min, max);
+    let limits_changed = runtime
+        .applied_size_limits
+        .is_some_and(|applied| applied != limits);
+    runtime.applied_size_limits = Some(limits);
     runtime.platform.set_size_limits(min, max);
+    if limits_changed {
+        let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
+        let clamped = clamp_window_size(*frame.size(), min, max);
+        if clamped != *frame.size() {
+            runtime
+                .window
+                .frame
+                .set(waterui_core::layout::Rect::new(frame.origin(), clamped));
+        }
+    }
+}
+
+/// Asserts an app-pinned `Window::min_size` is finite on both axes — a NaN
+/// or infinite minimum is a programming error, not a bound to repair.
+fn validated_min_size(size: waterui_core::layout::Size) -> waterui_core::layout::Size {
+    for (axis, value) in [("width", size.width), ("height", size.height)] {
+        assert!(
+            value.is_finite(),
+            "hydrolysis runner: Window::min_size.{axis} must be finite, got {value}"
+        );
+    }
+    size
+}
+
+/// Asserts an app-pinned `Window::max_size` component is finite or `+∞` —
+/// the explicit per-axis "unbounded" an app writes to leave one side open.
+/// Any other non-finite value is a programming error.
+fn validated_max_size(size: waterui_core::layout::Size) -> waterui_core::layout::Size {
+    for (axis, value) in [("width", size.width), ("height", size.height)] {
+        assert!(
+            value.is_finite() || value == f32::INFINITY,
+            "hydrolysis runner: Window::max_size.{axis} must be finite or +inf for an unbounded axis, got {value}"
+        );
+    }
+    size
+}
+
+/// Clamps a window size into the new limits, axis by axis. A size already
+/// inside the limits passes through untouched — a re-measure keeps the size
+/// the user set — and only an out-of-bounds axis moves, to the nearer bound.
+pub(super) fn clamp_window_size(
+    size: waterui_core::layout::Size,
+    min: Option<waterui_core::layout::Size>,
+    max: Option<waterui_core::layout::Size>,
+) -> waterui_core::layout::Size {
+    waterui_core::layout::Size::new(
+        clamp_axis(size.width, min.map(|s| s.width), max.map(|s| s.width)),
+        clamp_axis(size.height, min.map(|s| s.height), max.map(|s| s.height)),
+    )
+}
+
+/// Every input is already validated by then: a `+∞` max component is the
+/// app's explicit per-axis unbounded, passing through as the high bound and
+/// leaving the axis uncapped.
+fn clamp_axis(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let lo = min.unwrap_or(0.0);
+    value.clamp(lo, max.unwrap_or(f32::INFINITY).max(lo))
 }
 
 pub(super) fn schedule_animation_update<P: PlatformWindow>(
@@ -930,9 +1007,10 @@ pub(super) fn handle_input_events<P: PlatformWindow>(
 pub(super) fn runtime_window_origin<P: PlatformWindow>(
     runtime: &RuntimeWindow<P>,
 ) -> HydrolysisWindowOrigin {
+    let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
     HydrolysisWindowOrigin {
-        x: runtime.window.frame.get().x(),
-        y: runtime.window.frame.get().y(),
+        x: frame.x(),
+        y: frame.y(),
     }
 }
 
@@ -1019,14 +1097,14 @@ where
                 should_close = true;
             }
             InputEvent::Moved { x, y } => {
-                let frame = runtime.window.frame.get();
+                let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
                 runtime.window.frame.set(waterui_core::layout::Rect::new(
                     waterui_core::layout::Point::new(x, y),
                     *frame.size(),
                 ));
             }
             InputEvent::Resize { width, height } => {
-                let frame = runtime.window.frame.get();
+                let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
                 let logical_width =
                     physical_to_logical_dimension(width, runtime.platform.scale_factor());
                 let logical_height =

@@ -377,7 +377,7 @@ impl HeadlessRuntime {
     }
 
     fn create_popup_runtime(&self, window: Window) -> RuntimeWindow<HeadlessPlatformWindow> {
-        let frame = window.frame.get();
+        let frame = crate::platform::validated_window_frame(window.frame.get());
         let width = frame.width().max(1.0) as u32;
         let height = frame.height().max(1.0) as u32;
         let mut platform = HeadlessPlatformWindow::on_context(
@@ -624,7 +624,11 @@ impl HeadlessRuntime {
                     .and_then(|result| result.snapshot.as_mut()),
                 popup_result.snapshot,
             ) {
-                composite_popup_snapshot(snapshot, &popup_snapshot, popup.window.frame.get());
+                composite_popup_snapshot(
+                    snapshot,
+                    &popup_snapshot,
+                    crate::platform::validated_window_frame(popup.window.frame.get()),
+                );
             }
         }
         let executor_after_started_at = Instant::now();

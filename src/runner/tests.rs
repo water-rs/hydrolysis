@@ -1,8 +1,8 @@
 use super::headless::HeadlessPlatformWindow;
 use super::{
     FrameMode, RenderDiagnosticsConfig, RuntimeWindow, acquire_surface_frame, advance_runtime,
-    handle_input_events, pump_window_semantics, render_window, schedule_animation_update,
-    schedule_redraw_or_refresh, surface_error_requires_reconfigure,
+    clamp_window_size, handle_input_events, pump_window_semantics, render_window,
+    schedule_animation_update, schedule_redraw_or_refresh, surface_error_requires_reconfigure,
 };
 use crate::platform::{
     InputEvent, OffscreenSurface, PlatformWindow as _, SurfaceError, SurfaceFrame, SurfaceProvider,
@@ -12,9 +12,9 @@ use crate::renderer::{HydrolysisRenderer, InteractionKey};
 use core::time::Duration;
 use std::rc::Rc;
 use std::time::Instant;
-use waterui::ViewExt as _;
 use waterui::component::list::{List, ListItem};
 use waterui::window::{Window, WindowState};
+use waterui::{Binding, ViewExt as _};
 use waterui_backend_core::widget::TextCaretMotion;
 use waterui_core::id::SelfId;
 use waterui_core::{AnyView, Environment, binding};
@@ -149,15 +149,16 @@ fn text_caret_tick_wakes_redraw_without_layout_rebuild() {
 }
 
 /// The window's effective size limits reach the platform: the content's
-/// measured minimum and maximum are the defaults, and explicit limits override
-/// them.
+/// measured minimum is the default, the maximum stays unbounded unless the
+/// app pins one, and explicit limits override both.
 #[test]
 fn window_size_limits_reach_the_platform_window() {
     use waterui_core::layout::Size;
     use waterui_layout::frame::Frame;
 
-    // Content with hard limits must pass both ends of the layout negotiation to
-    // the platform window.
+    // Content with finite bounds declares no stretch axis, so the measured
+    // minimum reaches the platform while the maximum stays open — the window
+    // resizes and maximizes with the content laid out inside it.
     let content = || {
         Frame::new(())
             .min_width(200.0)
@@ -174,9 +175,9 @@ fn window_size_limits_reach_the_platform_window() {
         .applied_size_limits()
         .expect("runner must apply size limits on the pump");
     assert_eq!(min, Some(Size::new(200.0, 100.0)));
-    assert_eq!(max, Some(Size::new(640.0, 480.0)));
+    assert_eq!(max, None);
 
-    // Explicit limits override the derived minimum.
+    // Explicit limits win over the content-derived ones on both axes.
     let window = Window::new("", binding(WindowState::Normal), content)
         .min_size(Size::new(300.0, 150.0))
         .max_size(Size::new(640.0, 480.0));
@@ -188,6 +189,265 @@ fn window_size_limits_reach_the_platform_window() {
         .expect("runner must apply size limits on the pump");
     assert_eq!(min, Some(Size::new(300.0, 150.0)));
     assert_eq!(max, Some(Size::new(640.0, 480.0)));
+}
+
+/// Clamping only moves an axis that falls outside the new limits, to the
+/// nearer bound; a size inside the limits passes through untouched.
+#[test]
+fn clamp_window_size_only_moves_out_of_bounds_axes() {
+    use waterui_core::layout::Size;
+
+    let min = Some(Size::new(200.0, 100.0));
+    let max = Some(Size::new(640.0, 480.0));
+
+    // Inside the limits: untouched — a re-measure keeps the user's size.
+    assert_eq!(
+        clamp_window_size(Size::new(400.0, 300.0), min, max),
+        Size::new(400.0, 300.0)
+    );
+    // Below the minimum: lifted to it.
+    assert_eq!(
+        clamp_window_size(Size::new(50.0, 300.0), min, max),
+        Size::new(200.0, 300.0)
+    );
+    // Above the maximum: pulled down to it.
+    assert_eq!(
+        clamp_window_size(Size::new(800.0, 300.0), min, max),
+        Size::new(640.0, 300.0)
+    );
+    // Out of bounds on one axis only: the other axis passes through.
+    assert_eq!(
+        clamp_window_size(Size::new(50.0, 700.0), min, max),
+        Size::new(200.0, 480.0)
+    );
+    // An inverted range floors the maximum at the minimum rather than
+    // reporting an empty box.
+    assert_eq!(
+        clamp_window_size(
+            Size::new(400.0, 300.0),
+            Some(Size::new(700.0, 100.0)),
+            Some(Size::new(640.0, 480.0)),
+        ),
+        Size::new(700.0, 300.0)
+    );
+}
+
+/// A root stretching on one axis — a text field, a row with a `Spacer`, a
+/// frame pinned infinite on one side — leaves the window maximum unbounded
+/// on both axes: the axis it does not claim is laid out inside a larger
+/// offer per the layout spec, not capped to a measurement.
+#[test]
+fn stretch_axis_content_leaves_the_window_maximum_unbounded() {
+    use waterui_layout::frame::Frame;
+
+    let window = Window::new("", binding(WindowState::Normal), || {
+        Frame::new(().size(100.0, 50.0)).max_width(f32::INFINITY)
+    });
+    let mut runtime = runtime_window_for(window);
+    let _ = super::pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+    let (min, max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert!(min.is_some());
+    assert_eq!(
+        max, None,
+        "a stretching root applies no window maximum on either axis"
+    );
+}
+
+/// An app-pinned maximum may leave one axis unbounded explicitly: a `+∞`
+/// component inside `Window::max_size` binds only the other axis — a window
+/// past the bound clamps on that axis and keeps its size on the open one.
+#[test]
+fn an_infinite_max_size_component_leaves_that_axis_unbounded() {
+    use waterui_core::layout::Size;
+
+    let max = binding(Size::new(640.0, 480.0));
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .max_size(max.clone());
+    let mut runtime = runtime_window_for(window);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    // The user stretches the window past the pinned maximum.
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 900,
+        height: 700,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(*runtime.window.frame.get().size(), Size::new(900.0, 700.0));
+
+    max.set(Size::new(500.0, f32::INFINITY));
+    let _ = pump_window_semantics(&mut runtime, &env);
+    let (_, applied_max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert_eq!(applied_max, Some(Size::new(500.0, f32::INFINITY)));
+    assert_eq!(
+        *runtime.window.frame.get().size(),
+        Size::new(500.0, 700.0),
+        "the bounded axis clamps while the +∞ axis keeps the user size"
+    );
+}
+
+/// A NaN in the app's `frame` binding is a programming error: the runner
+/// panics at the read, naming the field and the value, rather than quietly
+/// repairing it deeper in the geometry path.
+#[test]
+#[should_panic(expected = "Window::frame.width must be finite, got NaN")]
+fn a_nan_frame_panics_naming_the_field_and_value() {
+    use waterui_core::layout::{Point, Rect, Size};
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0));
+    window
+        .frame
+        .set(Rect::new(Point::new(0.0, 0.0), Size::new(f32::NAN, 300.0)));
+    let _ = runtime_window_for(window);
+}
+
+/// The same trust boundary applies to the explicit size limits: a NaN
+/// `min_size` panics at the read naming the field.
+#[test]
+#[should_panic(expected = "Window::min_size.width must be finite, got NaN")]
+fn a_nan_min_size_panics_naming_the_field_and_value() {
+    use waterui_core::layout::Size;
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .min_size(Size::new(f32::NAN, 100.0));
+    let mut runtime = runtime_window_for(window);
+    let _ = pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+}
+
+/// `max_size` accepts `+∞` per axis but nothing else non-finite.
+#[test]
+#[should_panic(
+    expected = "Window::max_size.height must be finite or +inf for an unbounded axis, got NaN"
+)]
+fn a_nan_max_size_panics_naming_the_field_and_value() {
+    use waterui_core::layout::Size;
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .max_size(Size::new(640.0, f32::NAN));
+    let mut runtime = runtime_window_for(window);
+    let _ = pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+}
+
+/// A re-measure on a screen change updates the limits only: a user-set size
+/// inside the new limits is left alone.
+#[test]
+fn a_remeasure_preserves_the_user_size_inside_the_new_limits() {
+    use waterui_core::dynamic::watch;
+    use waterui_core::layout::Size;
+
+    let main = binding(false);
+    let main_for_view = main.clone();
+    let window = Window::new("", binding(WindowState::Normal), move || {
+        let main = main_for_view.clone();
+        watch(main, |main| {
+            ().size(
+                if main { 700.0 } else { 200.0 },
+                if main { 500.0 } else { 100.0 },
+            )
+        })
+    });
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    // The user settles on a size beyond the loading screen's box.
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 900,
+        height: 700,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(*runtime.window.frame.get().size(), Size::new(900.0, 700.0));
+
+    // The main screen re-measures: only the limits move.
+    main.set(true);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    let (min, max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert_eq!(min, Some(Size::new(700.0, 500.0)));
+    assert_eq!(max, None);
+    assert_eq!(
+        *runtime.window.frame.get().size(),
+        Size::new(900.0, 700.0),
+        "a re-measure must not override a user size inside the new limits"
+    );
+}
+
+/// A re-measure clamps a user size that falls outside the new limits.
+#[test]
+fn a_remeasure_clamps_the_window_size_into_the_new_limits() {
+    use waterui_core::dynamic::watch;
+    use waterui_core::layout::Size;
+
+    let main = binding(false);
+    let main_for_view = main.clone();
+    let window = Window::new("", binding(WindowState::Normal), move || {
+        let main = main_for_view.clone();
+        watch(main, |main| {
+            ().size(
+                if main { 700.0 } else { 200.0 },
+                if main { 500.0 } else { 100.0 },
+            )
+        })
+    });
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 400,
+        height: 300,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(*runtime.window.frame.get().size(), Size::new(400.0, 300.0));
+
+    // The new screen's minimum is larger than the user size: the window clamps
+    // into the new limits — and only the size moves, not the layout semantics.
+    main.set(true);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(
+        *runtime.window.frame.get().size(),
+        Size::new(700.0, 500.0),
+        "a size outside the new limits clamps to the nearer bound"
+    );
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(runtime.platform.surface().size(), (700, 500));
+}
+
+/// An explicit `Window::max_size` wins over the user size: a window larger
+/// than the pin clamps down to it.
+#[test]
+fn an_explicit_maximum_clamps_a_larger_window() {
+    use waterui_core::layout::Size;
+
+    // The pin is reactive: tightening it below the settled window size is a
+    // limits change, so the window is clamped into it.
+    let pinned_max = Binding::container(Size::new(2000.0, 2000.0));
+    let window = Window::new("", binding(WindowState::Normal), || ()).max_size(pinned_max.clone());
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let _ = pump_window_semantics(&mut runtime, &Environment::new());
+    assert_eq!(
+        *runtime.window.frame.get().size(),
+        Size::new(800.0, 600.0),
+        "a pin the window already satisfies leaves its size alone"
+    );
+    pinned_max.set(Size::new(500.0, 400.0));
+    let _ = pump_window_semantics(&mut runtime, &Environment::new());
+    assert_eq!(
+        *runtime.window.frame.get().size(),
+        Size::new(500.0, 400.0),
+        "tightening the app-pinned maximum clamps the window into it"
+    );
 }
 
 #[test]
