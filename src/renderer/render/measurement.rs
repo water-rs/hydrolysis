@@ -1166,6 +1166,29 @@ pub(crate) fn measure_picker_intrinsic(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
+    // The label view is materialized only for this measurement, so it goes
+    // through the transient path — see `measure_transient_view_intrinsic`.
+    let label_size = measure_transient_view_intrinsic(
+        &crate::widgets::controls::picker::menu_picker_label_view(&picker.label),
+        state,
+        env,
+        theme,
+    );
+    measure_picker_intrinsic_with_label_size(picker, label_size, state, env, theme)
+}
+
+/// Measures a picker's intrinsic size from a precomputed label size. The
+/// dispatch path passes the label measured via [`measure_picker_intrinsic`];
+/// the retained-node path passes the label measured from its built
+/// [`crate::renderer::RetainedSubview`], so layout and the in-field label
+/// render agree on the label height.
+pub(crate) fn measure_picker_intrinsic_with_label_size(
+    picker: &PickerConfig,
+    label_size: LayoutSize,
+    state: &mut HydroState,
+    env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
+) -> LayoutSize {
     let items = picker.items.get();
     assert!(
         !(items.is_empty()),
@@ -1185,9 +1208,25 @@ pub(crate) fn measure_picker_intrinsic(
                 max_item_height = max_item_height.max(f64::from(size.height));
             }
 
-            let width = (max_item_width + metrics.horizontal_inset * 2.0 + metrics.indicator_space)
+            // The field label sits inside the field above the value: it adds
+            // its own height plus the metrics' label spacing to the field
+            // height, and its width competes with the items for the field's
+            // content width. A label measuring zero height (a hidden one)
+            // adds nothing — the field keeps its unlabelled size. The render
+            // path decides presence the same way, on `label_size.height > 0`.
+            let has_label = label_size.height > 0.0;
+            let content_width = max_item_width.max(f64::from(label_size.width));
+            let width = (content_width + metrics.horizontal_inset * 2.0 + metrics.indicator_space)
                 .max(metrics.min_width);
-            let height = (max_item_height + metrics.vertical_inset * 2.0).max(metrics.min_height);
+            let height = (max_item_height
+                + f64::from(label_size.height)
+                + if has_label {
+                    metrics.label_spacing
+                } else {
+                    0.0
+                }
+                + metrics.vertical_inset * 2.0)
+                .max(metrics.min_height);
             LayoutSize::new(width as f32, height as f32)
         }
         PickerStyle::Radio => {
