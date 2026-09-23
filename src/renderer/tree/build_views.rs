@@ -77,6 +77,7 @@ impl_widget_behavior!(
     (),
     crate::widgets::layout::spacer::render_empty_node,
     crate::widgets::layout::spacer::measure_empty_node
+    ; renders_nothing: true
 );
 impl_widget_behavior!(
     Divider,
