@@ -339,6 +339,10 @@ pub(crate) fn render_text_field_parts(
         Str::from(text)
     };
     let use_placeholder = committed_with_preedit.is_empty();
+    // With no label view the prompt stands in as the floating label (#85):
+    // it rests centred in the container and floats to the top on focus or
+    // content under the same Material transition a label view rides.
+    let prompt_as_label = label_height == 0.0 && !prompt.is_empty();
     let label_target = if is_focused || !committed_with_preedit.is_empty() {
         1.0
     } else {
@@ -368,23 +372,39 @@ pub(crate) fn render_text_field_parts(
             label_height,
             label_progress,
         );
+    } else if prompt_as_label {
+        flush_material_prompt_label(
+            ctx,
+            env,
+            StyledStr::plain(prompt.clone()).foreground(theme.input_placeholder_color()),
+            field_rect,
+            input_metrics.horizontal_inset,
+            input_metrics.label_height,
+            label_progress,
+        );
     }
-    let content_alpha = material_input_content_alpha(label_height > 0.0, label_progress);
-    let display = if use_placeholder {
+    let content_alpha =
+        material_input_content_alpha(label_height > 0.0 || prompt_as_label, label_progress);
+    let display = if use_placeholder && !prompt_as_label {
         prompt
     } else {
         committed_with_preedit.clone()
     };
-    let display_styled = if use_placeholder {
+    let display_styled = if use_placeholder && !prompt_as_label {
         StyledStr::plain(display).foreground(theme.input_placeholder_color())
     } else {
         StyledStr::plain(display)
+    };
+    let effective_label_height = if prompt_as_label {
+        input_metrics.label_height
+    } else {
+        label_height
     };
     let text_bounds = material_input_text_rect(
         field_rect,
         input_metrics.horizontal_inset,
         input_metrics.vertical_inset,
-        label_height,
+        effective_label_height,
     );
     let committed_layout = HydrolysisRenderer::build_text_layout(
         ctx.state_mut(),
@@ -401,6 +421,19 @@ pub(crate) fn render_text_field_parts(
         Some(text_bounds.width() as f32),
     );
     let display_layout_height = display_layout.height();
+    // A single-line field carrying no inside label — neither a label view
+    // nor a prompt standing in as one — centres its input text vertically
+    // in the container, the label's resting spot.
+    let text_bounds = if effective_label_height == 0.0 && line_limit == Some(1) {
+        material_input_centered_text_rect(
+            field_rect,
+            text_bounds,
+            f64::from(committed_layout.height().max(display_layout_height))
+                .max(input_metrics.label_height),
+        )
+    } else {
+        text_bounds
+    };
     let text_clip_bounds = material_input_text_clip_rect(
         field_rect,
         text_bounds,
@@ -681,6 +714,17 @@ pub(crate) fn render_secure_field_parts(
         env,
         Some(text_bounds.width() as f32),
     );
+    // Secure fields are single-line; with no inside label the masked text
+    // centres vertically in the container (#85).
+    let text_bounds = if label_height == 0.0 {
+        material_input_centered_text_rect(
+            field_rect,
+            text_bounds,
+            f64::from(committed_layout.height()).max(input_metrics.label_height),
+        )
+    } else {
+        text_bounds
+    };
     let text_clip_bounds =
         material_input_text_clip_rect(field_rect, text_bounds, committed_layout.height());
     let selection = {
@@ -890,6 +934,43 @@ fn material_input_content_alpha(has_label: bool, progress: f32) -> f32 {
     ((progress - CONTENT_ENTER_DELAY_PORTION) / CONTENT_VISIBLE_PORTION).clamp(0.0, 1.0)
 }
 
+/// Draws the prompt text under the Material floating-label transform —
+/// the resting spot centred in the container, floating to the top scaled
+/// down — used when the field has no label view so the prompt stands in as
+/// the label (#85).
+fn flush_material_prompt_label(
+    ctx: &mut WidgetRenderContext<'_>,
+    env: &Environment,
+    prompt_styled: StyledStr,
+    field_rect: vello::kurbo::Rect,
+    horizontal_inset: f64,
+    label_height: f64,
+    progress: f32,
+) {
+    let progress = f64::from(progress.clamp(0.0, 1.0));
+    let resting = material_input_resting_label_rect(field_rect, horizontal_inset, label_height);
+    let floating = material_input_label_rect(field_rect, horizontal_inset, label_height);
+    let scale = 1.0 + (FLOATING_LABEL_SCALE - 1.0) * progress;
+    let x = resting.x0 + (floating.x0 - resting.x0) * progress;
+    let y = resting.y0 + (floating.y0 - resting.y0) * progress;
+    let width = floating.width() / scale;
+    let child = ctx.child(
+        vello::kurbo::Affine::translate((x, y)) * vello::kurbo::Affine::scale(scale),
+        vello::kurbo::Rect::new(0.0, 0.0, width, label_height / scale),
+    );
+    let renderer = ctx.renderer_mut();
+    let (state, scene) = renderer.state_and_scene_mut();
+    HydrolysisRenderer::render_styled_text_limited(
+        state,
+        scene,
+        child,
+        prompt_styled,
+        HorizontalAlignment::Leading,
+        env,
+        Some(1),
+    );
+}
+
 fn material_input_text_rect(
     field_rect: vello::kurbo::Rect,
     horizontal_inset: f64,
@@ -901,6 +982,23 @@ fn material_input_text_rect(
         field_rect.y0 + vertical_inset + label_height,
         field_rect.x1 - horizontal_inset,
         field_rect.y1 - vertical_inset,
+    )
+}
+
+/// Material 3 centres the input text of a single-line field vertically in
+/// the container when the field carries no inside label — the label's
+/// resting spot — instead of top-aligning it under the vertical inset (#85).
+fn material_input_centered_text_rect(
+    field_rect: vello::kurbo::Rect,
+    text_rect: vello::kurbo::Rect,
+    text_height: f64,
+) -> vello::kurbo::Rect {
+    let y0 = field_rect.y0 + ((field_rect.height() - text_height) * 0.5).max(0.0);
+    vello::kurbo::Rect::new(
+        text_rect.x0,
+        y0,
+        text_rect.x1,
+        (y0 + text_height).min(field_rect.y1),
     )
 }
 
