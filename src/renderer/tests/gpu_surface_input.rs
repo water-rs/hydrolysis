@@ -17,7 +17,9 @@ use std::time::Instant;
 
 use waterui::ViewExt as _;
 use waterui::component::text;
+use waterui_controls::button::button;
 use waterui_core::AnyView;
+use waterui_core::Binding;
 use waterui_core::View;
 use waterui_core::handler::AnyViewBuilder;
 use waterui_graphics::input::{
@@ -157,6 +159,51 @@ fn key_event(character: &str, code: Code, state: KeyState) -> InputEvent {
         state,
         modifiers: Modifiers::default(),
     }
+}
+
+/// A Tab press+release — the pair the platform layer produces for one
+/// keypress. `shift` carries the reverse-traversal modifier.
+fn tab(runtime: &mut HeadlessRuntime, shift: bool) {
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(InputEvent::Key {
+            key: KeyCode::Named("Tab".to_owned()),
+            logical_key: Key::Named(NamedKey::Tab),
+            physical_code: Code::Tab,
+            repeat: false,
+            state,
+            modifiers: Modifiers {
+                shift,
+                ..Modifiers::default()
+            },
+        });
+    }
+}
+
+/// A Ctrl+Tab press+release — the traversal chord a focused surface does
+/// not consume. `shift` carries the reverse direction.
+fn ctrl_tab(runtime: &mut HeadlessRuntime, shift: bool) {
+    for state in [KeyState::Pressed, KeyState::Released] {
+        runtime.push_input_event(InputEvent::Key {
+            key: KeyCode::Named("Tab".to_owned()),
+            logical_key: Key::Named(NamedKey::Tab),
+            physical_code: Code::Tab,
+            repeat: false,
+            state,
+            modifiers: Modifiers {
+                shift,
+                control: true,
+                ..Modifiers::default()
+            },
+        });
+    }
+}
+
+/// The pane a `.focused` binding names — one variant per surface, matching
+/// how a form names its fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pane {
+    Document,
+    Canvas,
 }
 
 #[test]
@@ -640,6 +687,283 @@ fn scene_content_that_wants_input_is_routed_like_a_surface() {
     assert!(
         *builds.borrow() > builds_before,
         "content that invalidated on input is drawn again"
+    );
+}
+
+/// An input-wanting surface joins keyboard traversal like any focusable
+/// control: Tab reaches it in tree order, `Focus(true)` opens the input
+/// session — and once it holds focus it follows GTK's text-view convention,
+/// taking plain Tab and Shift-Tab as input while Ctrl+Tab and
+/// Ctrl+Shift+Tab move focus out again. The pointer press that used to be
+/// the only way in lands in the same slot traversal owns.
+#[test]
+fn tab_focuses_the_surface_and_ctrl_tab_leaves_it() {
+    let log = ProbeLog::default();
+    let view = vstack((
+        GpuSurface::new(InputProbe {
+            log: log.clone(),
+            caret: Some(vello::kurbo::Rect::new(10.0, 20.0, 12.0, 38.0)),
+        }),
+        button("next").action(|| {}),
+        button("last").action(|| {}),
+    ));
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    assert_eq!(
+        log.drain(),
+        Vec::new(),
+        "nothing reaches the surface before it is focused"
+    );
+
+    // A pointer press still focuses, through the same keyboard-focus slot
+    // traversal reads — so the very next Tab moves on instead of
+    // re-focusing.
+    press_at(&mut runtime, 10.0, 10.0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(10.0, 10.0),
+            },
+            SurfaceInputEvent::PointerButton {
+                pressed: true,
+                button: SurfacePointerButton::Primary,
+                position: vello::kurbo::Point::new(10.0, 10.0),
+            },
+        ],
+        "a press focuses the surface through the same slot traversal uses"
+    );
+    let (x, y) = window_point(10.0, 10.0);
+    runtime.push_input_event(InputEvent::PointerUp {
+        id: POINTER_ID,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(116));
+    let _ = log.drain();
+    assert!(
+        runtime.focused_text_input_state().is_some(),
+        "a focused surface publishes its caret like a text field"
+    );
+
+    // Plain Tab and Shift-Tab are the surface's own input — a terminal's
+    // completion and backtab — not traversal out of it.
+    tab(&mut runtime, false);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(132));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Key {
+                pressed: true,
+                key: Key::Named(NamedKey::Tab),
+                code: Code::Tab,
+                modifiers: W3cModifiers::empty(),
+                repeat: false,
+            },
+            SurfaceInputEvent::Key {
+                pressed: false,
+                key: Key::Named(NamedKey::Tab),
+                code: Code::Tab,
+                modifiers: W3cModifiers::empty(),
+                repeat: false,
+            },
+        ],
+        "a focused surface keeps Tab as input, not as traversal"
+    );
+    tab(&mut runtime, true);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(148));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Key {
+                pressed: true,
+                key: Key::Named(NamedKey::Tab),
+                code: Code::Tab,
+                modifiers: W3cModifiers::SHIFT,
+                repeat: false,
+            },
+            SurfaceInputEvent::Key {
+                pressed: false,
+                key: Key::Named(NamedKey::Tab),
+                code: Code::Tab,
+                modifiers: W3cModifiers::SHIFT,
+                repeat: false,
+            },
+        ],
+        "and Shift-Tab likewise — focus does not move on either"
+    );
+    assert!(runtime.focused_text_input_state().is_some());
+
+    // Ctrl+Tab moves keyboard focus out to the next focusable — the Focus
+    // pair goes through the same transition the press used.
+    ctrl_tab(&mut runtime, false);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(164));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(false)],
+        "Ctrl+Tab moves on to the next focusable"
+    );
+    assert!(runtime.focused_text_input_state().is_none());
+
+    // Ctrl+Shift-Tab comes back to the surface and typing reaches it — no
+    // pointer event involved at all.
+    ctrl_tab(&mut runtime, true);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(180));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(true)],
+        "Ctrl+Shift-Tab returns to the surface"
+    );
+    runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Pressed));
+    runtime.push_input_event(InputEvent::TextInput {
+        text: "a".to_owned(),
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(196));
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Key {
+                pressed: true,
+                key: Key::Character("a".to_owned()),
+                code: Code::KeyA,
+                modifiers: W3cModifiers::empty(),
+                repeat: false,
+            },
+            SurfaceInputEvent::TextInput("a".into()),
+        ],
+        "keys reach a surface focused by the keyboard"
+    );
+}
+
+/// `.focused(binding)` — the same `Metadata<Focused>` wiring a TextField
+/// honours — focuses an input-wanting surface without a pointer press,
+/// and a pointer press writes the binding back the way it does for a
+/// field.
+#[test]
+fn the_focused_binding_focuses_the_surface_without_a_pointer() {
+    let log = ProbeLog::default();
+    let focus = Binding::container(None::<Pane>);
+    let view = GpuSurface::new(InputProbe {
+        log: log.clone(),
+        caret: None,
+    })
+    .focused(&focus, Pane::Document);
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    assert_eq!(log.drain(), Vec::new());
+
+    focus.set(Some(Pane::Document));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(true)],
+        "setting the .focused source focuses the surface"
+    );
+
+    runtime.push_input_event(key_event("b", Code::KeyB, KeyState::Pressed));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(116));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Key {
+            pressed: true,
+            key: Key::Character("b".to_owned()),
+            code: Code::KeyB,
+            modifiers: W3cModifiers::empty(),
+            repeat: false,
+        }],
+        "keys reach a programmatically focused surface"
+    );
+
+    focus.set(None);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(132));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(false)],
+        "clearing the source unfocuses the surface"
+    );
+
+    // A pointer press writes the binding back, so the app's own
+    // what-is-focused state tracks the surface too.
+    press_at(&mut runtime, 10.0, 10.0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(148));
+    assert_eq!(
+        focus.get(),
+        Some(Pane::Document),
+        "a press writes its focus back through the .focused binding"
+    );
+}
+
+/// A structural rebuild that adds a pane keeps the `.focused` wiring live:
+/// re-asserting the same source after the rebuild focuses the new pane
+/// through the one transition point, and unfocuses the old one.
+#[test]
+fn a_structural_rebuild_re_focuses_the_surface_programmatically() {
+    let log_document = ProbeLog::default();
+    let log_canvas = ProbeLog::default();
+    let focus = Binding::container(None::<Pane>);
+    let show_canvas = Binding::container(false);
+    let view = vstack((
+        GpuSurface::new(InputProbe {
+            log: log_document.clone(),
+            caret: None,
+        })
+        .focused(&focus, Pane::Document),
+        GpuSurface::new(InputProbe {
+            log: log_canvas.clone(),
+            caret: None,
+        })
+        .focused(&focus, Pane::Canvas)
+        .visible(show_canvas.clone()),
+    ));
+    let mut runtime = runtime_with(view);
+    let start = Instant::now();
+    settled(&mut runtime, start);
+
+    focus.set(Some(Pane::Document));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    assert_eq!(log_document.drain(), vec![SurfaceInputEvent::Focus(true)]);
+    assert_eq!(log_canvas.drain(), Vec::new());
+
+    // The new pane joins the tree mid-session; focus stays where it was
+    // while the structure around it changes.
+    show_canvas.set(true);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(116));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(132));
+    assert_eq!(log_document.drain(), Vec::new());
+    assert_eq!(log_canvas.drain(), Vec::new());
+
+    focus.set(Some(Pane::Canvas));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(148));
+    assert_eq!(
+        log_document.drain(),
+        vec![SurfaceInputEvent::Focus(false)],
+        "programmatic focus moving on unfocuses the old pane"
+    );
+    assert_eq!(
+        log_canvas.drain(),
+        vec![SurfaceInputEvent::Focus(true)],
+        "and focuses the pane it names"
+    );
+
+    runtime.push_input_event(key_event("c", Code::KeyC, KeyState::Pressed));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(164));
+    assert_eq!(log_document.drain(), Vec::new());
+    assert_eq!(
+        log_canvas.drain(),
+        vec![SurfaceInputEvent::Key {
+            pressed: true,
+            key: Key::Character("c".to_owned()),
+            code: Code::KeyC,
+            modifiers: W3cModifiers::empty(),
+            repeat: false,
+        }],
+        "keys follow programmatic focus to the new pane"
     );
 }
 
