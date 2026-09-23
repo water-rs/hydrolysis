@@ -948,26 +948,49 @@ impl SemanticCore {
     /// Move focus to the text input with this stable identity, or clear it with
     /// `None`. The target need not be emitted this frame; focus simply resolves
     /// to nothing until it is.
-    /// Wires a `.focused(binding)` modifier to the text-input target registered
-    /// since `target_start`: writes the binding onto that target, then applies
-    /// the binding's value to the focused-input key. Shared by the rendered
-    /// flush and the semantic accessibility walk.
+    /// Wires a `.focused(binding)` modifier to the single focusable target —
+    /// a text field or an input surface — registered inside the spans
+    /// (`text_start`, `embedded_start`): writes the binding onto that target,
+    /// then applies the binding's value to the focused-input key. Shared by
+    /// the rendered flush and the semantic accessibility walk.
     pub(crate) fn wire_focused_target(
         &mut self,
         value: &waterui::component::focus::Focused,
         should_focus: bool,
-        target_start: usize,
+        text_start: usize,
+        embedded_start: usize,
     ) {
-        let end = self.text_editing.text_input_targets.len();
-        let focus_target_count = end - target_start;
+        let text_count = self.text_editing.text_input_targets.len() - text_start;
+        let embedded_count = self.hit_test.embedded_input_targets.len() - embedded_start;
+        let focus_target_count = text_count + embedded_count;
         assert!(
             focus_target_count == 1,
-            "hydrolysis .focused() requires exactly one TextField or SecureField in the wrapped subtree, found {focus_target_count}"
+            "hydrolysis .focused() requires exactly one TextField or SecureField or input surface in the wrapped subtree, found {focus_target_count}"
         );
+        if embedded_count == 1 {
+            let target = self
+                .hit_test
+                .embedded_input_targets
+                .get_mut(embedded_start)
+                .expect("hydrolysis focused metadata missing registered surface input target");
+            assert!(
+                target.focus_binding.is_none(),
+                "hydrolysis does not allow multiple .focused() modifiers to target the same control"
+            );
+            target.focus_binding = Some(value.0.clone());
+            let target_key = target.interaction_key.clone();
+
+            if should_focus {
+                self.set_focused_embedded_key(Some(target_key));
+            } else if self.is_focused_embedded(&target_key) {
+                self.set_focused_embedded_key(None);
+            }
+            return;
+        }
         let target = self
             .text_editing
             .text_input_targets
-            .get_mut(target_start)
+            .get_mut(text_start)
             .expect("hydrolysis focused metadata missing registered text input target");
         assert!(
             target.focus_binding.is_none(),
@@ -1058,6 +1081,11 @@ impl SemanticCore {
         self.text_editing.store_focused_key(focused);
         if let Some(binding) = next_binding {
             binding.set(true);
+        }
+        if focused_something {
+            // A field taking focus releases a surface's — the counterpart
+            // of the rule that landing on a surface ends editing.
+            let _ = self.hit_test.set_embedded_focus_index(None);
         }
         self.text_editing.active_text_selection_drag = None;
         self.text_editing.take_ime_preedit();
