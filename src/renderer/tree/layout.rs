@@ -30,6 +30,35 @@ impl RenderNode {
         }
     }
 
+    /// Whether this subtree draws nothing — WaterUI's empty view `()`, or a
+    /// container/wrapper whose every descendant does the same.
+    ///
+    /// This is a semantic answer, not a measured size: a zero-size `Color` or
+    /// a collapsed `Spacer` still renders and still answers `false`. A stack
+    /// treats a child answering `true` as a non-member (§4.4: it takes no
+    /// slot and no spacing), and a `Dynamic` flipping between `()` and content
+    /// is a membership change — `layout` re-asks this every pass.
+    pub(super) fn is_empty(&self) -> bool {
+        match self {
+            RenderNode::Widget(node) => node.behavior.renders_nothing(),
+            // A container is always a member: even a frame wrapping `()`
+            // explicitly claims its configured slot, like a `Spacer` does.
+            RenderNode::Container(_) => false,
+            RenderNode::Opacity(node) => node.child.is_empty(),
+            RenderNode::Scale(node) => node.child.is_empty(),
+            RenderNode::Rotation(node) => node.child.is_empty(),
+            RenderNode::Offset(node) => node.child.is_empty(),
+            RenderNode::Retain(node) => node.child.is_empty(),
+            RenderNode::Env(node) => node.child.is_empty(),
+            RenderNode::Dynamic(node) => node.child.is_empty(),
+            RenderNode::Wrapper(node) => node.child.is_empty(),
+            RenderNode::AppliedFilter(node) => node.child.is_empty(),
+            // An effect over a child that draws nothing draws nothing itself.
+            RenderNode::ViewEffect(node) => node.child.borrow().is_empty(),
+            _ => false,
+        }
+    }
+
     pub(super) fn stretch(&self) -> StretchAxis {
         match self {
             RenderNode::Color(_) => StretchAxis::Both,

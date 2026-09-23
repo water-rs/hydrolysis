@@ -22,6 +22,8 @@ pub(crate) struct HydroSubview<'a> {
     /// `state` and `env`.
     theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch_axis: StretchAxis,
+    /// Whether this child draws nothing — the §4.4 membership answer.
+    is_empty: bool,
     /// Per-proposal memo for this layout pass (containers probe children with
     /// repeated proposals). Only the recursion path caches here; the text path
     /// memoizes in the content-keyed [`TextMeasureService`] instead.
@@ -59,6 +61,7 @@ impl<'a> HydroSubview<'a> {
             env: MainThreadBound::new(env.clone()),
             theme: MainThreadBound::new(Rc::clone(theme)),
             stretch_axis: effective_stretch_axis(view),
+            is_empty: view_renders_nothing(view),
             measure_cache: MainThreadBound::new(RefCell::new(Vec::new())),
             resolved_text,
         }
@@ -135,6 +138,10 @@ impl SubView for HydroSubview<'_> {
 
     fn priority(&self) -> i32 {
         0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty
     }
 }
 
