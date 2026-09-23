@@ -435,6 +435,15 @@ fn menu_picker_emits_options_and_selects() {
         find_by_label(&update, Role::ComboBox, "Size").expect("the picker is missing");
     assert_eq!(combo_node.value(), Some("Small"));
     assert!(combo_node.supports_action(Action::Click));
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "the picker's label must name its single accessibility node exactly once"
+    );
     let children = combo_node.children();
     assert_eq!(
         children.len(),
@@ -463,6 +472,37 @@ fn menu_picker_emits_options_and_selects() {
     let children = combo_node.children();
     assert_eq!(lookup(&update, children[0]).is_selected(), Some(false));
     assert_eq!(lookup(&update, children[1]).is_selected(), Some(true));
+}
+
+/// A visually hidden menu-picker label draws nothing and takes no space, but
+/// the picker's accessibility node still carries the label — exactly once.
+#[test]
+fn menu_picker_hidden_label_still_names_the_combo() {
+    let selection = Binding::container(0i32);
+    let selection_for_view = selection.clone();
+    let mut runtime = mount(AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(vstack((picker(
+            "Size",
+            vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+            &selection_for_view,
+        )
+        .style(PickerStyle::Menu)
+        .hide_label(),)))
+    }));
+
+    let update = pumped(&mut runtime);
+    let (_, combo_node) = find_by_label(&update, Role::ComboBox, "Size")
+        .expect("a hidden label still names the picker");
+    assert_eq!(combo_node.value(), Some("Small"));
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label must not add a second node carrying the label"
+    );
 }
 
 #[test]

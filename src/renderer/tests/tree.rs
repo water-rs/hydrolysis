@@ -1195,3 +1195,133 @@ fn applied_filter_renders_through_retained_tree() {
          (the retained AppliedFilter node keeps owning it across frames)"
     );
 }
+
+/// Contiguous runs of rows inside `rect` that contain a pixel differing from
+/// the region's modal colour — the text bands a control draws inside it. Rows
+/// separated by fewer than 6 blank rows merge, so a glyph's disconnected piece
+/// (the dot of an 'i') cannot split its own text line into two bands.
+fn text_ink_bands(snapshot: &crate::HeadlessSnapshot, rect: accesskit::Rect) -> Vec<(f64, f64)> {
+    use std::collections::HashMap;
+    let x0 = rect.x0.floor().max(0.0) as usize;
+    let x1 = (rect.x1.ceil() as usize).min(snapshot.width as usize);
+    let y0 = rect.y0.floor().max(0.0) as usize;
+    let y1 = (rect.y1.ceil() as usize).min(snapshot.height as usize);
+    let pixel = |x: usize, y: usize| {
+        let i = (y * snapshot.width as usize + x) * 4;
+        &snapshot.rgba8[i..i + 4]
+    };
+    let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            *counts.entry(pixel(x, y).try_into().unwrap()).or_default() += 1;
+        }
+    }
+    let bg = counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .expect("the field region is non-empty")
+        .0;
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    for y in y0..y1 {
+        if !(x0..x1).any(|x| pixel(x, y) != bg.as_slice()) {
+            continue;
+        }
+        match bands.last_mut() {
+            Some((_, end)) if y as f64 - *end < 6.0 => *end = y as f64 + 1.0,
+            _ => bands.push((y as f64, y as f64 + 1.0)),
+        }
+    }
+    bands
+}
+
+/// The menu picker's field label is drawn: its ink band sits directly above the
+/// selected value's, both inside the picker's field (the ComboBox's bounds).
+/// A hidden label draws nothing and takes no space — the value band alone
+/// remains — while the accessibility node keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn menu_picker_draws_its_label_above_the_value() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let menu = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Menu);
+            let menu = if hide_label { menu.hide_label() } else { menu };
+            AnyView::new(vstack((menu,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            320,
+            120,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    fn field_bounds(update: &accesskit::TreeUpdate) -> accesskit::Rect {
+        update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::ComboBox && node.label() == Some("Size"))
+            .and_then(|(_, node)| node.bounds())
+            .expect("the menu picker's field node must carry bounds")
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let field = field_bounds(&update);
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, field);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a labelled menu picker draws two text bands inside its field — label above value, got {bands:?}"
+    );
+    let (label_band, value_band) = (bands[0], bands[1]);
+    assert!(
+        label_band.1 <= value_band.0,
+        "the label band {label_band:?} must sit above the value band {value_band:?}"
+    );
+    assert!(
+        label_band.0 >= field.y0 && value_band.1 <= field.y1,
+        "both text bands must lie inside the field {field:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let field = field_bounds(&update);
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, field);
+    assert_eq!(
+        bands.len(),
+        1,
+        "a hidden label draws nothing — only the value band remains, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the picker's single node exactly once"
+    );
+}

@@ -2,7 +2,8 @@
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, PickerMenuEntry, PickerMenuRequest,
-    RenderContext, WidgetRenderContext, measure_picker_intrinsic, transformed_rect,
+    RenderContext, RetainedSubview, WidgetRenderContext, measure_picker_intrinsic,
+    measure_picker_intrinsic_with_label_size, transformed_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -12,7 +13,10 @@ use accesskit::{
 use nami::{Binding, Signal};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use waterui::ViewExt as _;
 use waterui_backend_core::widget::RadioIndicatorState;
+use waterui_controls::label::Label;
+use waterui_core::AnyView;
 use waterui_core::Environment;
 use waterui_core::Native;
 use waterui_core::id::Id;
@@ -38,19 +42,49 @@ impl HydroNativeView for Native<PickerConfig> {
     }
 }
 
-/// State shared by the retained picker node and its popup callbacks.
+/// State shared by the retained picker node and its popup callbacks: the
+/// cloneable [`PickerConfig`] drives the field chrome + accessibility, and its
+/// label is held as a [`RetainedSubview`] built once and re-flushed each frame
+/// so reactive label content stays live.
 pub(crate) struct PickerRenderState {
     pub(crate) config: PickerConfig,
+    label_view: RetainedSubview,
     menu_open: Rc<Cell<bool>>,
 }
 
 impl PickerRenderState {
-    pub(crate) fn new(config: PickerConfig) -> Self {
+    pub(crate) fn from_config(config: PickerConfig) -> Self {
         Self {
+            label_view: RetainedSubview::new(menu_picker_label_view(&config.label)),
             config,
             menu_open: Rc::new(Cell::new(false)),
         }
     }
+
+    /// Eagerly build the label sub-view (the measure path has only
+    /// `&mut HydroState`, no renderer, so it must be built before then).
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
+        self.label_view.ensure_built(renderer, env);
+    }
+}
+
+/// The label view a menu picker draws inside its field: the picker's own label
+/// in the platform's field-label chrome — the `Caption` font slot and the
+/// `MutedForeground` colour token the theme provides for chrome labels, never a
+/// named size or colour. A hidden label keeps its zero-size body: it draws
+/// nothing and takes no space. A custom-content label owns its own styling, so
+/// only the colour token is applied to it.
+pub(crate) fn menu_picker_label_view(label: &Label) -> AnyView {
+    let styled = if label.has_custom_content() {
+        label.clone()
+    } else {
+        label.clone().font(waterui_text::font::Caption)
+    };
+    AnyView::new(styled.muted())
 }
 
 /// Emits a picker's accessibility tree from its retained state. The rendered
@@ -374,8 +408,9 @@ pub(crate) fn picker_accessibility(
     }
 }
 
-/// Measures a retained picker leaf from its config (mirrors
-/// [`measure_picker_intrinsic`]).
+/// Measures a retained picker leaf from its [`PickerRenderState`], reading the
+/// label size from its already-built [`RetainedSubview`] so layout and the
+/// in-field label render agree (mirrors [`measure_picker_intrinsic`]).
 pub(crate) fn measure_picker_node(
     state: &PickerRenderState,
     _proposal: ProposalSize,
@@ -383,7 +418,14 @@ pub(crate) fn measure_picker_node(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    ViewDimensions::new(measure_picker_intrinsic(&state.config, hydro, env, theme))
+    let label_size = state.label_view.measure_built(hydro, env, theme);
+    ViewDimensions::new(measure_picker_intrinsic_with_label_size(
+        &state.config,
+        label_size,
+        hydro,
+        env,
+        theme,
+    ))
 }
 
 /// Renders a retained picker leaf every flush: emits a11y (unless hidden) then the
@@ -562,23 +604,79 @@ pub(crate) fn render_menu_picker(
         );
     }
 
-    let text_bounds = crate::widgets::util::inset_rect(
-        ctx.bounds,
-        metrics.horizontal_inset,
-        metrics.vertical_inset,
-    );
-    let text_bounds = vello::kurbo::Rect::new(
-        text_bounds.x0,
-        text_bounds.y0,
-        (text_bounds.x1 - metrics.indicator_space).max(text_bounds.x0),
-        text_bounds.y1,
-    );
+    let label_size = owner
+        .borrow_mut()
+        .label_view
+        .measure_intrinsic(ctx.renderer_mut(), env);
+    // One rule decides the label's presence in both measure and render: it is
+    // drawn iff its measured height is nonzero.
+    let (label_bounds, text_bounds) =
+        menu_picker_content_rects(ctx.bounds, metrics, f64::from(label_size.height));
+    if let Some(label_bounds) = label_bounds {
+        // The label is a retained node sub-view re-flushed at its rect; reactive
+        // content stays live through the node's own per-frame re-flush, with no
+        // dispatch. Its semantics are merged into the picker's own node by
+        // `picker_accessibility`, so the sub-view flushes visual-only.
+        let mut state = owner.borrow_mut();
+        let render_ctx = ctx.render_context();
+        let label_view = &mut state.label_view;
+        ctx.renderer_mut()
+            .with_suppressed_accessibility(|renderer| {
+                label_view.flush_in_rect(
+                    renderer,
+                    render_ctx,
+                    env,
+                    ProposalSize::UNSPECIFIED,
+                    label_bounds,
+                );
+            });
+    }
     ctx.render_styled_text(
         StyledStr::plain(selected_text),
         HorizontalAlignment::Leading,
         env,
         text_bounds,
     );
+}
+
+/// The menu picker's in-field content layout: the field label drawn above the
+/// selected value, both inset by the metrics' horizontal inset and kept clear
+/// of the dropdown indicator, with the theme's label spacing between them.
+/// A label that measures empty (a hidden or content-free label) draws nothing
+/// and takes no space — the value keeps its full-height inset.
+pub(crate) fn menu_picker_content_rects(
+    bounds: vello::kurbo::Rect,
+    metrics: PickerMetrics,
+    label_height: f64,
+) -> (Option<vello::kurbo::Rect>, vello::kurbo::Rect) {
+    let text_x0 = bounds.x0 + metrics.horizontal_inset;
+    let text_x1 = (bounds.x1 - metrics.horizontal_inset - metrics.indicator_space).max(text_x0);
+    let text_bottom = bounds.y1 - metrics.vertical_inset;
+    if label_height > 0.0 {
+        let label_rect = vello::kurbo::Rect::new(
+            text_x0,
+            bounds.y0 + metrics.vertical_inset,
+            text_x1,
+            bounds.y0 + metrics.vertical_inset + label_height,
+        );
+        let value_rect = vello::kurbo::Rect::new(
+            text_x0,
+            label_rect.y1 + metrics.label_spacing,
+            text_x1,
+            text_bottom,
+        );
+        (Some(label_rect), value_rect)
+    } else {
+        (
+            None,
+            vello::kurbo::Rect::new(
+                text_x0,
+                bounds.y0 + metrics.vertical_inset,
+                text_x1,
+                text_bottom,
+            ),
+        )
+    }
 }
 
 pub(crate) fn render_radio_picker(
@@ -789,4 +887,54 @@ pub(crate) fn emit_picker_accessibility(
     env: &Environment,
 ) {
     picker_accessibility(renderer, None, None, state, env);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::menu_picker_content_rects;
+    use vello::kurbo::Rect;
+    use waterui_backend_core::widget::PickerMetrics;
+
+    fn metrics() -> PickerMetrics {
+        PickerMetrics {
+            min_width: 280.0,
+            min_height: 56.0,
+            horizontal_inset: 16.0,
+            vertical_inset: 8.0,
+            label_spacing: 8.0,
+            indicator_space: 18.0,
+            radio_indicator_size: 20.0,
+            radio_label_spacing: 8.0,
+            radio_row_spacing: 8.0,
+            popup_top_spacing: 4.0,
+            popup_row_height: 48.0,
+            popup_corner_radius: 4.0,
+            segment_min_width: 58.0,
+        }
+    }
+
+    /// The M3 exposed-dropdown label sits inside the field, directly above the
+    /// selected value with the metrics' label spacing between them.
+    #[test]
+    fn labelled_content_places_label_above_value_inside_the_field() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 56.0);
+        let (label, value) = menu_picker_content_rects(bounds, metrics(), 12.0);
+        let label = label.expect("a drawn label must be placed");
+
+        assert_eq!(label, Rect::new(16.0, 8.0, 286.0, 20.0));
+        assert_eq!(value, Rect::new(16.0, 28.0, 286.0, 48.0));
+        assert!(bounds.contains_rect(label) && bounds.contains_rect(value));
+        assert_eq!(value.y0, label.y1 + metrics().label_spacing);
+    }
+
+    /// A hidden label measures empty: it draws nothing, takes no space, and the
+    /// value keeps the field's full inset height.
+    #[test]
+    fn hidden_label_leaves_the_value_alone_in_the_field() {
+        let bounds = Rect::new(0.0, 0.0, 320.0, 56.0);
+        let (label, value) = menu_picker_content_rects(bounds, metrics(), 0.0);
+
+        assert!(label.is_none());
+        assert_eq!(value, Rect::new(16.0, 8.0, 286.0, 48.0));
+    }
 }
