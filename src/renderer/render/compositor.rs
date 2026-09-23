@@ -1336,6 +1336,7 @@ impl HydrolysisRenderer {
         segment: &mut HybridRenderSegment,
         transient_scene: Option<vello::Scene>,
         target: HydrolysisRenderTarget<'_>,
+        premultiply_alpha: bool,
     ) {
         assert!(
             self.compositor.render_layers.is_empty(),
@@ -1347,7 +1348,7 @@ impl HydrolysisRenderer {
         );
         self.compositor.render_layers = core::mem::take(&mut segment.layers);
         self.transient_scene = transient_scene;
-        self.render_scene_to_surface(target);
+        self.render_scene_to_surface_with_alpha_mode(target, premultiply_alpha);
         segment.layers = core::mem::take(&mut self.compositor.render_layers);
         assert!(
             self.transient_scene.is_none(),
@@ -1428,7 +1429,7 @@ impl HydrolysisRenderer {
     }
 
     pub fn render_scene_to_texture(&mut self, target: HydrolysisRenderTarget<'_>) {
-        self.render_scene_to_surface(target);
+        self.render_scene_to_surface_with_alpha_mode(target, false);
     }
 
     fn ensure_gpu_surface_compositor_state(
@@ -1523,6 +1524,7 @@ impl HydrolysisRenderer {
         target: &wgpu::TextureView,
         base_color: vello::peniko::Color,
         encoding: TargetEncoding,
+        premultiply_alpha: bool,
     ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("hydrolysis_surface_clear_encoder"),
@@ -1534,7 +1536,7 @@ impl HydrolysisRenderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(encoding.clear_value(base_color)),
+                    load: wgpu::LoadOp::Clear(encoding.clear_value(base_color, premultiply_alpha)),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1555,6 +1557,7 @@ impl HydrolysisRenderer {
         &mut self,
         target: &HydrolysisRenderTarget<'_>,
         layers: &[ReadyLayerComposite],
+        premultiply_alpha: bool,
     ) {
         self.ensure_gpu_surface_compositor_state(target.device, target.queue, target.format);
         let compositor = self
@@ -1622,7 +1625,8 @@ impl HydrolysisRenderer {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(
-                        TargetEncoding::of(target.format).clear_value(target.base_color),
+                        TargetEncoding::of(target.format)
+                            .clear_value(target.base_color, premultiply_alpha),
                     ),
                     store: wgpu::StoreOp::Store,
                 },
@@ -1644,6 +1648,19 @@ impl HydrolysisRenderer {
     }
 
     pub fn render_scene_to_surface(&mut self, target: HydrolysisRenderTarget<'_>) {
+        self.render_scene_to_surface_with_alpha_mode(target, false);
+    }
+
+    /// [`Self::render_scene_to_surface`] with the target's composite alpha
+    /// convention made explicit: `premultiply_alpha` stores the base colour
+    /// premultiplied, which an OS surface presented under
+    /// `CompositeAlphaMode::PreMultiplied` reads back correctly; offscreen and
+    /// readback targets keep their straight-alpha bytes.
+    pub(crate) fn render_scene_to_surface_with_alpha_mode(
+        &mut self,
+        target: HydrolysisRenderTarget<'_>,
+        premultiply_alpha: bool,
+    ) {
         assert!(
             matches!(
                 target.format.remove_srgb_suffix(),
@@ -1682,6 +1699,7 @@ impl HydrolysisRenderer {
                 target.view,
                 target.base_color,
                 encoding,
+                premultiply_alpha,
             );
             return;
         }
@@ -1746,6 +1764,7 @@ impl HydrolysisRenderer {
                     target.view,
                     target.base_color,
                     encoding,
+                    premultiply_alpha,
                 );
                 self.compositor.render_layers = render_layers;
                 return;
@@ -1942,9 +1961,10 @@ impl HydrolysisRenderer {
                 target.view,
                 target.base_color,
                 encoding,
+                premultiply_alpha,
             );
         } else {
-            self.composite_ready_layers(&target, &ready);
+            self.composite_ready_layers(&target, &ready, premultiply_alpha);
         }
         for layer in ready {
             if let Some(leased) = layer.layer_texture {
