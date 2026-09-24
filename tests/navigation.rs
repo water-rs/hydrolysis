@@ -10,10 +10,13 @@
 
 use hydrolysis_m3::Material3;
 use waterui::component::list::{List, ListItem};
-use waterui::component::{text, vstack};
+use waterui::component::{button, text, vstack};
 use waterui::id::SelfId;
-use waterui::navigation::{NavigationSplitView, NavigationView, Tab, Tabs};
-use waterui::{Binding, View, ViewExt};
+use waterui::navigation::{
+    NavigationLink, NavigationSplitView, NavigationStack, NavigationToolbar, NavigationToolbarItem,
+    NavigationToolbarPlacement, NavigationView, Tab, Tabs,
+};
+use waterui::{Binding, Str, View, ViewExt};
 use waterui_testing::{NodeBounds, OffscreenApp, Role, ui};
 
 const WINDOW_WIDTH: u32 = 1400;
@@ -208,5 +211,207 @@ fn tabs_content_fits_pane() {
         f64::from(content_bottom),
         1.0,
         "the tab content's list must fill the pane minus the dock",
+    );
+}
+
+// ── Navigation chrome semantics — water-rs/hydrolysis#161 ──
+//
+// Whatever the navigation bar draws must exist as a node on the semantic
+// runtime and on the rendered runtime's accessibility tree: the title's
+// Header, the subtitle's own static text beside it, every toolbar group, the
+// back affordance, and the search field.
+
+/// The chat-detail shape from the issue: a title, a subtitle under it, and
+/// content.
+fn chat_detail_view() -> NavigationView {
+    NavigationView::new("dogfood crew", text("chat body")).navigation_subtitle(text("5 members"))
+}
+
+#[test]
+fn navigation_subtitle_emits_on_semantic_mount() {
+    let mut app = ui().viewport(390, 844).mount(chat_detail_view);
+    app.settle();
+    let bar = app.query().role(Role::NAVIGATION).single();
+    assert!(
+        app.query()
+            .role(Role::LABEL)
+            .label("5 members")
+            .children_of(&bar)
+            .exists(),
+        "the navigation subtitle must emit as a Label beside the Header under the bar node"
+    );
+}
+
+#[test]
+fn navigation_subtitle_emits_on_offscreen_mount() {
+    let mut app = ui()
+        .viewport(390, 844)
+        .theme(Material3::defaults())
+        .mount_offscreen(chat_detail_view);
+    app.settle();
+    let bar = app.query().role(Role::NAVIGATION).single();
+    let subtitle = app
+        .query()
+        .role(Role::LABEL)
+        .label("5 members")
+        .children_of(&bar)
+        .single();
+    assert!(
+        subtitle.bounds().height() > 0.0,
+        "the rendered runtime's subtitle node must carry real bounds"
+    );
+}
+
+/// One toolbar action in each group the bar draws: leading, principal (the
+/// title area), trailing, and bottom.
+fn toolbar_view() -> NavigationView {
+    NavigationView::new("Inbox", text("mail body")).navigation_toolbar(
+        NavigationToolbar::default()
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarLeading,
+                button("Edit").action(|| {}),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::Principal,
+                button("Compose").action(|| {}),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::TopBarTrailing,
+                button("Add").action(|| {}),
+            ))
+            .item(NavigationToolbarItem::new(
+                NavigationToolbarPlacement::BottomBar,
+                button("Mark All").action(|| {}),
+            )),
+    )
+}
+
+fn assert_toolbar_items<R: waterui_testing::RuntimeDriver>(
+    app: &mut waterui_testing::SemanticApp<R>,
+) {
+    app.settle();
+    for label in ["Edit", "Compose", "Add", "Mark All"] {
+        assert!(
+            app.query().role(Role::BUTTON).label(label).exists(),
+            "the toolbar item {label:?} must emit a Button node"
+        );
+    }
+}
+
+#[test]
+fn navigation_toolbar_items_emit_on_semantic_mount() {
+    let mut app = ui().viewport(390, 844).mount(toolbar_view);
+    assert_toolbar_items(&mut app);
+}
+
+#[test]
+fn navigation_toolbar_items_emit_on_offscreen_mount() {
+    let mut app = ui()
+        .viewport(390, 844)
+        .theme(Material3::defaults())
+        .mount_offscreen(toolbar_view);
+    assert_toolbar_items(&mut app);
+}
+
+#[test]
+fn navigation_search_field_emits_on_semantic_mount() {
+    let query = Binding::container(Str::from(""));
+    let mut app = ui().viewport(390, 844).mount(move || {
+        NavigationView::new("Mail", text("mail body")).searchable(&query, "Search mail")
+    });
+    app.settle();
+    assert!(
+        app.query()
+            .role(Role::TEXT_INPUT)
+            .label("Search mail")
+            .exists(),
+        "the search field must emit a text input named by its prompt"
+    );
+}
+
+#[test]
+fn navigation_search_field_emits_on_offscreen_mount() {
+    let query = Binding::container(Str::from(""));
+    let mut app = ui()
+        .viewport(390, 844)
+        .theme(Material3::defaults())
+        .mount_offscreen(move || {
+            NavigationView::new("Mail", text("mail body")).searchable(&query, "Search mail")
+        });
+    app.settle();
+    assert!(
+        app.query()
+            .role(Role::TEXT_INPUT)
+            .label("Search mail")
+            .exists(),
+        "the search field must emit a text input named by its prompt"
+    );
+}
+
+#[test]
+fn navigation_large_title_emits_on_semantic_mount() {
+    let mut app = ui()
+        .viewport(390, 844)
+        .mount(|| NavigationView::new("Inbox", text("mail body")).large_title());
+    app.settle();
+    assert!(
+        app.query().role(Role::HEADER).label("Inbox").exists(),
+        "the large title must emit as a Header"
+    );
+}
+
+#[test]
+fn navigation_large_title_emits_on_offscreen_mount() {
+    let mut app = ui()
+        .viewport(390, 844)
+        .theme(Material3::defaults())
+        .mount_offscreen(|| NavigationView::new("Inbox", text("mail body")).large_title());
+    app.settle();
+    assert!(
+        app.query().role(Role::HEADER).label("Inbox").exists(),
+        "the large title must emit as a Header"
+    );
+}
+
+#[test]
+fn navigation_back_button_emits_on_semantic_mount() {
+    let mut app = ui().viewport(390, 844).mount(|| {
+        NavigationStack::new(NavigationView::new(
+            "Root",
+            vstack((NavigationLink::new("Open Detail", || {
+                NavigationView::new("Detail", text("detail"))
+            }),)),
+        ))
+    });
+    app.settle();
+    let link = app.query().role(Role::BUTTON).label("Open Detail").single();
+    link.tap(&mut app);
+    app.settle();
+    assert!(
+        app.query().role(Role::BUTTON).label("Back").exists(),
+        "the pushed stack must emit its back affordance"
+    );
+}
+
+#[test]
+fn navigation_back_button_emits_on_offscreen_mount() {
+    let mut app = ui()
+        .viewport(390, 844)
+        .theme(Material3::defaults())
+        .mount_offscreen(|| {
+            NavigationStack::new(NavigationView::new(
+                "Root",
+                vstack((NavigationLink::new("Open Detail", || {
+                    NavigationView::new("Detail", text("detail"))
+                }),)),
+            ))
+        });
+    app.settle();
+    let link = app.query().role(Role::BUTTON).label("Open Detail").single();
+    link.tap(&mut app);
+    app.settle();
+    assert!(
+        app.query().role(Role::BUTTON).label("Back").exists(),
+        "the pushed stack must emit its back affordance"
     );
 }
