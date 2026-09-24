@@ -511,6 +511,7 @@ impl SemanticCore {
     }
 
     pub(crate) fn update_embedded_modifiers(&mut self, modifiers: Modifiers) {
+        self.hit_test.modifiers = modifiers;
         if let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() {
             sink.set_modifiers(modifiers);
         }

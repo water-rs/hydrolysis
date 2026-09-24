@@ -156,6 +156,14 @@ pub(crate) enum AccessibilityActionTarget {
         index: usize,
         handle: ScrollHandle,
         extents: Rc<RefCell<crate::renderer::lazy::VirtualExtentIndex>>,
+        /// The row's erased collection id — the value the list's selection
+        /// binding is keyed by.
+        id: crate::widgets::layout::list::ListItemId,
+        /// The list's row-selection state when the list is selectable: `Click`
+        /// then writes the binding like a pointer click on the row, and
+        /// arrow-key navigation moves the selection along with the focus
+        /// (water-rs/waterui#1226).
+        selection: Option<Rc<crate::widgets::layout::list::ListRowSelection>>,
     },
 }
 
@@ -895,12 +903,25 @@ impl SemanticCore {
                 index,
                 handle,
                 extents,
+                id,
+                selection,
             } => match action {
                 AccessibilityAction::Focus => {
                     self.scroll_list_row_into_view(index, &handle, &extents);
                     true
                 }
-                AccessibilityAction::Click => self.click_list_row(target_node, env),
+                AccessibilityAction::Click => {
+                    // The row's activation resolves exactly as a click on its
+                    // centre would, then the Select action writes the binding
+                    // like the row's own press slot — plain, toggle and range
+                    // semantics ride the held modifiers.
+                    let mut changed = self.click_list_row(target_node, env);
+                    if let Some(selection) = selection {
+                        selection.write(index, id, self.hit_test.modifiers);
+                        changed = true;
+                    }
+                    changed
+                }
                 AccessibilityAction::ScrollIntoView => {
                     self.scroll_list_row_into_view(index, &handle, &extents)
                 }
