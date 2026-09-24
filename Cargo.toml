@@ -323,4 +323,4 @@ waterkit-video-streaming = { git = "https://github.com/water-rs/waterkit", rev =
 # The Material 3 theme must implement the five-argument
 # `WidgetTheme::draw_button_chrome` contract added for
 # water-rs/hydrolysis#115.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "0aa601378730d7a99e56b8727ea4f99dc8b62e1d" }
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "7b5eca5a5aca4ca4c0f182558e33cbea8046b588" }
