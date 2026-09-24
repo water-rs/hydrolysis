@@ -278,6 +278,10 @@ const MENU_TRIGGER_STYLE: ButtonStyle = ButtonStyle::Automatic;
 pub(crate) struct MenuRenderState {
     /// The build-time decision of how to render the label.
     label: MenuLabel,
+    /// Whether the label resolves to an icon-only presentation — decided
+    /// once at build from the label's own display-mode resolution, so the
+    /// trigger sizes under the icon-button contract like a button.
+    icon_only: bool,
     items: nami::Computed<Vec<waterui_controls::menu::ResolvedMenuItem>>,
     #[cfg(feature = "accessibility")]
     accessibility_label: nami::Computed<StyledStr>,
@@ -294,7 +298,7 @@ enum MenuLabel {
 }
 
 impl MenuRenderState {
-    pub(crate) fn from_resolved(menu: ResolvedMenu) -> Self {
+    pub(crate) fn from_resolved(menu: ResolvedMenu, env: &Environment) -> Self {
         let ResolvedMenu {
             label,
             items,
@@ -303,6 +307,9 @@ impl MenuRenderState {
             #[cfg(not(feature = "accessibility"))]
                 accessibility_label: _,
         } = menu;
+        let icon_only = label
+            .downcast_ref::<Label>()
+            .is_some_and(|label| label_resolves_icon_only(label, env));
         let label = match label.downcast::<Label>() {
             Ok(label) if renders_as_plain_title(&label) => MenuLabel::Title(*label),
             Ok(label) => MenuLabel::View(RetainedSubview::new(AnyView::new(*label))),
@@ -310,6 +317,7 @@ impl MenuRenderState {
         };
         Self {
             label,
+            icon_only,
             items,
             #[cfg(feature = "accessibility")]
             accessibility_label,
@@ -439,7 +447,14 @@ pub(crate) fn measure_menu_node(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let metrics = theme.button_metrics(MENU_TRIGGER_STYLE, ButtonSize::default());
+    let metrics = button_metrics(
+        theme,
+        MENU_TRIGGER_STYLE,
+        ButtonSize::default(),
+        state.icon_only,
+        env.get::<InteractionStyle>(),
+        env.get::<FloatingScope>().map(|scope| &scope.0),
+    );
     let label_size = match &state.label {
         MenuLabel::Title(label) => {
             let styled = styled_button_title(theme, MENU_TRIGGER_STYLE, label, env);
@@ -645,12 +660,20 @@ pub(crate) fn render_menu_parts(
     let (interaction, press_slot, _) =
         ctx.renderer_mut()
             .bind_interaction_target(interaction_key, hit_bounds, env);
+    let icon_only = state.borrow().icon_only;
     {
         let mut draw = ctx.draw_context();
-        theme.draw_button_chrome(&mut draw, bounds, style, false, interaction);
+        theme.draw_button_chrome(&mut draw, bounds, style, icon_only, interaction);
     }
 
-    let metrics = theme.button_metrics(style, ButtonSize::default());
+    let metrics = button_metrics(
+        &theme,
+        style,
+        ButtonSize::default(),
+        icon_only,
+        env.get::<InteractionStyle>(),
+        env.get::<FloatingScope>().map(|scope| &scope.0),
+    );
     let label_bounds = inset_rect(bounds, metrics.padding_x, metrics.padding_y);
     {
         let mut state = state.borrow_mut();
@@ -693,7 +716,7 @@ pub(crate) fn render_menu_parts(
         // Hover/focus/press state layers over the menu trigger chrome.
         let interaction = local_interaction_state(interaction, ctx.hit_transform);
         let mut draw = ctx.draw_context();
-        theme.draw_button_state_layer(&mut draw, bounds, style, false, interaction);
+        theme.draw_button_state_layer(&mut draw, bounds, style, icon_only, interaction);
     }
 
     let items = state.borrow().items.clone();
@@ -744,7 +767,18 @@ pub(crate) fn measure_menu_intrinsic(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let metrics = theme.button_metrics(MENU_TRIGGER_STYLE, ButtonSize::default());
+    let icon_only = menu
+        .label
+        .downcast_ref::<Label>()
+        .is_some_and(|label| label_resolves_icon_only(label, env));
+    let metrics = button_metrics(
+        theme,
+        MENU_TRIGGER_STYLE,
+        ButtonSize::default(),
+        icon_only,
+        env.get::<InteractionStyle>(),
+        env.get::<FloatingScope>().map(|scope| &scope.0),
+    );
     let label_size = if let Some(label) = menu.label.downcast_ref::<Label>()
         && renders_as_plain_title(label)
     {
