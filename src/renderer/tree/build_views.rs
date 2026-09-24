@@ -29,6 +29,7 @@ impl_widget_behavior!(
     crate::widgets::nav::navigation::NavigationSplitRenderState,
     crate::widgets::nav::navigation::render_navigation_split_node,
     crate::widgets::nav::navigation::measure_navigation_split_node
+    ; prepare: prepare_columns
     ; a11y: crate::widgets::nav::navigation::emit_navigation_split_accessibility
 );
 impl_widget_behavior!(

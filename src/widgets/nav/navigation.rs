@@ -7,7 +7,7 @@ use crate::renderer::bounded_proposal;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, RetainedSubview,
     WidgetRenderContext, measure_navigation_view_intrinsic,
-    measure_owned_navigation_view_intrinsic, measure_transient_view_intrinsic,
+    measure_owned_navigation_view_with_proposal, measure_transient_view_with_proposal,
     navigation_back_button_rect, navigation_base_bar_height_for_display_mode,
     normalize_layout_view, resolved_color_to_peniko, split_compact_threshold, transformed_rect,
 };
@@ -806,6 +806,30 @@ impl NavigationSplitRenderState {
         self.placeholder.ensure_built(renderer, env);
     }
 
+    /// Materialize the content/detail columns the live selection demands before
+    /// any measure pass reads them. Building belongs to a selection change — a
+    /// probe only ever reads what is retained — so this runs in the layout-time
+    /// prepare pass, and keeps whichever compact variant the column last built.
+    pub(crate) fn prepare_columns(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+        self.prebuild(renderer, env);
+        let primary_selection = self.primary_selection.get();
+        if let Some(selected) = primary_selection.filter(|_| self.content_builder.is_some()) {
+            let compact = self
+                .content
+                .as_ref()
+                .is_some_and(|(_, compact, _)| *compact);
+            self.ensure_content(selected, compact, renderer, env);
+        }
+        let detail_selection = self
+            .secondary_selection
+            .as_ref()
+            .map_or(primary_selection, Signal::get);
+        if let Some(selected) = detail_selection {
+            let compact = self.detail.as_ref().is_some_and(|(_, compact, _)| *compact);
+            self.ensure_detail(selected, compact, renderer, env);
+        }
+    }
+
     fn ensure_content(
         &mut self,
         id: Id,
@@ -862,86 +886,279 @@ impl HydroNativeView for Native<NavigationSplitLayout> {
         env: &Environment,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_navigation_split_layout(view.as_inner(), state, env, theme)
+        measure_navigation_split_layout(
+            view.as_inner(),
+            ProposalSize::UNSPECIFIED,
+            state,
+            env,
+            theme,
+        )
+    }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
+        ViewDimensions::new(measure_navigation_split_layout(
+            view.as_inner(),
+            proposal,
+            state,
+            env,
+            theme,
+        ))
+    }
+}
+
+/// The column plan a navigation split resolves under a proposal, mirroring
+/// [`render_navigation_split_parts`]: whether the pane is compact, whether a
+/// three-column split shows all columns, the resolved fixed-column width, and
+/// the proposal each column's rect hands its content — the fixed width for the
+/// leading columns, the pane remainder for the detail, and always the full
+/// proposal height (waterui `docs/layout-spec.md` §7: a column's rect is the
+/// proposal for its content).
+struct SplitMeasurePlan {
+    compact: bool,
+    show_all: bool,
+    three_column: bool,
+    column_proposal: ProposalSize,
+    detail_proposal: ProposalSize,
+}
+
+fn split_measure_plan(
+    three_column: bool,
+    column_width: waterui::navigation::ColumnWidth,
+    style: waterui::navigation::NativeNavigationSplitStyle,
+    visibility: waterui::navigation::NavigationSplitColumnVisibility,
+    proposal: ProposalSize,
+) -> SplitMeasurePlan {
+    use waterui::navigation::NavigationSplitColumnVisibility as Visibility;
+    let desired_column_width = resolved_split_column_width(column_width, style);
+    let proposal_width = proposal.width.map(f64::from);
+
+    let compact = matches!(visibility, Visibility::DetailOnly)
+        || proposal_width.is_some_and(|width| {
+            width
+                < split_compact_threshold(
+                    desired_column_width * if three_column { 2.0 } else { 1.0 },
+                )
+        });
+    let show_all = !three_column
+        || matches!(visibility, Visibility::All)
+        || (matches!(visibility, Visibility::Automatic)
+            && proposal_width
+                .is_none_or(|width| width >= split_compact_threshold(desired_column_width * 2.0)));
+    let column_count = if three_column && show_all { 3.0 } else { 2.0 };
+    let column_width = desired_column_width
+        .clamp(f64::from(column_width.min()), f64::from(column_width.max()))
+        .min(proposal_width.unwrap_or(f64::MAX) / column_count);
+    let fixed_columns = column_count - 1.0;
+    SplitMeasurePlan {
+        compact,
+        show_all,
+        three_column,
+        column_proposal: ProposalSize::new(Some(column_width as f32), proposal.height),
+        detail_proposal: ProposalSize::new(
+            proposal_width.map(|width| (width - column_width * fixed_columns).max(0.0) as f32),
+            proposal.height,
+        ),
+    }
+}
+
+/// The retained column a selection occupies — its mounted view when built,
+/// the placeholder otherwise (the placeholder also answers for an absent
+/// selection).
+fn retained_split_column<'a>(
+    selected: Option<Id>,
+    column: &'a Option<(Id, bool, RetainedSubview)>,
+    placeholder: &'a RetainedSubview,
+) -> &'a RetainedSubview {
+    if selected.is_some() {
+        column.as_ref().map_or(placeholder, |(_, _, view)| view)
+    } else {
+        placeholder
     }
 }
 
 fn measure_navigation_split_layout(
     split: &NavigationSplitLayout,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let primary_view = normalize_layout_view(split.primary_builder().build(), env);
-    let primary = measure_transient_view_intrinsic(&primary_view, state, env, theme);
     let primary_selection = split.primary_selection().get();
-    let content = split.content_builder().and_then(|builder| {
-        primary_selection.map(|selected| {
-            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env, theme)
-        })
-    });
     let detail_selection = split
         .secondary_selection()
         .map_or(primary_selection, Signal::get);
-    let detail = match detail_selection {
-        None => {
-            let placeholder = normalize_layout_view(split.placeholder_builder().build(), env);
-            measure_transient_view_intrinsic(&placeholder, state, env, theme)
-        }
-        Some(selected) => measure_owned_navigation_view_intrinsic(
-            split.detail_builder().build(selected),
+    let plan = split_measure_plan(
+        split.content_builder().is_some(),
+        split.sidebar_width_constraints(),
+        split.native_style(),
+        split.column_visibility_signal().get(),
+        proposal,
+    );
+
+    // A dispatch-time measure has no retained columns to read: each column is
+    // built transient — normalized then measured — against the proposal its
+    // rect would hand it.
+    let transient_primary = || normalize_layout_view(split.primary_builder().build(), env);
+    let transient_placeholder = || normalize_layout_view(split.placeholder_builder().build(), env);
+
+    if plan.compact {
+        let view = if plan.three_column {
+            if let Some(selected) = detail_selection {
+                normalize_layout_view(AnyView::new(split.detail_builder().build(selected)), env)
+            } else if let Some(selected) = primary_selection {
+                normalize_layout_view(
+                    AnyView::new(
+                        split
+                            .content_builder()
+                            .expect("three-column split must provide a content builder")
+                            .build(selected),
+                    ),
+                    env,
+                )
+            } else {
+                transient_primary()
+            }
+        } else if let Some(selected) = detail_selection {
+            normalize_layout_view(AnyView::new(split.detail_builder().build(selected)), env)
+        } else {
+            transient_primary()
+        };
+        return measure_transient_view_with_proposal(&view, proposal, state, env, theme);
+    }
+
+    let mut width = 0.0_f64;
+    let mut height = 0.0_f64;
+    if !plan.three_column || plan.show_all {
+        let size = measure_transient_view_with_proposal(
+            &transient_primary(),
+            plan.column_proposal,
             state,
             env,
             theme,
-        ),
+        );
+        width += f64::from(size.width);
+        height = height.max(f64::from(size.height));
+    }
+    if plan.three_column {
+        let size = if let Some(selected) = primary_selection {
+            measure_owned_navigation_view_with_proposal(
+                split
+                    .content_builder()
+                    .expect("three-column split must provide a content builder")
+                    .build(selected),
+                plan.column_proposal,
+                state,
+                env,
+                theme,
+            )
+        } else {
+            measure_transient_view_with_proposal(
+                &transient_placeholder(),
+                plan.column_proposal,
+                state,
+                env,
+                theme,
+            )
+        };
+        width += f64::from(size.width);
+        height = height.max(f64::from(size.height));
+    }
+    let size = if let Some(selected) = detail_selection {
+        measure_owned_navigation_view_with_proposal(
+            split.detail_builder().build(selected),
+            plan.detail_proposal,
+            state,
+            env,
+            theme,
+        )
+    } else {
+        measure_transient_view_with_proposal(
+            &transient_placeholder(),
+            plan.detail_proposal,
+            state,
+            env,
+            theme,
+        )
     };
-    let column_width =
-        resolved_split_column_width(split.sidebar_width_constraints(), split.native_style());
-    let content_width = content.map_or(0.0, |_| column_width);
-    let height = content.map_or(primary.height.max(detail.height), |content| {
-        primary.height.max(content.height).max(detail.height)
-    });
+    width += f64::from(size.width);
+    height = height.max(f64::from(size.height));
+
     LayoutSize::new(
-        (column_width + content_width + f64::from(detail.width)) as f32,
-        height,
+        proposal.width.unwrap_or(width as f32),
+        proposal.height.unwrap_or(height as f32),
     )
 }
 
 pub(crate) fn measure_navigation_split_node(
     split: &NavigationSplitRenderState,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let primary = split.primary.measure_built(state, env, theme);
     let primary_selection = split.primary_selection.get();
-    let content = split.content_builder.as_ref().and_then(|builder| {
-        primary_selection.map(|selected| {
-            measure_owned_navigation_view_intrinsic(builder.build(selected), state, env, theme)
-        })
-    });
     let detail_selection = split
         .secondary_selection
         .as_ref()
         .map_or(primary_selection, Signal::get);
-    let detail = match detail_selection {
-        None => split.placeholder.measure_built(state, env, theme),
-        Some(selected) => measure_owned_navigation_view_intrinsic(
-            split.detail_builder.build(selected),
-            state,
-            env,
-            theme,
-        ),
-    };
-    let column_width = resolved_split_column_width(split.column_width, split.style);
-    let content_width = content.map_or(0.0, |_| column_width);
-    let height = content.map_or(primary.height.max(detail.height), |content| {
-        primary.height.max(content.height).max(detail.height)
-    });
+    let plan = split_measure_plan(
+        split.is_three_column(),
+        split.column_width,
+        split.style,
+        split.visibility.get(),
+        proposal,
+    );
+
+    // A probe reads the retained, mounted column — `builder.build(selected)`
+    // belongs to the selection change, not to measurement — against the
+    // proposal the column's rect hands it.
+    if plan.compact {
+        let column = if plan.three_column {
+            if detail_selection.is_some() {
+                retained_split_column(detail_selection, &split.detail, &split.placeholder)
+            } else if primary_selection.is_some() {
+                retained_split_column(primary_selection, &split.content, &split.placeholder)
+            } else {
+                &split.primary
+            }
+        } else {
+            retained_split_column(detail_selection, &split.detail, &split.placeholder)
+        };
+        return ViewDimensions::new(
+            column.measure_built_with_proposal(state, env, theme, proposal),
+        );
+    }
+
+    let mut width = 0.0_f64;
+    let mut height = 0.0_f64;
+    if !plan.three_column || plan.show_all {
+        let size =
+            split
+                .primary
+                .measure_built_with_proposal(state, env, theme, plan.column_proposal);
+        width += f64::from(size.width);
+        height = height.max(f64::from(size.height));
+    }
+    if plan.three_column {
+        let size = retained_split_column(primary_selection, &split.content, &split.placeholder)
+            .measure_built_with_proposal(state, env, theme, plan.column_proposal);
+        width += f64::from(size.width);
+        height = height.max(f64::from(size.height));
+    }
+    let size = retained_split_column(detail_selection, &split.detail, &split.placeholder)
+        .measure_built_with_proposal(state, env, theme, plan.detail_proposal);
+    width += f64::from(size.width);
+    height = height.max(f64::from(size.height));
+
     ViewDimensions::new(LayoutSize::new(
-        (column_width + content_width + f64::from(detail.width)) as f32,
-        height,
+        proposal.width.unwrap_or(width as f32),
+        proposal.height.unwrap_or(height as f32),
     ))
 }
 
