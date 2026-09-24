@@ -245,9 +245,9 @@ impl PlatformWindow for BrowserWindow {
 
     fn apply_properties(&mut self, window: &WuiWindow) {
         self.document
-            .set_title(window.display_title().get().as_str());
+            .set_title(window.display_title().snapshot().as_str());
 
-        match window.state.get() {
+        match window.state.snapshot() {
             WindowState::Normal => {
                 self.canvas
                     .style()
@@ -267,7 +267,7 @@ impl PlatformWindow for BrowserWindow {
         }
 
         if self.canvas.client_width() == 0 || self.canvas.client_height() == 0 {
-            let frame = window.frame.get();
+            let frame = window.frame.snapshot();
             self.canvas
                 .style()
                 .set_property("width", &format!("{}px", frame.width().max(1.0)))

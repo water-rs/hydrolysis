@@ -353,7 +353,7 @@ pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vel
 pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
     match &window.background {
         WindowBackground::Opaque => false,
-        WindowBackground::Color(color) => color.resolve(env).get().opacity < 1.0,
+        WindowBackground::Color(color) => color.resolve(env).snapshot().opacity < 1.0,
     }
 }
 
@@ -580,7 +580,7 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
     #[cfg(feature = "winit")]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
 
     if runtime.renderer.take_rebuild_request() {
         runtime.request_refresh();
@@ -714,7 +714,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     #[cfg(feature = "winit")]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
     let mut snapshot = None;
     let mut rebuilt = false;
     let profile;
