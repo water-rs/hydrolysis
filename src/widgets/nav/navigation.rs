@@ -29,7 +29,7 @@ use waterui::theme::color::{Background, Surface};
 use waterui_controls::text_field::TextField;
 use waterui_core::id::Id;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
-use waterui_core::{AnyView, Environment, Native};
+use waterui_core::{AnyView, Environment, Metadata, Native};
 use waterui_graphics::color::{Color, ResolvedColor};
 
 #[derive(Clone, Copy)]
@@ -71,6 +71,21 @@ pub(crate) struct NavigationViewRenderState {
     subtitle_present: bool,
 }
 
+/// Whether a bar slot is bound. An unbound slot is `()`, which resolves to
+/// the native-leaf `Native<()>` by the time the backend sees it (`()` is a
+/// raw view); waterui may also wrap a slot in `Metadata<Environment>`
+/// (`navigation_slot_with_environment`), so the check looks through that wrap
+/// too.
+fn navigation_slot_is_empty(view: &AnyView) -> bool {
+    if view.is::<()>() || view.is::<Native<()>>() {
+        return true;
+    }
+    match view.downcast_ref::<Metadata<Environment>>() {
+        Some(meta) => navigation_slot_is_empty(&meta.content),
+        None => false,
+    }
+}
+
 impl NavigationViewRenderState {
     pub(crate) fn from_view(navigation: NavigationView, env: &Environment) -> Self {
         let NavigationView { bar, content, .. } = navigation;
@@ -87,7 +102,7 @@ impl NavigationViewRenderState {
             || Color::new(Surface).resolve(env),
             |color| color.expect_resolved().clone(),
         );
-        let subtitle_present = !subtitle.is::<()>();
+        let subtitle_present = !navigation_slot_is_empty(&subtitle);
         let mut principal = Vec::new();
         let mut leading = Vec::new();
         let mut trailing = Vec::new();
