@@ -97,7 +97,7 @@ impl HydroNativeView for WebView {
         env: &Environment,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        let _ = (state, view, env);
+        let _ = (state, view, env, theme);
         LayoutSize::zero()
     }
 
@@ -109,7 +109,7 @@ impl HydroNativeView for WebView {
         theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
-        let _ = (state, view, env);
+        let _ = (state, view, env, theme);
         ViewDimensions::new(LayoutSize::new(
             proposal.width.unwrap_or(0.0),
             proposal.height.unwrap_or(0.0),
@@ -137,7 +137,7 @@ pub(crate) fn measure_webview_node(
     _env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let _ = (state, hydro);
+    let _ = (state, hydro, theme);
     ViewDimensions::new(LayoutSize::new(
         proposal.width.unwrap_or(0.0),
         proposal.height.unwrap_or(0.0),
