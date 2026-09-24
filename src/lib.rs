@@ -20,7 +20,7 @@ mod widgets;
 // Interaction/runtime layer shared with other self-drawn backends.
 pub(crate) use waterui_backend_core::{animation, gesture, scroll, time};
 
-pub use engine::{Brush, DrawContext, WidgetTheme};
+pub use engine::{Brush, DrawContext, IconOnlyButtonLabel, WidgetTheme};
 use waterui_core::Environment;
 
 /// A presentation style for the rendered Hydrolysis runtime.
