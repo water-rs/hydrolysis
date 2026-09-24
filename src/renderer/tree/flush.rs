@@ -217,9 +217,15 @@ impl RenderNode {
                         );
                     }
                     WrapperEffect::ContextMenu(value) => {
-                        HydrolysisRenderer::apply_context_menu(renderer, ctx, value, |r| {
-                            node.child.flush(r, ctx, child_env);
-                        });
+                        HydrolysisRenderer::apply_context_menu(
+                            renderer,
+                            ctx,
+                            child_env,
+                            value,
+                            |r| {
+                                node.child.flush(r, ctx, child_env);
+                            },
+                        );
                     }
                     WrapperEffect::Hittable(value) => {
                         HydrolysisRenderer::apply_hittable(renderer, value, |r| {

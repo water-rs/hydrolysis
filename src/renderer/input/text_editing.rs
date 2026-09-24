@@ -154,6 +154,9 @@ pub(crate) struct TextInputTarget {
     pub(crate) order: usize,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
+    /// The environment of the view the target was registered from — the
+    /// context menu it opens runs inside it (water-rs/hydrolysis#140).
+    pub(crate) env: Environment,
     pub(crate) focus_binding: Option<Binding<bool>>,
     #[cfg(feature = "accessibility")]
     pub(crate) accessibility_node_id: Option<AccessibilityNodeId>,
@@ -171,6 +174,9 @@ pub(crate) struct TextInputTargetRegistration {
     pub(crate) purpose: TextInputPurpose,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
+    /// The environment of the registering view; the context menu opens inside
+    /// it (water-rs/hydrolysis#140).
+    pub(crate) env: Environment,
 }
 
 pub(crate) struct TextInputTargetData {
@@ -1612,14 +1618,18 @@ impl HydrolysisRenderer {
             return false;
         };
         let target_key = target.interaction_key.clone();
-        let entries = SemanticCore::build_text_context_menu_entries(&target, env);
+        // The menu opens in the registering view's environment layered over
+        // this dispatch's, so `.state(&value)` overlays reach the item
+        // actions (water-rs/hydrolysis#140).
+        let menu_env = target.env.layered_on(env);
+        let entries = SemanticCore::build_text_context_menu_entries(&target, &menu_env);
         if entries.is_empty() {
             self.dismiss_active_text_context_menu();
             return false;
         }
 
         self.dismiss_active_text_context_menu();
-        let mode = env
+        let mode = menu_env
             .get::<HydrolysisTextContextMenuMode>()
             .copied()
             .unwrap_or(HydrolysisTextContextMenuMode::NativeWindow);
@@ -1645,7 +1655,7 @@ impl HydrolysisRenderer {
                     rows,
                     model: target.model,
                     selection: target.selection,
-                    env: env.clone(),
+                    env: menu_env.clone(),
                 },
             });
             self.request_refresh();
@@ -1655,7 +1665,7 @@ impl HydrolysisRenderer {
         let menu_state = nami::Binding::container(WindowState::Normal);
         let metrics = self.theme().text_context_menu_metrics();
         let (width, height) = text_context_menu_size(&entries, metrics);
-        let origin = env
+        let origin = menu_env
             .get::<HydrolysisWindowOrigin>()
             .copied()
             .expect("hydrolysis text context menu requires HydrolysisWindowOrigin in environment");
@@ -1663,7 +1673,7 @@ impl HydrolysisRenderer {
         let entries_for_popup = entries.clone();
         let model = target.model.clone();
         let selection = Rc::clone(&target.selection);
-        let action_env = env.clone();
+        let action_env = menu_env.clone();
         let menu_state_for_content = menu_state.clone();
         let popup_content = move || {
             let mut rows = Vec::with_capacity(entries_for_popup.len());
@@ -1711,7 +1721,8 @@ impl HydrolysisRenderer {
             LayoutPoint::new(origin.x + point.x as f32, origin.y + point.y as f32),
             LayoutSize::new(width as f32, height as f32),
         ));
-        popup.show(env);
+        let popup = window_in_opening_environment(popup, &menu_env);
+        popup.show(&menu_env);
         self.text_editing.active_text_context_menu = Some(ActiveTextContextMenu::NativeWindow {
             target: target_key,
             state: menu_state,

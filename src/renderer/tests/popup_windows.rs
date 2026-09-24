@@ -143,6 +143,68 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
         "the popup's nodes must leave the merged tree once it closes"
     );
 }
+
+/// water-rs/hydrolysis#140: a popup runs in the environment of the view that
+/// opened it, so `.state(&store)` on an ancestor reaches the item action's
+/// extractors — here through the secondary-click path rather than menu
+/// activation.
+#[test]
+fn context_menu_item_action_reads_state_inherited_from_the_opening_view() {
+    #[waterui::prelude::state]
+    #[derive(Clone)]
+    struct Store {
+        hits: Binding<u32>,
+    }
+
+    let store = Store {
+        hits: Binding::container(0),
+    };
+    let store_for_view = store.clone();
+    let builder = AnyViewBuilder::<AnyView>::new(move || {
+        let store = store_for_view.clone();
+        AnyView::new(
+            Frame::new(button("host").action(|| {}))
+                .width(WINDOW_SIZE)
+                .height(WINDOW_SIZE)
+                .context_menu(vec!["Bump".action(|store: Store| {
+                    store.hits.set(store.hits.get() + 1);
+                })])
+                .state(&store),
+        )
+    });
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_SIZE as u32,
+        WINDOW_SIZE as u32,
+        MinimalTestTheme::default(),
+    );
+
+    let update = runtime
+        .pump_at(false, Instant::now())
+        .tree_update
+        .expect("the first frame must publish an accessibility tree");
+    let (_, host) = find_by_label(&update, Role::Button, "host")
+        .expect("the host button must emit an accessibility node");
+    let bounds = host.bounds().expect("the host button has frame bounds");
+    let (x, y) = ((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+
+    for event in secondary_click(x as f32, y as f32) {
+        runtime.push_input_event(event);
+    }
+    let update = runtime
+        .pump_at(false, Instant::now())
+        .tree_update
+        .expect("the click frame must publish an accessibility tree");
+    let (bump, _) = find_by_label(&update, Role::Button, "Bump")
+        .expect("the context menu's items must merge into the returned tree");
+    assert!(act(&mut runtime, Action::Click, bump));
+    assert_eq!(
+        store.hits.get(),
+        1,
+        "the item action did not reach the injected store"
+    );
+}
 /// `is_settled` counts a window's pending frame — the main window's and each
 /// popup's alike — so a test host cannot read a tree that predates a frame the
 /// runtime already committed to. An accessibility action that changes its
