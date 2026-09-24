@@ -383,6 +383,13 @@ impl SemanticCore {
         result
     }
 
+    /// The modifier snapshot the window last reported — pointer targets read
+    /// it at commit time because pointer events carry no modifier state of
+    /// their own (toggle and Shift range selection).
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        self.hit_test.modifiers
+    }
+
     /// Records that a widget-owned sub-view applied a structural patch during
     /// this flush, and requests a refresh frame so the change's prune cycle (and
     /// any layout it invalidated in ancestors) settles on the next pump.

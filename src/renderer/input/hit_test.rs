@@ -251,6 +251,10 @@ pub(crate) struct HitTestState {
     /// end of the frame: focus then relocates to the next focusable rather
     /// than dying until a pointer press re-grants it.
     pub(crate) focus_dropped_this_frame: bool,
+    /// The modifier snapshot `InputEvent::ModifiersChanged` last reported —
+    /// pointer targets read it at commit time because pointer events carry
+    /// no modifier state of their own (toggle and Shift range selection).
+    pub(crate) modifiers: Modifiers,
 }
 
 impl HitTestState {
@@ -1738,11 +1742,19 @@ impl SemanticCore {
     }
 
     /// Land keyboard focus on `dest` row: reveal it through the accessibility
-    /// tree first, then move the visible focus. Nothing else happens — rows
-    /// activate only through Enter/Space, resolved the same way a pointer
-    /// click on the row's centre would be (water-rs/waterui#1223).
+    /// tree first, then move the visible focus. Rows activate only through
+    /// Enter/Space, resolved the same way a pointer click on the row's centre
+    /// would be (water-rs/waterui#1223). A row belonging to a selectable list
+    /// also writes the selection on the way: plain arrows move it to the
+    /// destination row and Shift extends the anchored range
+    /// (water-rs/waterui#1226).
     #[cfg(feature = "accessibility")]
-    fn navigate_list_row(&mut self, dest: AccessibilityNodeId, env: &Environment) -> bool {
+    fn navigate_list_row(
+        &mut self,
+        dest: AccessibilityNodeId,
+        env: &Environment,
+        modifiers: Modifiers,
+    ) -> bool {
         let _ = self.handle_accessibility_action(
             AccessibilityActionRequest {
                 action: AccessibilityAction::ScrollIntoView,
@@ -1752,6 +1764,15 @@ impl SemanticCore {
             },
             env,
         );
+        if let Some(AccessibilityActionTarget::ListRow {
+            index,
+            id,
+            selection: Some(selection),
+            ..
+        }) = self.accessibility.actions.get(&dest)
+        {
+            selection.write(*index, *id, modifiers);
+        }
         self.set_keyboard_focus_node(Some(dest), true)
     }
 
@@ -1836,7 +1857,7 @@ impl SemanticCore {
                             // list.
                             return true;
                         };
-                        return self.navigate_list_row(dest, env);
+                        return self.navigate_list_row(dest, env, modifiers);
                     }
                 }
                 if let Some(node) = self.keyboard_focus_node() {
@@ -1906,7 +1927,7 @@ impl SemanticCore {
             } else {
                 siblings.last()
             } {
-                return self.navigate_list_row(*dest, env);
+                return self.navigate_list_row(*dest, env, modifiers);
             }
             return true;
         }
