@@ -951,8 +951,11 @@ pub(crate) struct DynamicHostNode {
     /// The current expansion of the `Dynamic`'s content. Interior mutability
     /// lets a pass that runs under `&self` (flush, semantic emit) apply a
     /// pending structural change at this node's own entry, instead of waiting
-    /// for the next `patch` walk.
-    pub(super) child: RefCell<RenderNode>,
+    /// for the next `patch` walk. The shared cell lets the measurement caches
+    /// hold a weak handle by `Dynamic` identity, so a dispatch measure that
+    /// meets the connected `Dynamic` can re-measure this child for the real
+    /// proposal.
+    pub(super) child: Rc<RefCell<RenderNode>>,
 }
 
 impl DynamicHostNode {

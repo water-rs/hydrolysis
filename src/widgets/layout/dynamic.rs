@@ -8,8 +8,8 @@ use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{Environment, Native};
 
 /// Measures a `Dynamic` node's current content if the node still owns it, or
-/// falls back to the renderer's per-node dimension caches when the content has
-/// already been handed to the render pipeline.
+/// reaches the retained child through the renderer's identity registry when
+/// the content has already been handed to the render pipeline.
 fn measure_dynamic(
     state: &mut HydroState,
     dynamic: &Dynamic,
@@ -42,13 +42,22 @@ fn measure_dynamic(
         None => {
             match dynamic.with_connected_pending_view_mut(|slot| measure_content(slot, state)) {
                 Some(Some(dimensions)) => dimensions,
-                Some(None) | None => state
-                    .measurement
-                    .dynamic_dimensions(identity, proposal)
-                    .or_else(|| state.measurement.dynamic_intrinsic(identity))
-                    .unwrap_or_else(|| {
-                        panic!("hydrolysis Dynamic intrinsic cache miss for connected dynamic node")
-                    }),
+                Some(None) | None => match state.measurement.dynamic_dimensions(identity, proposal)
+                {
+                    Some(dimensions) => dimensions,
+                    None => {
+                        // The content lives in the retained `DynamicHostNode`;
+                        // measure that child for the proposal actually given —
+                        // a leaf must answer the offer it was probed with, not
+                        // a cached answer to a different one.
+                        let node = state.measurement.dynamic_node(identity).unwrap_or_else(|| {
+                            panic!(
+                                "hydrolysis Dynamic measurement found a connected dynamic node missing from the retained registry"
+                            )
+                        });
+                        node.borrow().measure(state, env, theme, proposal)
+                    }
+                },
             }
         }
     };

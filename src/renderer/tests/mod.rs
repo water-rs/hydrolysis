@@ -20,6 +20,7 @@ mod perf_scroll;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod popup_windows;
 mod retained_scene;
+mod scene_offer;
 #[cfg(feature = "accessibility")]
 mod scroll_frames;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
