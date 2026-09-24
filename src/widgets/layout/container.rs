@@ -55,12 +55,15 @@ impl HydroNativeView for Native<FixedContainer> {
 /// `measure_item`. `cross` is the axis-negotiated extent on the stack's cross
 /// axis (`None` when the caller left it open); the item is measured with the
 /// main axis unspecified either way, since a virtualized stack lays items out
-/// at their intrinsic main extent.
+/// at their intrinsic main extent. `main` is the offered main-axis extent:
+/// a finite offer caps the reported extent (the stack virtualizes — it fits
+/// by showing fewer items), while an open axis reads the full extent.
 fn lazy_stack_sample_size(
     state: &mut HydroState,
     view: &Native<LazyContainer>,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
+    main: Option<f32>,
     cross: Option<f32>,
 ) -> LayoutSize {
     let (layout, children) = view.as_inner().as_parts();
@@ -84,16 +87,41 @@ fn lazy_stack_sample_size(
         .map(|view| measure_transient_view_with_proposal(&view, item_proposal, state, env, theme))
         .unwrap_or_else(|| panic!("LazyContainer failed to materialize child at index 0"));
     let count = child_count as f64;
+    // The sampled extent is the membership's intrinsic ideal; a finite
+    // main-axis offer caps it (the stack virtualizes onto the offered
+    // viewport) while an open axis reads the full extent — but never below
+    // the items' summed minima: content that cannot shrink keeps its
+    // extent, the eager stack's `minima_overflow` answer.
+    let finite_main = main.filter(|offer| offer.is_finite());
+    let min_sample = finite_main.map(|_| {
+        let min_proposal = match &axis {
+            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(cross, Some(0.0)),
+            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(Some(0.0), cross),
+        };
+        children
+            .get_view(0)
+            .map(|view| normalize_layout_view(view, env))
+            .map(|view| {
+                measure_transient_view_with_proposal(&view, min_proposal, state, env, theme)
+            })
+            .unwrap_or_else(|| panic!("LazyContainer failed to materialize child at index 0"))
+    });
+    let cap = |extent: f64, floor: f64| match finite_main {
+        Some(offer) => extent.min(f64::from(offer)).max(floor),
+        _ => extent,
+    };
     match axis {
         LazyStackAxisConfig::Vertical { spacing, .. } => {
+            let gaps = f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
+            let floor = min_sample.map_or(0.0, |min| f64::from(min.height) * count + gaps);
             let width = f64::from(sample.width);
-            let height = f64::from(sample.height) * count
-                + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
+            let height = cap(f64::from(sample.height) * count + gaps, floor);
             LayoutSize::new(width as f32, height as f32)
         }
         LazyStackAxisConfig::Horizontal { spacing, .. } => {
-            let width = f64::from(sample.width) * count
-                + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
+            let gaps = f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
+            let floor = min_sample.map_or(0.0, |min| f64::from(min.width) * count + gaps);
+            let width = cap(f64::from(sample.width) * count + gaps, floor);
             let height = f64::from(sample.height);
             LayoutSize::new(width as f32, height as f32)
         }
@@ -107,7 +135,7 @@ impl HydroNativeView for Native<LazyContainer> {
         env: &Environment,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        lazy_stack_sample_size(state, view, env, theme, None)
+        lazy_stack_sample_size(state, view, env, theme, None, None)
     }
 
     fn dimensions(
@@ -129,6 +157,7 @@ impl HydroNativeView for Native<LazyContainer> {
                     view,
                     env,
                     theme,
+                    proposal.height,
                     proposal.width,
                 ))
             }
@@ -138,6 +167,7 @@ impl HydroNativeView for Native<LazyContainer> {
                     view,
                     env,
                     theme,
+                    proposal.width,
                     proposal.height,
                 ))
             }

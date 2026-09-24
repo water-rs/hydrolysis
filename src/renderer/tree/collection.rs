@@ -215,6 +215,11 @@ pub(crate) struct LazyStackNode {
     pub(super) estimate: Cell<f64>,
     /// First-item dimensions and the cross-axis query that produced them.
     pub(super) estimate_sample: Cell<Option<(Option<f32>, Size)>>,
+    /// First-item main-axis minimum and the cross-axis query that produced it,
+    /// sampled the same way `estimate_sample` is. The sum of item minima is
+    /// the stack's honest floor: rigid items overflow rather than pretend to
+    /// shrink, exactly as the eager stack's `minima_overflow` answers.
+    pub(super) floor_sample: Cell<Option<(Option<f32>, f64)>>,
     /// Membership changes reset index-based measurements, including moves that
     /// preserve the collection length.
     pub(super) dirty: Rc<Cell<bool>>,
@@ -283,12 +288,21 @@ impl CollectionNode {
         axis: TransitionAxis,
     ) -> LayoutSize {
         let cell = RefCell::new(state);
-        let item_proposal = if axis.vertical {
-            ProposalSize::new(proposal.width, None)
+        let (item_proposal, min_item_proposal, offered) = if axis.vertical {
+            (
+                ProposalSize::new(proposal.width, None),
+                ProposalSize::new(proposal.width, Some(0.0)),
+                proposal.height,
+            )
         } else {
-            ProposalSize::new(None, proposal.height)
+            (
+                ProposalSize::new(None, proposal.height),
+                ProposalSize::new(Some(0.0), proposal.height),
+                proposal.width,
+            )
         };
         let mut main = 0.0_f64;
+        let mut floor = 0.0_f64;
         let mut cross = 0.0_f64;
         let mut first_visible = true;
         for entry in &self.entries {
@@ -298,18 +312,36 @@ impl CollectionNode {
             }
             let sub = NodeSubView::new(&entry.node, &cell, &self.env, theme);
             let size = sub.measure(item_proposal).size;
-            let (item_main, item_cross) = if axis.vertical {
-                (f64::from(size.height), f64::from(size.width))
+            let min_size = sub.measure(min_item_proposal).size;
+            let (item_main, item_cross, min_main) = if axis.vertical {
+                (
+                    f64::from(size.height),
+                    f64::from(size.width),
+                    f64::from(min_size.height),
+                )
             } else {
-                (f64::from(size.width), f64::from(size.height))
+                (
+                    f64::from(size.width),
+                    f64::from(size.height),
+                    f64::from(min_size.width),
+                )
             };
             if !first_visible {
                 main += axis.spacing * factor;
+                floor += axis.spacing * factor;
             }
             first_visible = false;
             main += item_main * factor;
+            floor += min_main * factor;
             cross = cross.max(item_cross);
         }
+        // As in `LazyStackNode::measure`: the blended total is the stack's
+        // ideal, not its minimum — a finite main-axis offer caps it, and the
+        // items' blended minima floor it.
+        let main = match offered {
+            Some(offer) if offer.is_finite() => main.min(f64::from(offer)).max(floor),
+            _ => main,
+        };
         #[allow(clippy::cast_possible_truncation)]
         if axis.vertical {
             LayoutSize::new(cross as f32, main as f32)
@@ -635,6 +667,7 @@ impl LazyStackNode {
         let changed = self.item_cache.borrow_mut().patch_for_parent(renderer);
         if changed {
             self.estimate_sample.set(None);
+            self.floor_sample.set(None);
         }
         changed
     }
@@ -653,20 +686,28 @@ impl LazyStackNode {
         }
     }
 
-    /// Measures item `index` under the given cross-axis extent, returning its
+    /// The per-item probe that answers each item's main-axis minimum — what
+    /// the eager stack's `with_main(0)` probe would ask of it.
+    fn item_min_proposal(&self, cross: Option<f32>) -> ProposalSize {
+        match &self.axis {
+            LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(cross, Some(0.0)),
+            LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(Some(0.0), cross),
+        }
+    }
+
+    /// Measures item `index` under the given proposal, returning its
     /// measured size and stretch axis (both needed to place it).
     fn measure_item(
         &self,
         state: &mut HydroState,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
         index: usize,
-        cross: Option<f32>,
+        proposal: ProposalSize,
     ) -> (Size, StretchAxis) {
         let id = self
             .views
             .get_id(index)
             .unwrap_or_else(|| panic!("hydrolysis LazyStack item {index} has no id"));
-        let proposal = self.item_proposal(cross);
         if let Some(item) = self.item_cache.borrow().get(&id) {
             return (
                 item.measure_built_with_proposal(state, &self.env, theme, proposal),
@@ -696,6 +737,27 @@ impl LazyStackNode {
         }
     }
 
+    /// The first item's main-axis minimum under the same cross query, cached
+    /// alongside `estimate_sample`: what the stack answers at `with_main(0)`.
+    /// Content that cannot shrink — a fixed-size row — keeps its intrinsic
+    /// extent here, so the stack overflows instead of collapsing.
+    fn ensure_floor(
+        &self,
+        state: &mut HydroState,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        cross: Option<f32>,
+    ) -> f64 {
+        if let Some((previous, floor)) = self.floor_sample.get()
+            && previous == cross
+        {
+            return floor;
+        }
+        let (size, _) = self.measure_item(state, theme, 0, self.item_min_proposal(cross));
+        let floor = self.main_extent(size);
+        self.floor_sample.set(Some((cross, floor)));
+        floor
+    }
+
     /// Keeps estimates scoped to the cross-axis query and collection lifetime.
     fn ensure_estimate(
         &self,
@@ -709,10 +771,11 @@ impl LazyStackNode {
         {
             return size;
         }
-        let (size, _) = self.measure_item(state, theme, 0, cross);
+        let (size, _) = self.measure_item(state, theme, 0, self.item_proposal(cross));
         let extent = self.main_extent(size);
         self.estimate.set(extent.max(1.0));
         self.estimate_sample.set(Some((cross, size)));
+        self.floor_sample.set(None);
         self.dirty.set(true);
         self.prepare_extent_index(self.views.len().snapshot());
         self.extent_index.borrow_mut().set_measured(0, extent);
@@ -771,14 +834,27 @@ impl LazyStackNode {
         if count == 0 {
             return ViewDimensions::new(Size::zero());
         }
-        let cross = match &self.axis {
-            LazyStackAxisConfig::Vertical { .. } => proposal.width,
-            LazyStackAxisConfig::Horizontal { .. } => proposal.height,
+        let (cross, offered) = match &self.axis {
+            LazyStackAxisConfig::Vertical { .. } => (proposal.width, proposal.height),
+            LazyStackAxisConfig::Horizontal { .. } => (proposal.height, proposal.width),
         };
         let sample = self.ensure_estimate(state, theme, cross);
         self.prepare_extent_index(count);
         self.refresh_visible_extents(state, theme, count, cross);
-        let main = self.extent_index.borrow().total_extent() as f32;
+        // The extent index holds the items' intrinsic main extents, so the
+        // unclamped total is the stack's ideal, not its minimum: a lazy
+        // stack virtualizes — it fits a finite main-axis offer below its
+        // extent by showing fewer items — while an open axis reads the full
+        // extent. It never reports below the items' summed minima: content
+        // that cannot shrink keeps its extent, as the eager stack's
+        // `minima_overflow` answer does.
+        let extent = self.extent_index.borrow().total_extent();
+        let floor = self.ensure_floor(state, theme, cross) * count as f64
+            + self.spacing() * (count - 1) as f64;
+        let main = match offered {
+            Some(offer) if offer.is_finite() => extent.min(f64::from(offer)).max(floor),
+            _ => extent,
+        } as f32;
         let size = match &self.axis {
             LazyStackAxisConfig::Vertical { .. } => Size::new(sample.width, main),
             LazyStackAxisConfig::Horizontal { .. } => Size::new(main, sample.height),
