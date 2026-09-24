@@ -545,11 +545,16 @@ impl ListRenderState {
         }
     }
 
+    /// Applies the pending scroll request, if there is one. `animate` selects
+    /// between the rendered glide and the semantic jump: nothing ticks the
+    /// list's smooth scroll on the semantic runtime, so a request there lands
+    /// in place instead.
     fn apply_scroll_request(
         &self,
         renderer: &mut crate::renderer::SemanticCore,
         handle: &ScrollHandle,
         row_count: usize,
+        animate: bool,
     ) {
         let Some(controller) = &self.config.scroll_controller else {
             return;
@@ -562,48 +567,55 @@ impl ListRenderState {
                 .is_none_or(|(pending_generation, _)| pending_generation != generation)
         {
             let index = renderer.read_signal(&controller.target());
-            assert!(
-                index < row_count,
-                "List scroll target {index} exceeds collection length {row_count}"
-            );
             self.pending_scroll.set(Some((generation, index)));
         }
         let Some((pending_generation, index)) = self.pending_scroll.get() else {
             return;
         };
-        assert!(
-            index < row_count,
-            "List scroll target {index} exceeds collection length {row_count}"
-        );
+        if index >= row_count {
+            // A scroll request names a row the contents may not have yet: a
+            // list materializing mid-flush can be shorter than its pending
+            // target, and a signal-driven collection can shrink below it. The
+            // request stays pending until the collection reaches the index;
+            // a newer generation supersedes it.
+            return;
+        }
         // Ease toward the row rather than teleporting. Re-issuing the target
         // every frame is what keeps a virtualized jump accurate: rows measured
         // while the glide passes over them move `offset_of(index)`, so the
         // destination is refined until the animation actually settles.
         let offset = self.extent_index.borrow().offset_of(index);
-        let metrics = handle.metrics();
-        let current = self
-            .extent_index
-            .borrow()
-            .visible_window(metrics.offset_y, metrics.offset_y + metrics.viewport_height)
-            .start;
-        if index.abs_diff(current) > ROWS_BEFORE_JUMP_TELEPORT {
-            // Animating the whole way across a 100k-row dataset would drag the
-            // list through every viewport between here and there, and read as a
-            // blur regardless. Compose solves this the same way: its
-            // `animateScrollToItem` snaps to within `NumberOfItemsToTeleport`
-            // items of the target and animates only that final stretch.
-            let approach_index = if index > current {
-                index - ROWS_BEFORE_JUMP_TELEPORT
-            } else {
-                index + ROWS_BEFORE_JUMP_TELEPORT
-            };
-            let approach = self.extent_index.borrow().offset_of(approach_index);
-            let _ = handle.scroll_to(0.0, approach);
+        if animate {
+            let metrics = handle.metrics();
+            let current = self
+                .extent_index
+                .borrow()
+                .visible_window(metrics.offset_y, metrics.offset_y + metrics.viewport_height)
+                .start;
+            if index.abs_diff(current) > ROWS_BEFORE_JUMP_TELEPORT {
+                // Animating the whole way across a 100k-row dataset would drag the
+                // list through every viewport between here and there, and read as a
+                // blur regardless. Compose solves this the same way: its
+                // `animateScrollToItem` snaps to within `NumberOfItemsToTeleport`
+                // items of the target and animates only that final stretch.
+                let approach_index = if index > current {
+                    index - ROWS_BEFORE_JUMP_TELEPORT
+                } else {
+                    index + ROWS_BEFORE_JUMP_TELEPORT
+                };
+                let approach = self.extent_index.borrow().offset_of(approach_index);
+                let _ = handle.scroll_to(0.0, approach);
+            }
+            // The pump ticks smooth scrolls before rendering and the present already
+            // wakes the loop, so arming here is enough — the next tick advances the
+            // glide and keeps requesting frames until it settles.
+            let _ = handle.scroll_to_animated(0.0, offset);
+        } else {
+            // The semantic runtime's pump never registers the list's handle in
+            // its scroll targets, so a glide armed here would never tick; the
+            // request lands in place.
+            let _ = handle.scroll_to(0.0, offset);
         }
-        // The pump ticks smooth scrolls before rendering and the present already
-        // wakes the loop, so arming here is enough — the next tick advances the
-        // glide and keeps requesting frames until it settles.
-        let _ = handle.scroll_to_animated(0.0, offset);
         let extent_index = self.extent_index.borrow();
         let Some(extent) = extent_index.measured(index) else {
             return;
@@ -773,7 +785,7 @@ pub(crate) fn list_accessibility(
         .max(viewport.height());
     let handle = state.bind_scroll(viewport.width(), viewport.height(), content_height);
     state.apply_membership_anchor(&handle);
-    state.apply_scroll_request(renderer, &handle, row_count);
+    state.apply_scroll_request(renderer, &handle, row_count, _rendered);
     #[cfg(feature = "accessibility")]
     {
         let metrics = handle.metrics();
@@ -1097,7 +1109,7 @@ pub(crate) fn render_list_parts(
     state.borrow().apply_membership_anchor(&handle);
     state
         .borrow()
-        .apply_scroll_request(ctx.renderer_mut(), &handle, row_count);
+        .apply_scroll_request(ctx.renderer_mut(), &handle, row_count, true);
     let mut metrics = handle.metrics();
     let needs_viewport_clip = metrics.max_y > 0.0;
     if needs_viewport_clip {
@@ -1569,7 +1581,12 @@ pub(crate) fn render_list_parts(
         .borrow_mut()
         .retain(|id, _| visible_ids.contains(id));
 
-    if state.borrow().pending_scroll.get().is_some() {
+    if state
+        .borrow()
+        .pending_scroll
+        .get()
+        .is_some_and(|(_, index)| index < row_count)
+    {
         let content_height = state
             .borrow()
             .extent_index
@@ -1582,7 +1599,7 @@ pub(crate) fn render_list_parts(
                 .bind_scroll(viewport.width(), viewport.height(), content_height);
         state
             .borrow()
-            .apply_scroll_request(ctx.renderer_mut(), &rebound, row_count);
+            .apply_scroll_request(ctx.renderer_mut(), &rebound, row_count, true);
         metrics = rebound.metrics();
         ctx.renderer_mut().frame_signals().request_refresh();
     }
