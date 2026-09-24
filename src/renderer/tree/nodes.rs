@@ -673,6 +673,13 @@ pub(crate) struct ScrollNode {
     pub(super) content_size: Size,
     /// The scroll viewport (the node's own bounds).
     pub(super) viewport: Size,
+    /// The content's `0`-probe answer on the non-scrolling axis — the
+    /// floor `measure` reports when a container probes the scroll's minimum
+    /// (layout-spec.md §6). Cached because the `0` probe runs on every
+    /// window-limits pass, including pure replay frames where a live
+    /// measure would count as re-measurement; `patch` and
+    /// `take_layout_dirty` reset it when the subtree changes underneath.
+    pub(super) non_scrolling_minimum: Cell<Option<f32>>,
     /// Environment captured at build, for scroll-target accessibility.
     pub(super) env: Environment,
 }

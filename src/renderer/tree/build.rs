@@ -477,6 +477,7 @@ impl RenderNode {
                     handle: RefCell::new(None),
                     content_size: Size::zero(),
                     viewport: Size::zero(),
+                    non_scrolling_minimum: Cell::new(None),
                     env: env.clone(),
                 }));
             }

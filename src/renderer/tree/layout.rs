@@ -181,10 +181,47 @@ impl RenderNode {
             RenderNode::AppliedFilter(node) => {
                 node.child.measure(state, &node.env, theme, proposal)
             }
-            RenderNode::Scroll(_) => ViewDimensions::new(Size::new(
-                proposal.width.unwrap_or(0.0),
-                proposal.height.unwrap_or(0.0),
-            )),
+            RenderNode::Scroll(node) => {
+                // layout-spec.md §6: a scroll claims the whole offer — a
+                // finite proposal on either axis is answered with that
+                // proposal; only a `0` proposal measures the content,
+                // answering its intrinsic extent on the non-scrolling axis
+                // and `0` on the scrolling axis.
+                let mut size = Size::new(
+                    proposal.width.unwrap_or(0.0),
+                    proposal.height.unwrap_or(0.0),
+                );
+                if match node.axis {
+                    ScrollAxis::Vertical => proposal.width == Some(0.0),
+                    ScrollAxis::Horizontal => proposal.height == Some(0.0),
+                    ScrollAxis::All => false,
+                    _ => panic!("hydrolysis render tree: unsupported scroll axis"),
+                } {
+                    let floor = node.non_scrolling_minimum.get().unwrap_or_else(|| {
+                        // The `0` propagates to the content: its own minimum
+                        // on the non-scrolling axis is the floor the scroll
+                        // reports there. The scrolling axis gets `None`.
+                        let content_proposal = match node.axis {
+                            ScrollAxis::Vertical => ProposalSize::new(Some(0.0), None),
+                            ScrollAxis::Horizontal => ProposalSize::new(None, Some(0.0)),
+                            _ => ProposalSize::UNSPECIFIED,
+                        };
+                        let measured = node.child.measure(state, env, theme, content_proposal).size;
+                        let value = match node.axis {
+                            ScrollAxis::Vertical => measured.width,
+                            _ => measured.height,
+                        };
+                        node.non_scrolling_minimum.set(Some(value));
+                        value
+                    });
+                    match node.axis {
+                        ScrollAxis::Vertical => size.width = floor,
+                        ScrollAxis::Horizontal => size.height = floor,
+                        _ => {}
+                    }
+                }
+                ViewDimensions::new(size)
+            }
             RenderNode::LazyStack(node) => node.measure(state, theme, proposal),
             RenderNode::Collection(node) => node.measure(state, theme, proposal),
             // Layout-transparent: the wrapper measures its child under the node's

@@ -54,7 +54,16 @@ impl RenderNode {
                 }
                 changed
             }
-            RenderNode::Scroll(node) => node.child.patch(renderer),
+            RenderNode::Scroll(node) => {
+                // A patched subtree may measure differently: drop the cached
+                // `0`-probe floor so the next window-minimum pass re-measures
+                // it on a frame that already does structural work.
+                let changed = node.child.patch(renderer);
+                if changed {
+                    node.non_scrolling_minimum.set(None);
+                }
+                changed
+            }
             // A ViewEffect and an AppliedFilter wrap a child render node whose
             // reactive descendants must keep patching, so the walk recurses into
             // them (the effect itself owns its runtime, with no structural patch).
@@ -149,7 +158,13 @@ impl RenderNode {
             RenderNode::Env(node) => node.child.take_layout_dirty(),
             RenderNode::Wrapper(node) => node.child.take_layout_dirty(),
             RenderNode::Dynamic(node) => node.child.borrow_mut().take_layout_dirty(),
-            RenderNode::Scroll(node) => node.child.take_layout_dirty(),
+            RenderNode::Scroll(node) => {
+                let dirty = node.child.take_layout_dirty();
+                if dirty {
+                    node.non_scrolling_minimum.set(None);
+                }
+                dirty
+            }
             RenderNode::ViewEffect(node) => node.child.borrow_mut().take_layout_dirty(),
             RenderNode::AppliedFilter(node) => node.child.take_layout_dirty(),
             RenderNode::Collection(node) => node
