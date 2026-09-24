@@ -832,6 +832,7 @@ impl RenderNode {
             visible_range: RefCell::new(0..0),
             estimate: Cell::new(0.0),
             estimate_sample: Cell::new(None),
+            floor_sample: Cell::new(None),
             dirty,
             _dirty_key: dirty_key,
             _guard: guard,

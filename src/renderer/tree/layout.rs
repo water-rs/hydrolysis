@@ -253,6 +253,13 @@ impl RenderNode {
         }
     }
 
+    /// The stretch contract a `NodeSubView` over this child would report — for
+    /// tests that drive a container's `Layout` against recording children.
+    #[cfg(test)]
+    pub(in crate::renderer) fn stretch_for_test(&self) -> StretchAxis {
+        self.stretch()
+    }
+
     /// Run the layout-time prepare pass over this subtree: every widget leaf
     /// applies theme paint that could not be resolved at tree-build time —
     /// build contexts carry no theme — and builds the retained sub-views its
