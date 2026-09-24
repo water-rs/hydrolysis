@@ -139,8 +139,10 @@ struct RowReorder {
 pub(crate) struct ListRenderState {
     pub(crate) config: ListConfig,
     /// Estimated/measured row extents belong to this list, not to its render
-    /// position in a backend-global slot array.
-    extent_index: RefCell<VirtualExtentIndex>,
+    /// position in a backend-global slot array. Shared with each row's
+    /// `ListRow` accessibility target so a `ScrollIntoView` request resolves
+    /// the row's span against the same measured extents the draw pass uses.
+    extent_index: Rc<RefCell<VirtualExtentIndex>>,
     /// The scroll offset belongs to this semantic list node.
     scroll: RefCell<Option<ScrollHandle>>,
     /// Content sub-views for the rows currently in view, keyed by stable row id so a
@@ -253,7 +255,7 @@ impl ListRenderState {
         });
         Self {
             config,
-            extent_index: RefCell::new(VirtualExtentIndex::default()),
+            extent_index: Rc::new(RefCell::new(VirtualExtentIndex::default())),
             scroll: RefCell::new(None),
             item_cache: RefCell::new(VisibleSubviewCache::new()),
             rows_dirty,
@@ -794,19 +796,30 @@ pub(crate) fn list_accessibility(
             let row_node_id = if row_hidden {
                 None
             } else {
+                // Arrow-key navigation moves through the row target:
+                // `ScrollIntoView` reveals the row's span in the list's scroll
+                // domain, and `Click` resolves the activation a pointer click
+                // on the row's centre would run — Enter/Space fire it.
+                row_node.add_action(AccessibilityAction::ScrollIntoView);
+                row_node.add_action(AccessibilityAction::Click);
+                let row_target = Some(AccessibilityActionTarget::ListRow {
+                    index,
+                    handle: handle.clone(),
+                    extents: Rc::clone(&state.extent_index),
+                });
                 match ctx {
                     Some(ctx) => renderer.register_accessibility_child_node_with_key(
                         key_base + A11Y_KEY_ROW,
                         row_node,
                         transformed_rect(ctx.hit_transform, row_rect),
                         &row_a11y_env,
-                        None,
+                        row_target,
                     ),
                     None => renderer.register_accessibility_child_node_with_key_semantic(
                         key_base + A11Y_KEY_ROW,
                         row_node,
                         &row_a11y_env,
-                        None,
+                        row_target,
                     ),
                 }
             };
@@ -1349,10 +1362,14 @@ pub(crate) fn render_list_parts(
                 .unwrap_or_else(|| panic!("hydrolysis list row {index} has no id"));
             let content = item.content;
             #[cfg(feature = "accessibility")]
+            let row_node_id =
+                ctx.renderer_mut()
+                    .focus_node_for_key(&crate::renderer::InteractionKey::for_rc(
+                        state,
+                        row_interaction_base,
+                    ));
+            #[cfg(feature = "accessibility")]
             let row_parented = {
-                let row_node_id = ctx.renderer_mut().focus_node_for_key(
-                    &crate::renderer::InteractionKey::for_rc(state, row_interaction_base),
-                );
                 if let Some(row_node_id) = row_node_id {
                     ctx.renderer_mut().push_accessibility_parent(row_node_id);
                     true

@@ -144,6 +144,19 @@ pub(crate) enum AccessibilityActionTarget {
         handle: ScrollHandle,
         axis: ScrollAxis,
     },
+    /// A `List` row. `ScrollIntoView` reveals the row's measured span through
+    /// the list's scroll handle; `Click` resolves the activation a pointer
+    /// click on the row's centre would run — the topmost gesture recognizer
+    /// or pointer target there, or, where the frame emits no pointer
+    /// machinery, the innermost `Click`-advertising node inside the row;
+    /// `Focus` lands on the row like on every focusable node. Arrow-key
+    /// navigation between rows is built on these actions
+    /// (water-rs/waterui#1223).
+    ListRow {
+        index: usize,
+        handle: ScrollHandle,
+        extents: Rc<RefCell<crate::renderer::lazy::VirtualExtentIndex>>,
+    },
 }
 
 #[cfg(feature = "accessibility")]
@@ -878,6 +891,24 @@ impl SemanticCore {
             AccessibilityActionTarget::Scroll { handle, axis } => {
                 handle_accessibility_scroll_action(&handle, axis, action)
             }
+            AccessibilityActionTarget::ListRow {
+                index,
+                handle,
+                extents,
+            } => match action {
+                AccessibilityAction::Focus => {
+                    self.scroll_list_row_into_view(index, &handle, &extents);
+                    true
+                }
+                AccessibilityAction::Click => self.click_list_row(target_node, env),
+                AccessibilityAction::ScrollIntoView => {
+                    self.scroll_list_row_into_view(index, &handle, &extents)
+                }
+                _ => panic!(
+                    "hydrolysis accessibility list row does not support action {:?}",
+                    action
+                ),
+            },
         };
         if changed && focus_action {
             self.set_keyboard_focus_node(Some(target_node), false);
@@ -900,6 +931,133 @@ impl SemanticCore {
         self.accessibility
             .interaction_nodes
             .insert(key.clone(), node_id);
+    }
+
+    /// `Click` on a `List` row resolves the activation a pointer click on
+    /// the row's centre would run — Enter/Space on a focused row lands
+    /// here, so a tap target, an inner button, or nothing at all behave
+    /// exactly as they do under the pointer (water-rs/waterui#1223).
+    ///
+    /// The rendered runtime's nodes carry hit bounds: gesture recognizers
+    /// see the press first, then the topmost pointer target covering the
+    /// point — the order a real click resolves them in. The semantic walk
+    /// emits no pointer machinery, so the node a pointer would hit is the
+    /// innermost descendant advertising `Click`, resolved purely through
+    /// the accessibility tree.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn click_list_row(
+        &mut self,
+        row_node: AccessibilityNodeId,
+        env: &Environment,
+    ) -> bool {
+        if let Some(centre) = self.accessibility.nodes.iter().find_map(|(id, node)| {
+            (*id == row_node)
+                .then(|| node.bounds())
+                .flatten()
+                .map(|bounds| {
+                    vello::kurbo::Point::new(
+                        (bounds.x0 + bounds.x1) / 2.0,
+                        (bounds.y0 + bounds.y1) / 2.0,
+                    )
+                })
+        }) {
+            let at = self.frame_instant;
+            let mut changed = self.gesture_engine.handle_pointer_down(centre, at, env);
+            changed |= self.gesture_engine.handle_pointer_up(centre, at, env);
+            if let Some(index) = self
+                .hit_test
+                .pointer_targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| target.bounds.contains(centre))
+                .max_by(|(left_index, left), (right_index, right)| {
+                    Self::target_hit_priority(left.depth, left.order, *left_index).cmp(
+                        &Self::target_hit_priority(right.depth, right.order, *right_index),
+                    )
+                })
+                .map(|(index, _)| index)
+            {
+                let target = self.hit_test.pointer_targets[index].clone();
+                changed |= (target.action.borrow_mut())(self, centre, env);
+            }
+            return changed;
+        }
+        if let Some(dest) = self.clickable_descendant(row_node) {
+            return self.handle_accessibility_action(
+                AccessibilityActionRequest {
+                    action: AccessibilityAction::Click,
+                    target_node: dest,
+                    target_tree: AccessibilityTreeId::ROOT,
+                    data: None,
+                },
+                env,
+            );
+        }
+        false
+    }
+
+    /// The node a pointer at the `List` row's centre would hit, in the
+    /// accessibility tree's own terms: the innermost descendant of
+    /// `row_node` advertising `Click` — nodes emit parent-first, so the
+    /// last matching node emitted is the innermost. `None` on a row with
+    /// nothing clickable inside.
+    #[cfg(feature = "accessibility")]
+    fn clickable_descendant(&self, row_node: AccessibilityNodeId) -> Option<AccessibilityNodeId> {
+        let mut inside: std::collections::BTreeSet<AccessibilityNodeId> =
+            std::collections::BTreeSet::new();
+        let mut stack: Vec<AccessibilityNodeId> = self
+            .accessibility
+            .nodes
+            .iter()
+            .find_map(|(id, node)| (*id == row_node).then(|| node.children().to_vec()))
+            .unwrap_or_default();
+        while let Some(id) = stack.pop() {
+            if inside.insert(id)
+                && let Some((_, node)) = self
+                    .accessibility
+                    .nodes
+                    .iter()
+                    .find(|(other, _)| *other == id)
+            {
+                stack.extend_from_slice(node.children());
+            }
+        }
+        self.accessibility
+            .nodes
+            .iter()
+            .rev()
+            .find(|(id, node)| {
+                inside.contains(id) && node.supports_action(AccessibilityAction::Click)
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Reveal row `index` of the list `handle` scrolls: the minimum scroll
+    /// that puts the row's measured span inside the viewport, the same
+    /// reveal `ScrollIntoView` performs on any scrollable container. The row
+    /// shares the list's extent index, so semantic lists reveal in row
+    /// units and rendered lists in pixels. Reports the action handled.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn scroll_list_row_into_view(
+        &mut self,
+        index: usize,
+        handle: &ScrollHandle,
+        extents: &Rc<RefCell<crate::renderer::lazy::VirtualExtentIndex>>,
+    ) -> bool {
+        let metrics = handle.metrics();
+        let extents = extents.borrow();
+        let row_start = extents.offset_of(index);
+        let row_end = extents.offset_of(index + 1);
+        let viewport_end = metrics.offset_y + metrics.viewport_height;
+        let target = if row_start < metrics.offset_y {
+            row_start
+        } else if row_end > viewport_end {
+            (row_end - metrics.viewport_height).min(row_start)
+        } else {
+            return true;
+        };
+        let _ = handle.scroll_to(metrics.offset_x, target);
+        true
     }
 
     #[cfg(feature = "accessibility")]

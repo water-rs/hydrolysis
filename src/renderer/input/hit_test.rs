@@ -1696,6 +1696,65 @@ impl SemanticCore {
         changed
     }
 
+    /// The row-navigation context of a focused `List` row: the row siblings
+    /// under its `List` parent in emission order, the focused row's index
+    /// among them, and the list's scroll axis — so arrows know which pair of
+    /// keys steps and `Home`/`End` know the edges. `None` when the focused
+    /// node is not a `List` row: a node is a row when it carries the
+    /// `ListRow` action target, which section chrome never has, so role
+    /// hoisting and chrome nodes can neither fake nor lose row membership
+    /// (water-rs/waterui#1223).
+    #[cfg(feature = "accessibility")]
+    fn list_row_context(
+        &self,
+        node: AccessibilityNodeId,
+    ) -> Option<(Vec<AccessibilityNodeId>, usize, ScrollAxis)> {
+        if !matches!(
+            self.accessibility.actions.get(&node),
+            Some(AccessibilityActionTarget::ListRow { .. })
+        ) {
+            return None;
+        }
+        let (parent_id, parent) = self.accessibility.nodes.iter().find(|(_, emitted)| {
+            emitted.role() == AccessibilityNodeRole::List && emitted.children().contains(&node)
+        })?;
+        let axis = match self.accessibility.actions.get(parent_id) {
+            Some(AccessibilityActionTarget::Scroll { axis, .. }) => *axis,
+            _ => ScrollAxis::Vertical,
+        };
+        let siblings: Vec<AccessibilityNodeId> = parent
+            .children()
+            .iter()
+            .filter(|child| {
+                matches!(
+                    self.accessibility.actions.get(*child),
+                    Some(AccessibilityActionTarget::ListRow { .. })
+                )
+            })
+            .copied()
+            .collect();
+        let index = siblings.iter().position(|sibling| *sibling == node)?;
+        Some((siblings, index, axis))
+    }
+
+    /// Land keyboard focus on `dest` row: reveal it through the accessibility
+    /// tree first, then move the visible focus. Nothing else happens — rows
+    /// activate only through Enter/Space, resolved the same way a pointer
+    /// click on the row's centre would be (water-rs/waterui#1223).
+    #[cfg(feature = "accessibility")]
+    fn navigate_list_row(&mut self, dest: AccessibilityNodeId, env: &Environment) -> bool {
+        let _ = self.handle_accessibility_action(
+            AccessibilityActionRequest {
+                action: AccessibilityAction::ScrollIntoView,
+                target_node: dest,
+                target_tree: AccessibilityTreeId::ROOT,
+                data: None,
+            },
+            env,
+        );
+        self.set_keyboard_focus_node(Some(dest), true)
+    }
+
     pub(crate) fn handle_keyboard_key_down(
         &mut self,
         key: &KeyCode,
@@ -1751,6 +1810,35 @@ impl SemanticCore {
         if step_forward || step_backward {
             #[cfg(feature = "accessibility")]
             {
+                // A focused `List` row owns the arrows along the list's axis:
+                // Up/Down in a vertical list, Left/Right in a horizontal one
+                // step between sibling rows. The cross-axis pair keeps its
+                // other meanings and falls through to the stepper handling
+                // below.
+                if let Some(node) = self.keyboard_focus_node()
+                    && let Some((siblings, index, axis)) = self.list_row_context(node)
+                {
+                    let delta: isize = match (axis, key) {
+                        (ScrollAxis::Vertical, KeyCode::Named(name)) if name == "ArrowUp" => -1,
+                        (ScrollAxis::Vertical, KeyCode::Named(name)) if name == "ArrowDown" => 1,
+                        (ScrollAxis::Horizontal, KeyCode::Named(name)) if name == "ArrowLeft" => -1,
+                        (ScrollAxis::Horizontal, KeyCode::Named(name)) if name == "ArrowRight" => 1,
+                        _ => 0,
+                    };
+                    if delta != 0 {
+                        let Some(dest) = index
+                            .checked_add_signed(delta)
+                            .filter(|next| *next < siblings.len())
+                            .map(|next| siblings[next])
+                        else {
+                            // First row Up / last row Down: the list consumes
+                            // the key rather than dropping it or leaving the
+                            // list.
+                            return true;
+                        };
+                        return self.navigate_list_row(dest, env);
+                    }
+                }
                 if let Some(node) = self.keyboard_focus_node() {
                     let step_action = if step_forward {
                         AccessibilityAction::Increment
@@ -1801,6 +1889,24 @@ impl SemanticCore {
             let changed = (action.borrow_mut())(step_forward);
             if changed {
                 self.request_refresh();
+            }
+            return true;
+        }
+        #[cfg(feature = "accessibility")]
+        // `Home`/`End` jump the focused `List` row to the first and last row
+        // — consumed, so the keys do not fall through to whoever else would
+        // claim them.
+        if let KeyCode::Named(name) = key
+            && (name == "Home" || name == "End")
+            && let Some(node) = self.keyboard_focus_node()
+            && let Some((siblings, _, _)) = self.list_row_context(node)
+        {
+            if let Some(dest) = if name == "Home" {
+                siblings.first()
+            } else {
+                siblings.last()
+            } {
+                return self.navigate_list_row(*dest, env);
             }
             return true;
         }
