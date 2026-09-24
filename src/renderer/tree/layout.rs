@@ -23,7 +23,7 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.priority(),
             RenderNode::Retain(node) => node.child.priority(),
             RenderNode::Env(node) => node.child.priority(),
-            RenderNode::Dynamic(node) => node.child.priority(),
+            RenderNode::Dynamic(node) => node.child.borrow().priority(),
             RenderNode::AppliedFilter(node) => node.child.priority(),
             RenderNode::Widget(node) => node.behavior.priority(),
             _ => 0,
@@ -50,7 +50,7 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.is_empty(),
             RenderNode::Retain(node) => node.child.is_empty(),
             RenderNode::Env(node) => node.child.is_empty(),
-            RenderNode::Dynamic(node) => node.child.is_empty(),
+            RenderNode::Dynamic(node) => node.child.borrow().is_empty(),
             RenderNode::Wrapper(node) => node.child.is_empty(),
             RenderNode::AppliedFilter(node) => node.child.is_empty(),
             // An effect over a child that draws nothing draws nothing itself.
@@ -77,7 +77,7 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.stretch(),
             RenderNode::Retain(node) => node.child.stretch(),
             RenderNode::Env(node) => node.child.stretch(),
-            RenderNode::Dynamic(node) => node.child.stretch(),
+            RenderNode::Dynamic(node) => node.child.borrow().stretch(),
             // Scene content that is naturally a size is content-sized and claims
             // no leftover space; content that has no size of its own fills.
             RenderNode::SceneView(node) => {
@@ -144,7 +144,7 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.measure(state, env, theme, proposal),
             RenderNode::Retain(node) => node.child.measure(state, env, theme, proposal),
             RenderNode::Env(node) => node.child.measure(state, &node.env, theme, proposal),
-            RenderNode::Dynamic(node) => node.child.measure(state, env, theme, proposal),
+            RenderNode::Dynamic(node) => node.child.borrow().measure(state, env, theme, proposal),
             // Scene content that is naturally a size (an SVG's viewBox, a
             // formula's typeset box) answers with it on whichever axis the
             // container left open; content that is not fills the proposal.
@@ -199,7 +199,7 @@ impl RenderNode {
             RenderNode::Rotation(node) => node.child.prepare_for_measure(renderer),
             RenderNode::Offset(node) => node.child.prepare_for_measure(renderer),
             RenderNode::Retain(node) => node.child.prepare_for_measure(renderer),
-            RenderNode::Dynamic(node) => node.child.prepare_for_measure(renderer),
+            RenderNode::Dynamic(node) => node.child.borrow_mut().prepare_for_measure(renderer),
             RenderNode::Env(node) => node.child.prepare_for_measure(renderer),
             RenderNode::Wrapper(node) => node.child.prepare_for_measure(renderer),
             RenderNode::AppliedFilter(node) => node.child.prepare_for_measure(renderer),
@@ -279,7 +279,11 @@ impl RenderNode {
                 let node_env = node.env.clone();
                 node.child.layout(renderer, &node_env, proposal, size);
             }
-            RenderNode::Dynamic(node) => node.child.layout(renderer, env, proposal, size),
+            RenderNode::Dynamic(node) => {
+                node.child
+                    .borrow_mut()
+                    .layout(renderer, env, proposal, size);
+            }
             RenderNode::Scroll(node) => {
                 let child_proposal = match node.axis {
                     ScrollAxis::Horizontal => ProposalSize::new(None, Some(size.height)),
