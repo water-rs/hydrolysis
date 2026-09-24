@@ -52,7 +52,7 @@ pub(crate) fn text(env: &Environment, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nami::{Binding, Signal};
+    use nami::Binding;
     use waterui_locale::{Locale, locales};
 
     use super::*;

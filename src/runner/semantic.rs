@@ -662,7 +662,7 @@ mod tests {
         );
 
         assert!(click(&mut runtime, tap), "Tap click changed nothing");
-        assert!(fired.get(), "the button action did not fire");
+        assert!(fired.snapshot(), "the button action did not fire");
     }
 
     #[test]
@@ -708,7 +708,7 @@ mod tests {
         // id demuxes to it — and its `close_all` dismisses the whole group.
         assert!(click(&mut runtime, save), "Save click changed nothing");
         assert_eq!(
-            fired.get().as_str(),
+            fired.snapshot().as_str(),
             "save",
             "menu item action did not fire"
         );
@@ -741,7 +741,7 @@ mod tests {
                 vstack((Menu::new(
                     "File",
                     vec![MenuItem::Command("Bump".action(|store: Store| {
-                        store.hits.set(store.hits.get() + 1);
+                        store.hits.set(store.hits.snapshot() + 1);
                     }))],
                 ),))
                 .state(&store),
@@ -761,7 +761,7 @@ mod tests {
             .expect("Bump menu item missing after the menu opened");
         assert!(click(&mut runtime, bump), "Bump click changed nothing");
         assert_eq!(
-            store.hits.get(),
+            store.hits.snapshot(),
             1,
             "the item action did not reach the injected store"
         );
@@ -813,7 +813,7 @@ mod tests {
         }
         let _ = pump_until_settled(&mut runtime).expect("text input emitted no tree update");
         assert_eq!(
-            value.get().to_string().as_str(),
+            value.snapshot().to_string().as_str(),
             "Jo",
             "text input did not edit the field"
         );

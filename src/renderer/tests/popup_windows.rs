@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId, TreeUpdate};
 use nami::Binding;
+use nami::Signal as _;
 use waterui::ViewExt as _;
 use waterui_controls::button::button;
 use waterui_controls::menu::CommandExt as _;
@@ -130,7 +131,7 @@ fn secondary_click_merges_the_context_menu_popup_into_the_tree() {
     // demuxes back to the popup core that owns the item's target.
     assert!(act(&mut runtime, Action::Click, copy));
     assert!(
-        copied.get(),
+        copied.snapshot(),
         "clicking the merged popup item must fire its command"
     );
 
@@ -167,7 +168,7 @@ fn context_menu_item_action_reads_state_inherited_from_the_opening_view() {
                 .width(WINDOW_SIZE)
                 .height(WINDOW_SIZE)
                 .context_menu(vec!["Bump".action(|store: Store| {
-                    store.hits.set(store.hits.get() + 1);
+                    store.hits.set(store.hits.snapshot() + 1);
                 })])
                 .state(&store),
         )
@@ -200,7 +201,7 @@ fn context_menu_item_action_reads_state_inherited_from_the_opening_view() {
         .expect("the context menu's items must merge into the returned tree");
     assert!(act(&mut runtime, Action::Click, bump));
     assert_eq!(
-        store.hits.get(),
+        store.hits.snapshot(),
         1,
         "the item action did not reach the injected store"
     );

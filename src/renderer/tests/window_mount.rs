@@ -5,6 +5,7 @@
 //! default window would orphan all of it.
 
 use super::{MinimalTestTheme, test_environment};
+use nami::Signal as _;
 use waterui::prelude::*;
 use waterui::window::{Window, WindowState};
 use waterui_core::handler::AnyViewBuilder;
@@ -31,7 +32,7 @@ fn the_mounted_window_is_the_apps_window() {
 
     rt.pump_offscreen();
     assert_eq!(
-        frame.get(),
+        frame.snapshot(),
         Rect::new(Point::zero(), Size::new(320.0, 240.0)),
         "the viewport must write the app's Window::frame at mount"
     );
@@ -42,7 +43,7 @@ fn the_mounted_window_is_the_apps_window() {
     });
     rt.pump_offscreen();
     assert_eq!(
-        *frame.get().size(),
+        *frame.snapshot().size(),
         Size::new(640.0, 480.0),
         "a viewport resize must rewrite the app's Window::frame"
     );
@@ -50,7 +51,7 @@ fn the_mounted_window_is_the_apps_window() {
     rt.push_input_event(InputEvent::Moved { x: 12.0, y: 8.0 });
     rt.pump_offscreen();
     assert_eq!(
-        frame.get().origin(),
+        frame.snapshot().origin(),
         Point::new(12.0, 8.0),
         "a window move must rewrite the app's Window::frame"
     );
@@ -58,7 +59,7 @@ fn the_mounted_window_is_the_apps_window() {
     rt.push_input_event(InputEvent::CloseRequested);
     rt.pump_offscreen();
     assert_eq!(
-        state.get(),
+        state.snapshot(),
         WindowState::Closed,
         "a close request must land on the app's Window::state"
     );

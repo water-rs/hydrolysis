@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use hydrolysis_m3::Material3;
 use waterui::Computed;
+use waterui::Signal as _;
 use waterui::ViewExt as _;
 use waterui::app::App;
 use waterui::color::ResolvedColor;
@@ -389,25 +390,28 @@ fn ui_test_hover_drag_and_magnify_update_semantic_bounds() {
     assert!(initial_bounds.width() > 0.0 && initial_bounds.height() > 0.0);
 
     app.query().label("interactive canvas").hover();
-    assert!(hovered.get(), "hover should update the tracked binding");
+    assert!(
+        hovered.snapshot(),
+        "hover should update the tracked binding"
+    );
 
     let center_before_drag = app.query().label("interactive canvas").single().center();
     app.magnify_at(center_before_drag.0, center_before_drag.1, 1.2);
     assert!(
-        (scale.get() - 1.2).abs() < 0.001,
+        (scale.snapshot() - 1.2).abs() < 0.001,
         "magnify should update the tracked scale binding"
     );
 
     app.query().label("interactive canvas").drag_by(24.0, 0.0);
     assert!(
-        (offset.get() - 24.0).abs() < 0.001,
+        (offset.snapshot() - 24.0).abs() < 0.001,
         "drag should update the tracked offset binding"
     );
 
     let center_after_drag = app.query().label("interactive canvas").single().center();
     app.magnify_at(center_after_drag.0, center_after_drag.1, 1.4);
     assert!(
-        (scale.get() - 1.4).abs() < 0.001,
+        (scale.snapshot() - 1.4).abs() < 0.001,
         "second magnify should update the tracked scale binding"
     );
 
@@ -447,11 +451,11 @@ fn ui_test_drains_local_tasks_through_headless_runtime() {
     });
 
     let deadline = std::time::Instant::now() + Duration::from_millis(200);
-    while status.get() != "ready" && std::time::Instant::now() < deadline {
+    while status.snapshot() != "ready" && std::time::Instant::now() < deadline {
         let _ = app.snapshot();
     }
     assert_eq!(
-        status.get().as_str(),
+        status.snapshot().as_str(),
         "ready",
         "expected headless runtime to drain spawn_local task and update the binding"
     );

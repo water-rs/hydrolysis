@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
+use nami::Signal as _;
 use waterui::ViewExt as _;
 use waterui::component::text;
 use waterui_controls::button::button;
@@ -893,7 +894,7 @@ fn the_focused_binding_focuses_the_surface_without_a_pointer() {
     press_at(&mut runtime, 10.0, 10.0);
     let _ = runtime.pump_at(false, start + Duration::from_millis(148));
     assert_eq!(
-        focus.get(),
+        focus.snapshot(),
         Some(Pane::Document),
         "a press writes its focus back through the .focused binding"
     );
