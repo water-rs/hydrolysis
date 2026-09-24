@@ -591,6 +591,14 @@ pub(crate) struct GestureObserverEffect {
     #[cfg(feature = "accessibility")]
     pub(crate) default_a11y_label: Option<String>,
     pub(crate) gesture_group_identity: usize,
+    /// The target the last flush registered. Every scene emit rebuilds the
+    /// engine's target list under `clear_targets`, so the next flush
+    /// re-registers this target (same recognizer `Rc`) at the new bounds instead
+    /// of building a fresh recognizer — a drag that began before the repaint
+    /// keeps running. This is the same retained registration
+    /// `ListRenderState::row_gestures` performs per row; the node's identity is
+    /// the key, so the recognizer dies with the view rather than leaking.
+    pub(crate) gesture_target: Cell<Option<crate::gesture::GestureTarget>>,
 }
 
 pub(crate) struct ColorNode {

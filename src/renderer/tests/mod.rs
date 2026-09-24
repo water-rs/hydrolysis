@@ -7,6 +7,7 @@ use std::rc::Rc;
 use executor_core::LocalExecutor;
 use executor_core::async_task::{self, AsyncTask, Runnable};
 
+mod gesture_retention;
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
