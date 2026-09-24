@@ -32,6 +32,7 @@ mod native_measure;
 mod navigation;
 mod render;
 mod retained;
+mod scene_ingest;
 mod signals;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -43,6 +44,9 @@ pub(crate) use frame::*;
 pub(crate) use identity::*;
 pub(crate) use native_measure::*;
 pub(crate) use retained::*;
+pub(crate) use scene_ingest::CheckedScene2D;
+#[cfg(test)]
+pub(crate) use scene_ingest::assert_well_formed_image;
 pub(crate) use tree::*;
 pub(crate) use views::*;
 pub(crate) use waterui_backend_core::frame_signals::FrameSignals;
