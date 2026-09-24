@@ -53,6 +53,11 @@ pub(crate) fn popup_menu_node(item: ResolvedMenuItem) -> PopupMenuNode {
 /// emits a single `Image` node from the surrounding environment's label, or the
 /// leaf-provided default when no override is installed. Shared by the dispatch
 /// path and the retained `Widget`-node path so both produce the same a11y tree.
+///
+/// A leaf that names nothing emits no node: decorative fills and shapes are
+/// presentation, not semantics. Only a resolved label — the environment's
+/// `a11y_label` or the leaf's own default — or an explicit `a11y_role` puts a
+/// graphics leaf in the tree.
 pub(crate) fn graphics_image_accessibility(
     renderer: &mut crate::renderer::SemanticCore,
     ctx: Option<RenderContext>,
@@ -61,10 +66,15 @@ pub(crate) fn graphics_image_accessibility(
 ) {
     #[cfg(feature = "accessibility")]
     {
+        let label = renderer.resolve_accessibility_label(env, default_label);
+        if label.is_none() && env.get::<AccessibilityRole>().is_none() {
+            renderer.note_suppressed_graphics_leaf(ctx);
+            return;
+        }
         let mut node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Image),
         );
-        if let Some(label) = renderer.resolve_accessibility_label(env, default_label) {
+        if let Some(label) = label {
             node.set_label(label);
         }
         let _ = renderer.register_accessibility_leaf(ctx, node, env, None);
