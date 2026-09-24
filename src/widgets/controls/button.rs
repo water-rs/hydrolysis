@@ -101,7 +101,8 @@ impl ButtonRenderState {
             )
         };
         let styled = styled_button_label(&theme, style, self.config.label.clone());
-        subview.map_source(|_| button_label_view(color, AnyView::new(styled)));
+        let icon_only = label_resolves_icon_only(&self.config.label, env);
+        subview.map_source(|_| button_label_view(color, AnyView::new(styled), icon_only));
         subview.ensure_built(renderer, env);
     }
 }
@@ -340,7 +341,8 @@ impl MenuRenderState {
                 return;
             }
             let color = theme.button_label_color(MENU_TRIGGER_STYLE, false);
-            subview.map_source(|view| button_label_view(color, view));
+            let icon_only = self.icon_only;
+            subview.map_source(|view| button_label_view(color, view, icon_only));
             subview.ensure_built(renderer, env);
         }
     }
@@ -790,7 +792,15 @@ pub(crate) fn measure_menu_intrinsic(
     button_chrome_size(label_size, &metrics, ProposalSize::UNSPECIFIED)
 }
 
-fn button_label_view(color: Option<Color>, label: AnyView) -> AnyView {
+fn button_label_view(color: Option<Color>, label: AnyView, icon_only: bool) -> AnyView {
+    // An icon-only label's subtree is marked so a theme's resolvable
+    // `WidgetTheme::button_label_color` can paint the standard icon
+    // button's content color rather than the filled text button's.
+    let label = if icon_only {
+        AnyView::new(label.install(crate::IconOnlyButtonLabel))
+    } else {
+        label
+    };
     match color {
         Some(color) => AnyView::new(label.foreground(color)),
         None => label,
