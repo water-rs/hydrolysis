@@ -10,9 +10,11 @@ use vello::kurbo::{Affine, Rect, Shape as _};
 use vello::peniko::{Brush, Color, Fill};
 use waterui::ViewExt as _;
 use waterui::accessibility::AccessibilityRole;
+use waterui::component::text;
 use waterui::graphics::color::Srgb;
 use waterui::layout::Size;
 use waterui::reactive::constant;
+use waterui::shape::{Circle, ShapeExt as _};
 use waterui_graphics::{
     AnimatedMeshGradient, AnimatedMeshGradientConfig, Gradient, Picture, ShaderSurface,
 };
@@ -119,5 +121,70 @@ fn the_application_label_wins_over_the_pictures_own(app: &mut OffscreenApp) {
     assert!(
         !app.query().label("Warning sign").exists(),
         "the picture's own name must not reach the tree once the application named it"
+    );
+}
+
+// Origin: water-rs/hydrolysis#148 — decorative graphics leaves must stay out
+// of the accessibility tree until the application names them.
+fn decorative_background_view() -> impl waterui::View {
+    text("Content").background(Gradient::linear(
+        vec![
+            (0.0, Srgb::from_hex("#0F172A").resolve()),
+            (1.0, Srgb::from_hex("#38BDF8").resolve()),
+        ],
+        [0.0, 0.0],
+        [1.0, 1.0],
+    ))
+}
+
+#[waterui::test(decorative_background_view, theme = hydrolysis_m3::Material3::defaults(), offscreen)]
+fn an_unlabelled_background_fill_emits_no_accessibility_node(app: &mut OffscreenApp) {
+    assert!(
+        !app.query().role(Role::IMAGE).exists(),
+        "a decorative background fill must not emit an unnamed Image node"
+    );
+}
+
+// Origin: water-rs/hydrolysis#148.
+fn decorative_shape_view() -> impl waterui::View {
+    Circle
+        .fill(waterui::Color::srgb_hex("#3B82F6"))
+        .size(24.0, 24.0)
+}
+
+#[waterui::test(decorative_shape_view, theme = hydrolysis_m3::Material3::defaults(), offscreen)]
+fn an_unlabelled_shape_fill_emits_no_accessibility_node(app: &mut OffscreenApp) {
+    assert!(
+        !app.query().role(Role::IMAGE).exists(),
+        "a decorative shape fill must not emit an unnamed Image node"
+    );
+}
+
+// Origin: water-rs/hydrolysis#148.
+fn labeled_shape_view() -> impl waterui::View {
+    Circle
+        .fill(waterui::Color::srgb_hex("#3B82F6"))
+        .size(24.0, 24.0)
+        .a11y_label("Avatar")
+}
+
+#[waterui::test(labeled_shape_view, theme = hydrolysis_m3::Material3::defaults(), offscreen)]
+fn a_labelled_shape_emits_a_named_image_node(app: &mut OffscreenApp) {
+    assert_image_node(app, "a-labelled-shape-emits-a-named-image-node", "Avatar");
+}
+
+// Origin: water-rs/hydrolysis#148.
+fn image_role_shape_view() -> impl waterui::View {
+    Circle
+        .fill(waterui::Color::srgb_hex("#3B82F6"))
+        .size(24.0, 24.0)
+        .a11y_role(AccessibilityRole::Image)
+}
+
+#[waterui::test(image_role_shape_view, theme = hydrolysis_m3::Material3::defaults(), offscreen)]
+fn an_explicit_image_role_keeps_the_shape_in_the_tree(app: &mut OffscreenApp) {
+    assert!(
+        app.query().role(Role::IMAGE).exists(),
+        "an explicit image role keeps the leaf in the tree"
     );
 }
