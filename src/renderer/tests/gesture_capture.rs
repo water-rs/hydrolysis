@@ -1,11 +1,12 @@
-//! water-rs/hydrolysis#163 — an in-flight `.gesture(DragGesture)` died as soon
-//! as the pointer moved over an adjacent input-receiving embedded surface.
-//! `handle_pointer_move_inner` handed the move to
-//! `handle_embedded_pointer_move` before the gesture engine ever saw it and
-//! early-returned over the embedded target, so a drag that started on the
-//! 20-point handle between two `SceneView` panes fired nothing while every
-//! move reached the neighbouring scene as `PointerMove`. The press path
-//! already gives the gesture engine first look; moves now do too.
+//! water-rs/hydrolysis#163 capture follow-up — a press that landed on a
+//! gesture recognizer owns the pointer sequence until release (pointer
+//! capture semantics), so an input-receiving surface the drag crosses must
+//! see none of its moves. `handle_embedded_pointer_move` hit-tested the
+//! pointer position and fed the `SceneView`/`GpuSurface` underneath every
+//! mid-drag move anyway — hydrolysis's own capture slots
+//! (`active_embedded_target`, `captures_drag` → `active_pointer_drag_target`,
+//! `active_text_selection_drag`) simply were not consulted for surfaces that
+//! did not take the press. The sequence is now routed exclusively.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -107,12 +108,13 @@ fn drag_handle(phases: Rc<RefCell<Vec<GesturePhase>>>) -> AnyView {
     ))
 }
 
-/// The issue's sequence verbatim: press on the 20-point gesture handle at
-/// x≈390-410, then moves onto the trailing scene pane at x>410. Before the
-/// fix the recognizer saw none of those moves — `handle_embedded_pointer_move`
-/// claimed each one and the drag failed silently on pointer-up.
+/// The issue's row with the capture semantics the question asks for: press
+/// on the 20-point gesture handle at x≈390-410, then drag onto the trailing
+/// pane at x>410. The handle's press owns the pointer sequence, so the pane
+/// must see no move until the press is released; afterwards an unpressed
+/// move hovers it again.
 #[test]
-fn drag_on_handle_survives_moves_over_adjacent_scene_pane() {
+fn a_started_drag_gesture_captures_the_pointer_sequence_over_adjacent_panes() {
     let phases = Rc::new(RefCell::new(Vec::new()));
     let leading_events = Rc::new(RefCell::new(Vec::new()));
     let trailing_events = Rc::new(RefCell::new(Vec::new()));
@@ -150,39 +152,39 @@ fn drag_on_handle_survives_moves_over_adjacent_scene_pane() {
             GesturePhase::Updated,
             GesturePhase::Ended
         ],
-        "an in-flight drag must keep receiving moves over an embedded surface"
+        "the drag keeps its moves — they are the captured sequence's, not the pane's"
     );
-    // First look is also exclusive ownership: the handle's press captured
-    // the pointer sequence, so the surface it crosses sees none of its moves
-    // until release — then an unpressed move hovers it again.
     assert!(
         !trailing_events
             .borrow()
             .iter()
-            .any(|event| event.starts_with("PointerMove")),
-        "the scene under the pointer must see none of the captured sequence's moves"
+            .any(|event| event.contains("Move")),
+        "a surface the captured sequence crosses must see none of its moves"
     );
+
+    // Capture ends at release: the next unpressed move is hover again.
     pointer_move(&mut runtime, 500.0, 300.0);
     assert!(
         trailing_events
             .borrow()
             .iter()
-            .any(|event| event.starts_with("PointerMove")),
-        "after release the scene under the pointer sees its hover moves again"
+            .any(|event| event.contains("Move")),
+        "after release the pane under the pointer sees its hover moves again"
     );
 }
 
-/// The control the issue names: the same handle between plain `Color` panes
-/// dragged correctly even before the fix — nothing sits there to eat the
-/// moves. Kept here so a future regression that breaks gesture moves
-/// outright is told apart from embedded-surface starvation.
+/// The no-owner control: pressing a handle that carries no recognizer and no
+/// drag capture leaves the sequence unowned, so the pane under the pointer
+/// still receives its moves mid-press.
 #[test]
-fn drag_on_handle_between_plain_panes_is_the_control() {
-    let phases = Rc::new(RefCell::new(Vec::new()));
+fn a_plain_press_leaves_pane_moves_alone() {
+    let trailing_events = Rc::new(RefCell::new(Vec::new()));
     let view = hstack((
         AnyView::new(Color::srgb_hex("#222226")),
-        drag_handle(Rc::clone(&phases)),
-        AnyView::new(Color::srgb_hex("#222226")),
+        AnyView::new(Color::srgb_hex("#3F3F46").width(HANDLE_WIDTH)),
+        AnyView::new(SceneView::new(RecorderPane {
+            events: Rc::clone(&trailing_events),
+        })),
     ))
     .spacing(0.0);
     let mut runtime = runtime_with(AnyView::new(view));
@@ -193,16 +195,17 @@ fn drag_on_handle_between_plain_panes_is_the_control() {
     pointer_down(&mut runtime, 400.0, 300.0);
     pointer_move(&mut runtime, 430.0, 300.0);
     pointer_move(&mut runtime, 500.0, 300.0);
-    pointer_up(&mut runtime, 500.0, 300.0);
 
-    assert_eq!(
-        phases.borrow().as_slice(),
-        &[
-            GesturePhase::Started,
-            GesturePhase::Updated,
-            GesturePhase::Updated,
-            GesturePhase::Ended
-        ],
-        "a drag between plain panes fires its full phase sequence"
+    eprintln!(
+        "trailing pane events: {:?}",
+        trailing_events.borrow().as_slice()
     );
+    assert!(
+        trailing_events
+            .borrow()
+            .iter()
+            .any(|event| event.contains("Move")),
+        "an unowned sequence still delivers its moves to the surface underneath"
+    );
+    pointer_up(&mut runtime, 500.0, 300.0);
 }

@@ -394,6 +394,17 @@ impl SemanticCore {
                 .pointer_move(target.local_position_unclamped(point));
             return true;
         }
+        // Pointer-capture semantics: a press that landed on a gesture
+        // recognizer, a `captures_drag` target, or a text-selection drag owns
+        // the sequence until release — surfaces it crosses see none of its
+        // moves. A surface that took the press itself keeps its own capture
+        // through `active_embedded_target` above.
+        if self.gesture_engine.has_active_recognizer()
+            || self.hit_test.active_pointer_drag_target.is_some()
+            || self.text_editing.selection_drag_index().is_some()
+        {
+            return false;
+        }
         let pointer_priority = self
             .hit_test
             .pointer_targets
