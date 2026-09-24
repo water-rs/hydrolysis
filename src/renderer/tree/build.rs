@@ -33,7 +33,6 @@ impl RenderNode {
             Ok(text) => {
                 let config = (*text).into_inner();
                 return RenderNode::Text(Box::new(TextNode {
-                    #[cfg(feature = "accessibility")]
                     accessibility_identity: Rc::new(()),
                     content: config.content,
                     alignment: config.paragraph_alignment,
@@ -71,7 +70,6 @@ impl RenderNode {
                     })
                     .collect();
                 return RenderNode::Container(Box::new(ContainerNode {
-                    #[cfg(feature = "accessibility")]
                     accessibility_identity: Rc::new(()),
                     layout,
                     children,
@@ -468,7 +466,6 @@ impl RenderNode {
                 let (axis, content, controller) = (*scroll).into_inner().into_inner();
                 let content = normalize_layout_view(content, env);
                 return RenderNode::Scroll(Box::new(ScrollNode {
-                    #[cfg(feature = "accessibility")]
                     accessibility_identity: Rc::new(()),
                     axis,
                     child: RenderNode::build(content, env, renderer),
@@ -694,7 +691,6 @@ impl RenderNode {
         renderer: &mut SemanticCore,
     ) -> RenderNode {
         RenderNode::Wrapper(Box::new(WrapperNode {
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             effect,
             env: env.clone(),
@@ -780,7 +776,6 @@ impl RenderNode {
             layout,
             views,
             env: env.clone(),
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             #[cfg(feature = "accessibility")]
             accessibility_container_env,
@@ -829,7 +824,6 @@ impl RenderNode {
             axis,
             views,
             env: env.clone(),
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             #[cfg(feature = "accessibility")]
             accessibility_container_env,
@@ -857,7 +851,6 @@ impl RenderNode {
             signals.request_refresh();
         })));
         RenderNode::SceneView(Box::new(SceneViewNode {
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             content: Rc::new(RefCell::new(content)),
         }))
@@ -875,7 +868,6 @@ impl RenderNode {
         let runtime = Rc::new(RefCell::new(EmbeddedGpuSurfaceRuntime::new(surface, env)));
         renderer.register_node_gpu_surface(Rc::clone(&runtime));
         RenderNode::GpuSurface(Box::new(GpuSurfaceNode {
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             runtime,
         }))

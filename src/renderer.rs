@@ -232,6 +232,13 @@ pub struct SemanticCore {
     text_editing: TextEditingState,
     popup_menu: PopupMenuState,
     render_depth: usize,
+    /// The retained nodes whose subtrees are currently flushing, innermost
+    /// last — the ancestry chain input registration reads to tell a gesture
+    /// registered inside a view from one attached to the view itself. The
+    /// accessibility builder keeps its own copy for semantic-key identity; the
+    /// input side additionally gets the pushes that mark where a view begins
+    /// (a sub-view's root) without entering the a11y chain.
+    owner_stack: Vec<RetainedIdentity>,
     /// Frame triggers shared with reactive closures; see [`FrameSignals`].
     signals: FrameSignals,
     lifecycle: LifecycleState,
@@ -353,6 +360,7 @@ impl SemanticCore {
             text_editing: TextEditingState::default(),
             popup_menu: PopupMenuState::default(),
             render_depth: 0,
+            owner_stack: Vec::new(),
             signals: FrameSignals::new(frame_instant),
             lifecycle: LifecycleState::default(),
             animation_controller: AnimationController::default(),

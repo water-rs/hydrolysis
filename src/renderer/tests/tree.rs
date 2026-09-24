@@ -28,7 +28,6 @@ use waterui_text::styled::StyledStr;
 
 fn text_node(content: &'static str) -> RenderNode {
     RenderNode::Text(Box::new(TextNode {
-        #[cfg(feature = "accessibility")]
         accessibility_identity: Rc::new(()),
         content: Computed::constant(StyledStr::plain(content)),
         alignment: Computed::constant(HorizontalAlignment::Leading),
@@ -42,7 +41,6 @@ fn render_node_container_lays_out_and_flushes_text() {
     let mut renderer = test_renderer();
 
     let mut node = RenderNode::Container(Box::new(ContainerNode {
-        #[cfg(feature = "accessibility")]
         accessibility_identity: Rc::new(()),
         layout: Box::new(VStackLayout {
             alignment: HorizontalAlignment::Center,
@@ -101,7 +99,6 @@ fn geometry_static_flush_reuses_cached_placement() {
     let mut renderer = test_renderer();
 
     let mut node = RenderNode::Container(Box::new(ContainerNode {
-        #[cfg(feature = "accessibility")]
         accessibility_identity: Rc::new(()),
         layout: Box::new(VStackLayout {
             alignment: HorizontalAlignment::Center,
