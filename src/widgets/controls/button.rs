@@ -793,17 +793,19 @@ pub(crate) fn measure_menu_intrinsic(
 }
 
 fn button_label_view(color: Option<Color>, label: AnyView, icon_only: bool) -> AnyView {
-    // An icon-only label's subtree is marked so a theme's resolvable
-    // `WidgetTheme::button_label_color` can paint the standard icon
-    // button's content color rather than the filled text button's.
-    let label = if icon_only {
+    // `.foreground` resolves its colour eagerly while installing, so the
+    // icon-only marker must wrap it: a theme's resolvable
+    // `WidgetTheme::button_label_color` then sees the marker and paints the
+    // standard icon button's content colour rather than the filled text
+    // button's.
+    let label = match color {
+        Some(color) => AnyView::new(label.foreground(color)),
+        None => label,
+    };
+    if icon_only {
         AnyView::new(label.install(crate::IconOnlyButtonLabel))
     } else {
         label
-    };
-    match color {
-        Some(color) => AnyView::new(label.foreground(color)),
-        None => label,
     }
 }
 
