@@ -238,11 +238,34 @@ fn icon_only_button_draws_the_state_layer_centred_in_its_bounds(app: &mut Offscr
         .label("Search")
         .single()
         .bounds();
-    let snapshot = app.snapshot();
 
-    // The only drawn pixels inside the button's black-background bounds are
-    // the icon-button state layer — a 40dp circle centred in the 48dp touch
-    // target. Measure its rasterised bounding box.
+    // The standard icon button carries no container: at rest nothing is
+    // drawn inside the black-background touch target.
+    let rest = app.snapshot();
+    let rx0 = bounds.x().max(0.0) as usize;
+    let ry0 = bounds.y().max(0.0) as usize;
+    let rx1 = ((bounds.x() + bounds.width()) as usize).min(rest.width as usize);
+    let ry1 = ((bounds.y() + bounds.height()) as usize).min(rest.height as usize);
+    let mut painted_at_rest = 0usize;
+    for y in ry0..ry1 {
+        for x in rx0..rx1 {
+            let px = &rest.rgba8[(y * rest.width as usize + x) * 4..][..4];
+            if px[0].max(px[1]).max(px[2]) > 4 {
+                painted_at_rest += 1;
+            }
+        }
+    }
+    assert_eq!(
+        painted_at_rest, 0,
+        "a standard icon button draws nothing at rest in {bounds:?}"
+    );
+
+    // On hover the only drawn pixels inside the bounds are the icon-button
+    // state layer — a 40dp circle centred in the 48dp touch target. Measure
+    // its rasterised bounding box.
+    app.query().role(Role::BUTTON).label("Search").hover();
+    app.pump_for(std::time::Duration::from_millis(120));
+    let snapshot = app.snapshot();
     let x0 = bounds.x().max(0.0) as usize;
     let y0 = bounds.y().max(0.0) as usize;
     let x1 = ((bounds.x() + bounds.width()) as usize).min(snapshot.width as usize);
@@ -254,7 +277,7 @@ fn icon_only_button_draws_the_state_layer_centred_in_its_bounds(app: &mut Offscr
     for y in y0..y1 {
         for x in x0..x1 {
             let px = &snapshot.rgba8[(y * snapshot.width as usize + x) * 4..][..4];
-            if px[0].max(px[1]).max(px[2]) > 32 {
+            if px[0].max(px[1]).max(px[2]) > 4 {
                 min_x = min_x.min(x);
                 min_y = min_y.min(y);
                 max_x = max_x.max(x);
