@@ -301,6 +301,25 @@ waterui-video = { git = "https://github.com/water-rs/waterui", rev = "df4f7c1755
 waterui-watcher-set = { git = "https://github.com/water-rs/waterui", rev = "df4f7c17553b6b41241c606c4c0305b5cdaa73e6" }
 waterui-webview = { git = "https://github.com/water-rs/waterui", rev = "df4f7c17553b6b41241c606c4c0305b5cdaa73e6" }
 
+# The registry `waterkit-codec` linked `cros-codecs` (vaapi) unconditionally on
+# Linux, so turning on `assets` (still images) built `cros-libva` against the
+# system libva headers and broke any SDK older than 2.20 —
+# water-rs/waterui#1190. These revs carry the fix the waterui workspace
+# already runs: the codec gates VA-API behind a `vaapi` feature that the
+# player requests. Every waterkit crate the video/audio graph shares types
+# across rides the same rev — a registry `waterkit-audio` beside the pinned
+# `waterkit-video` gives two `DecodedAudioFrame` types — and `waterkit-core`
+# keeps the whole waterkit graph on one source; drop these entries once
+# registry releases carry the change.
+waterkit-audio = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-codec = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-core = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-video = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-video-container = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-video-core = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-video-player = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+waterkit-video-streaming = { git = "https://github.com/water-rs/waterkit", rev = "b6113f8b3aa09402f5fafa95d160d7f6dc0715e5" }
+
 # The Material 3 theme must implement the five-argument
 # `WidgetTheme::draw_button_chrome` contract added for
 # water-rs/hydrolysis#115.
