@@ -2305,12 +2305,12 @@ impl HydrolysisRenderer {
             &mut self.core.animation_controller,
             now,
         );
-        if let Some(modal) = env
+        if env
             .get::<ModalInteraction>()
-            .filter(|modal| modal.is_active())
+            .is_some_and(|modal| modal.is_active())
         {
             press_slot.modal = true;
-            self.hit_test.modal_interaction = Some(modal.clone());
+            self.register_modal_scope(env);
         }
         if let Some(focus_binding) = env.get::<InteractionFocusBinding>() {
             press_slot.focus_binding = Some(focus_binding.focused().clone());
@@ -2340,6 +2340,20 @@ impl HydrolysisRenderer {
 }
 
 impl SemanticCore {
+    /// Registers an active [`ModalInteraction`] scope an environment overlay
+    /// introduces — the Escape target and keyboard-trap owner for the subtree
+    /// it scopes. Called when the node carrying the metadata is emitted, on
+    /// the rendered flush and the headless semantic walk alike, so the scope
+    /// exists whether or not anything beneath it binds an interaction target.
+    pub(crate) fn register_modal_scope(&mut self, env: &Environment) {
+        if let Some(modal) = env
+            .get::<ModalInteraction>()
+            .filter(|modal| modal.is_active())
+        {
+            self.hit_test.modal_interaction = Some(modal.clone());
+        }
+    }
+
     pub(crate) fn register_interactive_pointer_target<F>(
         &mut self,
         bounds: vello::kurbo::Rect,
