@@ -179,6 +179,13 @@ pub(crate) struct AccessibilityBuilder {
     /// Naming scopes ([`ScopedAccessibilitySemantics`]) already claimed by a node
     /// this flush, keyed by scope identity.
     consumed_semantics_scopes: BTreeSet<usize>,
+    /// The bounds a suppressed decorative graphics leaf would have published,
+    /// keyed by the innermost container node above it. A naming container
+    /// whose children all turned out decorative adopts them as its own bounds —
+    /// the element box rather than the frame it was stretched into — the same
+    /// contract `collapse_single_child_container` keeps when a real child
+    /// exists.
+    suppressed_leaf_bounds: BTreeMap<AccessibilityNodeId, vello::kurbo::Rect>,
     pub(crate) pending_tree_update: Option<AccessibilityTreeUpdate>,
 }
 
@@ -205,6 +212,7 @@ impl Default for AccessibilityBuilder {
             suppression_depth: 0,
             consumed_identifier_scopes: BTreeSet::new(),
             consumed_semantics_scopes: BTreeSet::new(),
+            suppressed_leaf_bounds: BTreeMap::new(),
             pending_tree_update: None,
         }
     }
@@ -233,6 +241,7 @@ impl AccessibilityBuilder {
         self.suppression_depth = 0;
         self.consumed_identifier_scopes.clear();
         self.consumed_semantics_scopes.clear();
+        self.suppressed_leaf_bounds.clear();
     }
 
     pub(crate) fn begin_rebuild_frame(&mut self) {
@@ -1070,6 +1079,34 @@ impl SemanticCore {
         if let Some(container_id) = scope.container_node {
             self.accessibility
                 .collapse_single_child_container(container_id);
+            // No real child ever registered under the container, but suppressed
+            // decorative leaves beneath it still placed their boxes: the
+            // container's node reports the element box they left, not the frame
+            // the container itself was stretched into — and, as
+            // `collapse_single_child_container` keeps the child's role when the
+            // container names nothing but `Group`, a suppressed graphics leaf
+            // (always `Image`-roled) lends its role too.
+            if let Some(bounds) = self
+                .accessibility
+                .suppressed_leaf_bounds
+                .remove(&container_id)
+                && self
+                    .accessibility
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == container_id)
+                    .is_some_and(|(_, node)| node.children().is_empty())
+                && let Some((_, node)) = self
+                    .accessibility
+                    .nodes
+                    .iter_mut()
+                    .find(|(id, _)| *id == container_id)
+            {
+                node.set_bounds(kurbo_rect_to_accesskit_rect(bounds));
+                if node.role() == AccessibilityNodeRole::Group {
+                    node.set_role(AccessibilityNodeRole::Image);
+                }
+            }
         }
     }
 
@@ -1112,6 +1149,41 @@ impl SemanticCore {
             ),
             None => self.register_accessibility_node_semantic(node, env, action_target),
         }
+    }
+
+    /// Notes the bounds a decorative graphics leaf would have published had it
+    /// carried semantics. The innermost container node may still need them:
+    /// when every child under a naming container is decorative, the container's
+    /// synthesized node adopts these bounds — the placed element's box, not the
+    /// frame the parent assigned — the contract
+    /// `collapse_single_child_container` keeps when a real child exists.
+    ///
+    /// A no-op on the semantic walk (no `ctx` to take a rect from), inside a
+    /// suppressed subtree, and above every container node — a leaf outside all
+    /// of them has nothing to lend bounds to.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn note_suppressed_graphics_leaf(
+        &mut self,
+        ctx: Option<crate::renderer::RenderContext>,
+    ) {
+        let Some(ctx) = ctx else {
+            return;
+        };
+        if self.accessibility.suppression_depth > 0 {
+            return;
+        }
+        let Some(&parent) = self.accessibility.parent_stack.last() else {
+            return;
+        };
+        let bounds = crate::renderer::transformed_rect(ctx.hit_transform, ctx.bounds);
+        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+            return;
+        }
+        self.accessibility
+            .suppressed_leaf_bounds
+            .entry(parent)
+            .and_modify(|acc| *acc = acc.union(bounds))
+            .or_insert(bounds);
     }
 
     /// The semantic counterpart of [`Self::register_accessibility_node`]: the
