@@ -17,13 +17,10 @@ impl RenderNode {
         // the renderer.
         match self {
             RenderNode::Dynamic(node) => {
-                let pending = node.pending.borrow_mut().take();
-                if let Some(content) = pending {
-                    let node_env = node.env.clone();
-                    node.child = RenderNode::build(content, &node_env, renderer);
+                if node.apply_pending(renderer) {
                     true
                 } else {
-                    node.child.patch(renderer)
+                    node.child.borrow_mut().patch(renderer)
                 }
             }
             RenderNode::Container(container) => {
@@ -94,7 +91,7 @@ impl RenderNode {
         match self {
             RenderNode::Dynamic(node) => {
                 out.insert(node.source.identity());
-                node.child.collect_dynamic_identities_into(out);
+                node.child.borrow().collect_dynamic_identities_into(out);
             }
             RenderNode::Container(container) => {
                 for child in &container.children {
@@ -151,7 +148,7 @@ impl RenderNode {
             RenderNode::Retain(node) => node.child.take_layout_dirty(),
             RenderNode::Env(node) => node.child.take_layout_dirty(),
             RenderNode::Wrapper(node) => node.child.take_layout_dirty(),
-            RenderNode::Dynamic(node) => node.child.take_layout_dirty(),
+            RenderNode::Dynamic(node) => node.child.borrow_mut().take_layout_dirty(),
             RenderNode::Scroll(node) => node.child.take_layout_dirty(),
             RenderNode::ViewEffect(node) => node.child.borrow_mut().take_layout_dirty(),
             RenderNode::AppliedFilter(node) => node.child.take_layout_dirty(),

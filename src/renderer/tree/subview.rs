@@ -65,7 +65,7 @@ fn try_resolve_node_text_leaf(
         RenderNode::Rotation(node) => try_resolve_node_text_leaf(&node.child, env),
         RenderNode::Offset(node) => try_resolve_node_text_leaf(&node.child, env),
         RenderNode::Retain(node) => try_resolve_node_text_leaf(&node.child, env),
-        RenderNode::Dynamic(node) => try_resolve_node_text_leaf(&node.child, env),
+        RenderNode::Dynamic(node) => try_resolve_node_text_leaf(&node.child.borrow(), env),
         RenderNode::Env(node) => try_resolve_node_text_leaf(&node.child, &node.env),
         RenderNode::Wrapper(node) => try_resolve_node_text_leaf(&node.child, &node.env),
         _ => None,

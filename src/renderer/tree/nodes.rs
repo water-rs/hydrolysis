@@ -948,8 +948,52 @@ pub(crate) struct DynamicHostNode {
     pub(super) pending: Rc<RefCell<Option<AnyView>>>,
     /// Environment captured at build, used to rebuild the child on a change.
     pub(super) env: Environment,
-    /// The current expansion of the `Dynamic`'s content.
-    pub(super) child: RenderNode,
+    /// The current expansion of the `Dynamic`'s content. Interior mutability
+    /// lets a pass that runs under `&self` (flush, semantic emit) apply a
+    /// pending structural change at this node's own entry, instead of waiting
+    /// for the next `patch` walk.
+    pub(super) child: RefCell<RenderNode>,
+}
+
+impl DynamicHostNode {
+    /// Take any content the `Dynamic` delivered since this node's last pass and
+    /// rebuild the child with it — the fine-grained structural patch. Runs at
+    /// this node's own entry into every pass whose leaf reads reach the frame
+    /// (`patch`, `flush`, semantic emit), so a `set()` written inside an
+    /// earlier pass of the same frame still lands its structural change before
+    /// the stale child can paint or emit — leaf updates and structural
+    /// patches land in the same presented frame, never one frame apart.
+    ///
+    /// Passes whose reads cannot reach the presented frame (`measure`,
+    /// `layout`, identity collection) do not apply it: a stale measurement or
+    /// placement costs nothing visible — a child swapped in there would be
+    /// laid out at the placement its already-measured stale child earned — and
+    /// `flush`/`emit` apply the patch before anything is encoded. Returns
+    /// whether the child changed.
+    pub(super) fn apply_pending(&self, renderer: &mut SemanticCore) -> bool {
+        let pending = self.pending.borrow_mut().take();
+        match pending {
+            Some(content) => {
+                let node_env = self.env.clone();
+                *self.child.borrow_mut() = RenderNode::build(content, &node_env, renderer);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `apply_pending` for a pass reached after the frame's `patch` result was
+    /// already folded into the window's structural bookkeeping: the change is
+    /// reported to the renderer like `RetainedSubview::patch_built` reports
+    /// widget-owned patches, so the next refresh runs the prune cycle for the
+    /// dropped subtree's animation/measurement slots.
+    pub(super) fn apply_pending_mid_pass(&self, renderer: &mut SemanticCore) -> bool {
+        let applied = self.apply_pending(renderer);
+        if applied {
+            renderer.note_subview_structural_change();
+        }
+        applied
+    }
 }
 
 impl TextNode {

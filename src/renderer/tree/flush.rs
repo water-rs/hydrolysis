@@ -144,7 +144,10 @@ impl RenderNode {
                 node.child
                     .flush(renderer, ctx.child(transform, ctx.bounds), env);
             }
-            RenderNode::Dynamic(node) => node.child.flush(renderer, ctx, env),
+            RenderNode::Dynamic(node) => {
+                node.apply_pending_mid_pass(renderer);
+                node.child.borrow().flush(renderer, ctx, env);
+            }
             RenderNode::Retain(node) => node.child.flush(renderer, ctx, env),
             RenderNode::Env(node) => {
                 renderer.register_modal_scope(&node.env);
@@ -510,7 +513,10 @@ impl RenderNode {
             RenderNode::Scale(node) => node.child.emit_accessibility(renderer, env),
             RenderNode::Rotation(node) => node.child.emit_accessibility(renderer, env),
             RenderNode::Offset(node) => node.child.emit_accessibility(renderer, env),
-            RenderNode::Dynamic(node) => node.child.emit_accessibility(renderer, env),
+            RenderNode::Dynamic(node) => {
+                node.apply_pending_mid_pass(renderer);
+                node.child.borrow().emit_accessibility(renderer, env);
+            }
             RenderNode::Retain(node) => node.child.emit_accessibility(renderer, env),
             RenderNode::Env(node) => {
                 renderer.register_modal_scope(&node.env);
