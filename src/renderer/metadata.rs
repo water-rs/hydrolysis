@@ -315,6 +315,15 @@ impl HydrolysisRenderer {
         effect: &GestureObserverEffect,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
+        // The action environment contract (water-rs/hydrolysis#177): the
+        // handler resolves against `env` as seen here — the observer's
+        // env — layered over the runtime env at dispatch. A `.state(&v)`
+        // install therefore must sit *outside* the `.gesture` modifier (on
+        // an ancestor of the handler's view); an install between the view
+        // and `.gesture` lands in `content`'s env and is invisible to the
+        // handler. Every dispatch arm — a11y Activate, `layered_action`,
+        // the press slot, keyboard activation, hover — applies this same
+        // `captured_env.layered_on(runtime_env)` rule.
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
         let disabled = env
             .get::<waterui_core::interaction::Disabled>()
