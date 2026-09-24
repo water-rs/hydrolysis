@@ -346,3 +346,51 @@ fn menu_button_exposes_accessible_name(app: &mut OffscreenApp) {
         "menu-button-exposes-accessible-name: menu trigger bounds must be non-zero"
     );
 }
+
+// Origin: water-rs/hydrolysis#149 — an icon-only menu trigger sizes under the
+// icon-button contract, not the text-button chrome.
+fn icon_only_menu_view() -> impl waterui::View {
+    control_shell(
+        vstack((
+            Menu::new(
+                label("More").icon(()).icon_only(),
+                (button("Refresh").action(|| {}),),
+            ),
+            button(label("Search").icon(()).icon_only()),
+        ))
+        .spacing(12.0),
+    )
+}
+
+#[waterui::test(icon_only_menu_view, theme = hydrolysis_m3::Material3::defaults(), viewport = (320, 240), offscreen)]
+fn icon_only_menu_trigger_measures_the_icon_button_touch_target(app: &mut OffscreenApp) {
+    let menu = app.query().role(Role::BUTTON).label("More").single();
+    let icon_button = app.query().role(Role::BUTTON).label("Search").single();
+
+    let menu_bounds = menu.bounds();
+    let button_bounds = icon_button.bounds();
+    assert_close(
+        f64::from(menu_bounds.width()),
+        f64::from(button_bounds.width()),
+        0.5,
+        "icon-only menu trigger width must match the icon-only button",
+    );
+    assert_close(
+        f64::from(menu_bounds.height()),
+        f64::from(button_bounds.height()),
+        0.5,
+        "icon-only menu trigger height must match the icon-only button",
+    );
+    assert_close(
+        f64::from(menu_bounds.width()),
+        48.0,
+        0.5,
+        "icon-only menu trigger width",
+    );
+    assert_close(
+        f64::from(menu_bounds.height()),
+        48.0,
+        0.5,
+        "icon-only menu trigger height",
+    );
+}
