@@ -184,17 +184,19 @@ impl HydroNativeView for Native<NavigationView> {
     }
 }
 
-/// Emits a navigation view's bar/title accessibility nodes. Shared by the dispatch
-/// path and the retained `Widget`-node path. `default_title_label` is the spoken
-/// label resolved from the bar title view (extracted at build time on the node
-/// path, where the title view is owned by a [`RetainedSubview`]).
+/// Emits a navigation view's bar/title/subtitle accessibility nodes. Shared by
+/// the dispatch path and the retained `Widget`-node path. The title and
+/// subtitle views are owned by [`RetainedSubview`]s in `state`, which keeps the
+/// spoken label each resolved at build time (`default_a11y_label`); both emit
+/// as manual children of the bar node — the title a `Header`, the subtitle a
+/// `Label` — because their draws are suppressed chrome, not sub-view emissions.
 pub(crate) fn navigation_view_accessibility(
     renderer: &mut crate::renderer::SemanticCore,
     ctx: Option<RenderContext>,
     theme: Option<&Rc<dyn crate::engine::WidgetTheme>>,
     hidden: &Computed<bool>,
     display_mode: NavigationTitleDisplayMode,
-    default_title_label: Option<String>,
+    state: &NavigationViewRenderState,
     env: &Environment,
 ) {
     #[cfg(feature = "accessibility")]
@@ -202,12 +204,18 @@ pub(crate) fn navigation_view_accessibility(
         if renderer.read_signal(hidden) {
             return;
         }
+        let default_title_label = state.title.default_a11y_label();
+        let default_subtitle_label = if state.subtitle_present {
+            state.subtitle.default_a11y_label()
+        } else {
+            None
+        };
         // Bar/title geometry exists only in the rendered runtime; the semantic
         // emission walk has no bounds and no theme to take metrics from.
-        let (bar_bounds, title_bounds) =
+        let (bar_bounds, title_bounds, subtitle_bounds) =
             ctx.as_ref()
                 .zip(theme)
-                .map_or((None, None), |(ctx, theme)| {
+                .map_or((None, None, None), |(ctx, theme)| {
                     let metrics = theme.navigation_metrics();
                     let bar_height =
                         navigation_base_bar_height_for_display_mode(display_mode, theme);
@@ -241,9 +249,26 @@ pub(crate) fn navigation_view_accessibility(
                     );
                     let title_bounds = (title_rect.width() > 0.0 && title_rect.height() > 0.0)
                         .then(|| transformed_rect(ctx.hit_transform, title_rect));
+                    // The subtitle sits under the title inside `title_rect`,
+                    // positioned by the same split the suppressed flush draws at.
+                    let subtitle_bounds = if state.subtitle_present {
+                        let title_size =
+                            state.title.measure_built(renderer.state_mut(), env, theme);
+                        let subtitle_size =
+                            state
+                                .subtitle
+                                .measure_built(renderer.state_mut(), env, theme);
+                        let (_, subtitle_rect) =
+                            title_and_subtitle_rects(title_rect, title_size, subtitle_size);
+                        (subtitle_rect.width() > 0.0 && subtitle_rect.height() > 0.0)
+                            .then(|| transformed_rect(ctx.hit_transform, subtitle_rect))
+                    } else {
+                        None
+                    };
                     (
                         Some(transformed_rect(ctx.hit_transform, bar_rect)),
                         title_bounds,
+                        subtitle_bounds,
                     )
                 });
         let mut bar_node = AccessibilityNode::new(
@@ -269,6 +294,29 @@ pub(crate) fn navigation_view_accessibility(
         if let Some(title_node_id) = title_node_id {
             bar_node.push_child(title_node_id);
         }
+        if state.subtitle_present {
+            let mut subtitle_node = AccessibilityNode::new(
+                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
+            );
+            let subtitle_label = renderer.resolve_accessibility_label(env, default_subtitle_label);
+            if let Some(label) = subtitle_label {
+                subtitle_node.set_label(label);
+            }
+            let subtitle_node_id = match subtitle_bounds {
+                Some(subtitle_bounds) => renderer.register_accessibility_child_node(
+                    subtitle_node,
+                    subtitle_bounds,
+                    env,
+                    None,
+                ),
+                None => {
+                    renderer.register_accessibility_child_node_semantic(subtitle_node, env, None)
+                }
+            };
+            if let Some(subtitle_node_id) = subtitle_node_id {
+                bar_node.push_child(subtitle_node_id);
+            }
+        }
         match bar_bounds {
             Some(bar_bounds) => {
                 let _ = renderer.register_accessibility_node(bar_node, bar_bounds, env, None);
@@ -280,15 +328,7 @@ pub(crate) fn navigation_view_accessibility(
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (
-            renderer,
-            ctx,
-            theme,
-            hidden,
-            display_mode,
-            default_title_label,
-            env,
-        );
+        let _ = (renderer, ctx, theme, hidden, display_mode, state, env);
     }
 }
 
@@ -398,13 +438,9 @@ pub(crate) fn render_navigation_view_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        let (hidden_signal, display_mode, default_title_label) = {
+        let (hidden_signal, display_mode) = {
             let state = state.borrow();
-            (
-                state.hidden.clone(),
-                state.display_mode,
-                state.title.default_a11y_label(),
-            )
+            (state.hidden.clone(), state.display_mode)
         };
         let theme = ctx.theme();
         navigation_view_accessibility(
@@ -413,7 +449,7 @@ pub(crate) fn render_navigation_view_node(
             Some(&theme),
             &hidden_signal,
             display_mode,
-            default_title_label,
+            &state.borrow(),
             env,
         );
     }
@@ -552,27 +588,28 @@ pub(crate) fn render_navigation_view_parts(
             title_y0 + title_height,
         );
         if title_rect.width() > 0.0 && title_rect.height() > 0.0 {
-            // The bar title's a11y is emitted by `navigation_view_accessibility`, so
-            // suppress the sub-view's own a11y (matching the dispatch path's
-            // `dispatch_in_rect_without_accessibility`).
-            #[cfg(feature = "accessibility")]
-            ctx.renderer_mut().push_accessibility_suppression();
-            {
-                let mut state = state.borrow_mut();
-                if state.principal.is_empty() {
-                    flush_title_and_subtitle(ctx, &mut state, env, title_rect);
-                } else {
-                    flush_toolbar_group(
-                        ctx,
-                        &mut state.principal,
-                        env,
-                        title_rect,
-                        ToolbarAlignment::Center,
-                    );
-                }
+            let mut state = state.borrow_mut();
+            if state.principal.is_empty() {
+                // The bar title's and subtitle's a11y are emitted by
+                // `navigation_view_accessibility`, so suppress the sub-views'
+                // own a11y (matching the dispatch path's
+                // `dispatch_in_rect_without_accessibility`). Principal items are
+                // not title chrome — they flush unsuppressed so their own nodes
+                // (buttons, menus) emit like the other toolbar groups.
+                #[cfg(feature = "accessibility")]
+                ctx.renderer_mut().push_accessibility_suppression();
+                flush_title_and_subtitle(ctx, &mut state, env, title_rect);
+                #[cfg(feature = "accessibility")]
+                ctx.renderer_mut().pop_accessibility_suppression();
+            } else {
+                flush_toolbar_group(
+                    ctx,
+                    &mut state.principal,
+                    env,
+                    title_rect,
+                    ToolbarAlignment::Center,
+                );
             }
-            #[cfg(feature = "accessibility")]
-            ctx.renderer_mut().pop_accessibility_suppression();
         }
 
         if search.is_some() {
@@ -710,6 +747,25 @@ fn flush_toolbar_group(
     }
 }
 
+/// Stack the title on the subtitle inside `bounds`, the pair centred as a
+/// group — the same split `flush_title_and_subtitle` draws at, so the a11y
+/// node's bounds match the painted text.
+fn title_and_subtitle_rects(
+    bounds: vello::kurbo::Rect,
+    title_size: LayoutSize,
+    subtitle_size: LayoutSize,
+) -> (vello::kurbo::Rect, vello::kurbo::Rect) {
+    let total_height =
+        (f64::from(title_size.height) + f64::from(subtitle_size.height)).min(bounds.height());
+    let mut y = bounds.y0 + (bounds.height() - total_height) * 0.5;
+    let title_height = f64::from(title_size.height).min((bounds.y1 - y).max(0.0));
+    let title_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
+    y += title_height;
+    let subtitle_height = f64::from(subtitle_size.height).min((bounds.y1 - y).max(0.0));
+    let subtitle_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
+    (title_rect, subtitle_rect)
+}
+
 fn flush_title_and_subtitle(
     ctx: &mut WidgetRenderContext<'_>,
     state: &mut NavigationViewRenderState,
@@ -722,11 +778,7 @@ fn flush_title_and_subtitle(
     } else {
         LayoutSize::zero()
     };
-    let total_height =
-        (f64::from(title_size.height) + f64::from(subtitle_size.height)).min(bounds.height());
-    let mut y = bounds.y0 + (bounds.height() - total_height) * 0.5;
-    let title_height = f64::from(title_size.height).min((bounds.y1 - y).max(0.0));
-    let title_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
+    let (title_rect, subtitle_rect) = title_and_subtitle_rects(bounds, title_size, subtitle_size);
     if title_rect.height() > 0.0 {
         let render_ctx = ctx.render_context();
         state.title.flush_in_rect(
@@ -737,20 +789,15 @@ fn flush_title_and_subtitle(
             title_rect,
         );
     }
-    y += title_height;
-    if state.subtitle_present {
-        let subtitle_height = f64::from(subtitle_size.height).min((bounds.y1 - y).max(0.0));
-        let subtitle_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
-        if subtitle_rect.height() > 0.0 {
-            let render_ctx = ctx.render_context();
-            state.subtitle.flush_in_rect(
-                ctx.renderer_mut(),
-                render_ctx,
-                env,
-                ProposalSize::UNSPECIFIED,
-                subtitle_rect,
-            );
-        }
+    if state.subtitle_present && subtitle_rect.height() > 0.0 {
+        let render_ctx = ctx.render_context();
+        state.subtitle.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            subtitle_rect,
+        );
     }
 }
 
@@ -2083,11 +2130,11 @@ pub(crate) fn render_navigation_stack_parts(
 }
 
 /// Emits a retained navigation view's accessibility nodes for the semantic
-/// walk: the bar and title nodes `navigation_view_accessibility` registers,
-/// then the sub-views that flush unsuppressed in the rendered path — toolbar
-/// items, the search field, and the screen content. The title, subtitle, and
-/// principal sub-views flush under suppression (their semantics live on the
-/// bar's own nodes), so they emit nothing.
+/// walk: the bar, title, and subtitle nodes `navigation_view_accessibility`
+/// registers, then the sub-views that flush unsuppressed in the rendered path —
+/// toolbar items, the search field, and the screen content. The title and
+/// subtitle sub-views flush under suppression (their semantics live on the
+/// bar's own nodes), so they emit nothing here.
 #[cfg(feature = "accessibility")]
 pub(crate) fn emit_navigation_view_accessibility(
     renderer: &mut crate::renderer::SemanticCore,
@@ -2101,23 +2148,20 @@ pub(crate) fn emit_navigation_view_accessibility(
         return;
     }
     let mut state = state.borrow_mut();
-    let (hidden_signal, display_mode, default_title_label) = {
-        (
-            state.hidden.clone(),
-            state.display_mode,
-            state.title.default_a11y_label(),
-        )
-    };
+    let (hidden_signal, display_mode) = (state.hidden.clone(), state.display_mode);
     navigation_view_accessibility(
         renderer,
         None,
         None,
         &hidden_signal,
         display_mode,
-        default_title_label,
+        &state,
         env,
     );
     for item in &mut state.leading {
+        item.emit_accessibility(renderer, env);
+    }
+    for item in &mut state.principal {
         item.emit_accessibility(renderer, env);
     }
     for item in &mut state.trailing {
