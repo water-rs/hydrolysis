@@ -1,3 +1,4 @@
+#[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, WidgetRenderContext,
@@ -7,7 +8,6 @@ use crate::renderer::{
 use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
-#[cfg(feature = "accessibility")]
 use nami::Signal;
 use std::cell::RefCell;
 use std::rc::Rc;
