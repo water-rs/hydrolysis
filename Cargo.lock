@@ -2835,7 +2835,7 @@ dependencies = [
 [[package]]
 name = "hydrolysis-m3"
 version = "0.3.1"
-source = "git+https://github.com/water-rs/hydrolysis-m3?rev=f3d90b8d7d7a16e04dacdc6d76bd05c0c70378f3#f3d90b8d7d7a16e04dacdc6d76bd05c0c70378f3"
+source = "git+https://github.com/water-rs/hydrolysis-m3?rev=9520f00708489748a8f769b1f30fec694c420b5e#9520f00708489748a8f769b1f30fec694c420b5e"
 dependencies = [
  "hydrolysis",
  "material-color-utils",
