@@ -273,7 +273,11 @@ pub(crate) fn str_accessibility(
         {
             return;
         }
-        let label = renderer.resolve_accessibility_label(env, Some(text.as_str().to_owned()));
+        // An empty text leaf names nothing: like a decorative graphics leaf
+        // it emits no node until its content becomes non-empty
+        // (water-rs/hydrolysis#176).
+        let default_label = (!text.as_str().is_empty()).then(|| text.as_str().to_owned());
+        let label = renderer.resolve_accessibility_label(env, default_label);
         if let Some(label) = label {
             let mut node = AccessibilityNode::new(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
