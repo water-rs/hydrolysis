@@ -502,6 +502,17 @@ impl AccessibilityBuilder {
         let [child_id] = *container.children() else {
             return;
         };
+        // A container carrying semantic state of its own is a distinct
+        // element, not a naming wrapper: dissolving it into the child would
+        // drop the state and overwrite the child's own label and role.
+        if container.is_expanded().is_some()
+            || container.is_selected().is_some()
+            || container.toggled().is_some()
+            || container.is_disabled()
+            || container.is_busy()
+        {
+            return;
+        }
         let label = container.label().map(str::to_owned);
         let author_id = container.author_id().map(str::to_owned);
         let role = container.role();
