@@ -613,8 +613,9 @@ impl HeadlessRuntime {
             .iter()
             .any(|popup| popup.window.state.snapshot() == waterui::window::WindowState::Closed)
         {
-            self.popup_windows
-                .retain(|popup| popup.window.state.snapshot() != waterui::window::WindowState::Closed);
+            self.popup_windows.retain(|popup| {
+                popup.window.state.snapshot() != waterui::window::WindowState::Closed
+            });
             self.runtime.request_refresh();
             self.runtime.platform.request_redraw();
         }

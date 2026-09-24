@@ -558,7 +558,9 @@ fn font_family(family: Option<&str>) -> parley::FontFamily<'static> {
 }
 
 fn text_layout_locale(env: &Environment) -> String {
-    waterui_locale::locale_binding(env).snapshot().canonical_tag()
+    waterui_locale::locale_binding(env)
+        .snapshot()
+        .canonical_tag()
 }
 
 /// The marker a truncated line's tail is cut for.

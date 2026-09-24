@@ -118,9 +118,13 @@ pub(crate) fn measure_progress_node(
     let size = match render_state.style {
         ProgressStyle::Linear => {
             let metrics = theme.progress_metrics(ProgressIndicatorStyle::Linear);
-            let label_height =
-                f64::from(waterui_text::font::Font::default().resolve(env).snapshot().size)
-                    .max(metrics.label_height);
+            let label_height = f64::from(
+                waterui_text::font::Font::default()
+                    .resolve(env)
+                    .snapshot()
+                    .size,
+            )
+            .max(metrics.label_height);
             let value_label_height = if render_state.value.snapshot().is_finite() {
                 metrics.value_label_top_spacing + label_height
             } else {

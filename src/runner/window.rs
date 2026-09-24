@@ -1104,14 +1104,16 @@ where
                 should_close = true;
             }
             InputEvent::Moved { x, y } => {
-                let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 runtime.window.frame.set(waterui_core::layout::Rect::new(
                     waterui_core::layout::Point::new(x, y),
                     *frame.size(),
                 ));
             }
             InputEvent::Resize { width, height } => {
-                let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 let logical_width =
                     physical_to_logical_dimension(width, runtime.platform.scale_factor());
                 let logical_height =
