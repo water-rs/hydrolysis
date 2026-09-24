@@ -304,9 +304,12 @@ impl RenderNode {
                 renderer.pop_accessibility_owner();
                 let mut scene = vello::Scene::new();
                 // Scope `scene2d` so its `&mut scene` borrow ends before `&scene` is
-                // appended below.
+                // appended below. `CheckedScene2D` validates every image brush at
+                // this ingest boundary — malformed `ImageData` rejected here would
+                // otherwise only fail inside wgpu's `write_texture`.
                 let needs_next = {
                     let mut scene2d = VelloScene2D::new(&mut scene);
+                    let mut scene2d = crate::renderer::CheckedScene2D::new(&mut scene2d);
                     #[allow(clippy::cast_possible_truncation)]
                     node.content.borrow_mut().build_scene(
                         &mut scene2d,

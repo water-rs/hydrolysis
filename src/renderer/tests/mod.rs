@@ -12,6 +12,7 @@ mod gesture_surface;
 mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
+mod image_ingest;
 mod ime;
 mod layout_contract;
 mod lazy_cross;
