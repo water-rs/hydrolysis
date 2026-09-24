@@ -106,8 +106,9 @@ impl RenderNode {
     }
 
     /// Measure this node under a proposal (recursive). Text shaping runs through
-    /// the renderer's [`HydroState`] on the main thread.
-    pub(in crate::renderer) fn measure(
+    /// the renderer's [`HydroState`] on the main thread. Visible crate-wide so
+    /// the `Dynamic` dispatch measure can re-measure the retained child.
+    pub(crate) fn measure(
         &self,
         state: &mut HydroState,
         env: &Environment,
@@ -144,7 +145,17 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.measure(state, env, theme, proposal),
             RenderNode::Retain(node) => node.child.measure(state, env, theme, proposal),
             RenderNode::Env(node) => node.child.measure(state, &node.env, theme, proposal),
-            RenderNode::Dynamic(node) => node.child.borrow().measure(state, env, theme, proposal),
+            RenderNode::Dynamic(node) => {
+                let dimensions = node.child.borrow().measure(state, env, theme, proposal);
+                // The connected node's real per-proposal answers feed the
+                // dispatch measure of the same `Dynamic` (`measure_dynamic`).
+                state.measurement.store_dynamic_dimensions(
+                    node.source.identity(),
+                    proposal,
+                    dimensions.clone(),
+                );
+                dimensions
+            }
             // Scene content that is naturally a size (an SVG's viewBox, a
             // formula's typeset box) answers with it on whichever axis the
             // container left open; content that is not fills the proposal.
@@ -180,6 +191,28 @@ impl RenderNode {
             // scoped environment (effect colors/a11y read env every frame).
             RenderNode::Wrapper(node) => node.child.measure(state, &node.env, theme, proposal),
             RenderNode::Widget(node) => node.behavior.measure(state, proposal, &node.env, theme),
+        }
+    }
+
+    /// The innermost container under this node's layout-transparent wrappers —
+    /// the `Env` an `hstack`'s `with(Axis)` installs, retains, effects — for
+    /// tests that drive its `Layout` against recording children.
+    #[cfg(test)]
+    pub(in crate::renderer) fn transparent_container(&self) -> Option<&ContainerNode> {
+        let mut node = self;
+        loop {
+            match node {
+                RenderNode::Container(container) => return Some(&**container),
+                RenderNode::Env(inner) => node = &inner.child,
+                RenderNode::Wrapper(inner) => node = &inner.child,
+                RenderNode::Retain(inner) => node = &inner.child,
+                RenderNode::Opacity(inner) => node = &inner.child,
+                RenderNode::Scale(inner) => node = &inner.child,
+                RenderNode::Rotation(inner) => node = &inner.child,
+                RenderNode::Offset(inner) => node = &inner.child,
+                RenderNode::AppliedFilter(inner) => node = &inner.child,
+                _ => return None,
+            }
         }
     }
 

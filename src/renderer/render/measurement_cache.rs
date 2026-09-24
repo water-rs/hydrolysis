@@ -8,13 +8,19 @@
 //!   dispatched, so it is cleared at the start of every structural rebuild.
 //! - **Per-`Dynamic`-node dimensions** (intrinsic and proposal-dependent):
 //!   keyed by the node's stable identity. A connected `Dynamic` owns its
-//!   content inside the renderer, so layout passes that cannot re-measure the
-//!   content read these entries instead. They persist across rebuilds, are
-//!   refreshed whenever the node's content is (re-)dispatched, and are pruned
-//!   to the identities that are still alive when a rebuild finishes.
+//!   content inside the renderer's retained tree; the `dynamic_nodes`
+//!   registry reaches that retained child by identity so a dispatch measure
+//!   can re-measure it for the real proposal, and these entries cache the
+//!   answers that produces. They persist across rebuilds, are refreshed
+//!   whenever the node's content is (re-)dispatched or re-measured, and are
+//!   pruned to the identities that are still alive when a rebuild finishes.
 
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
+use std::rc::{Rc, Weak};
 use waterui_core::layout::{ProposalSize, ViewDimensions};
+
+use crate::renderer::tree::RenderNode;
 
 /// A layout proposal as a hashable cache-key component.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -44,6 +50,12 @@ pub(crate) struct MeasurementCaches {
     view_dimensions: FxHashMap<ViewMeasurementKey, ViewDimensions>,
     dynamic_intrinsic: FxHashMap<usize, ViewDimensions>,
     dynamic_proposal: FxHashMap<(usize, ProposalKey), ViewDimensions>,
+    /// Weak handles to the retained child of each connected `Dynamic`, keyed
+    /// by the node's identity. A connected `Dynamic`'s content lives in its
+    /// `DynamicHostNode`, so a dispatch measure of the `Dynamic` measures
+    /// this child for the real proposal instead of guessing from a cache
+    /// keyed by a different probe.
+    dynamic_nodes: FxHashMap<usize, Weak<RefCell<RenderNode>>>,
     /// Re-entrancy guard: `Dynamic` nodes currently being measured.
     dynamic_measurement_stack: Vec<(usize, ProposalSize)>,
     /// Depth of the transient-measurement scopes currently open; see
@@ -168,6 +180,23 @@ impl MeasurementCaches {
         }
     }
 
+    /// Register the retained child a `Dynamic` was just connected to. The
+    /// weak entry dies with the host node; a rebuild registers its new
+    /// child over the stale one.
+    pub(crate) fn register_dynamic_node(
+        &mut self,
+        identity: usize,
+        child: &Rc<RefCell<RenderNode>>,
+    ) {
+        self.dynamic_nodes.insert(identity, Rc::downgrade(child));
+    }
+
+    /// The retained child a connected `Dynamic` is measured through, or
+    /// `None` when the host node was dropped before the caches were pruned.
+    pub(crate) fn dynamic_node(&self, identity: usize) -> Option<Rc<RefCell<RenderNode>>> {
+        self.dynamic_nodes.get(&identity).and_then(Weak::upgrade)
+    }
+
     /// Marks a `Dynamic` node as being measured, crashing on re-entrant
     /// measurement of the same node (which would recurse forever).
     pub(crate) fn begin_dynamic_measurement(&mut self, identity: usize, proposal: ProposalSize) {
@@ -220,6 +249,8 @@ impl MeasurementCaches {
             .retain(|identity, _| is_alive(*identity));
         self.dynamic_proposal
             .retain(|(identity, _), _| is_alive(*identity));
+        self.dynamic_nodes
+            .retain(|identity, weak| is_alive(*identity) && weak.upgrade().is_some());
     }
 
     pub(crate) fn reset_counters(&mut self) {
