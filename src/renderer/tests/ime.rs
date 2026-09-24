@@ -21,6 +21,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
+use nami::Signal as _;
 use serde::Deserialize;
 use waterui::ViewExt as _;
 use waterui::component::text;
@@ -451,7 +452,7 @@ fn replay_against_text_field(loaded: &LoadedFixture, multiline: bool) {
         let _ = runtime.pump_at(false, now);
         observe_step(&mut replay, &mut runtime, step, index, false);
         assert_eq!(
-            value.get().to_string().as_str(),
+            value.snapshot().to_string().as_str(),
             replay.committed,
             "{name} ({receiver}) step {index}: committed text diverged from \
              the fixture's commits"
@@ -459,7 +460,7 @@ fn replay_against_text_field(loaded: &LoadedFixture, multiline: bool) {
     }
 
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         loaded.fixture.final_text,
         "{name} ({receiver}): final text"
     );
@@ -474,7 +475,7 @@ fn replay_against_text_field(loaded: &LoadedFixture, multiline: bool) {
     );
     if loaded.fixture.committing_key_swallowed {
         assert!(
-            !submitted.get(),
+            !submitted.snapshot(),
             "{name} ({receiver}): the confirming key must not activate the form"
         );
     }
@@ -516,7 +517,7 @@ fn replay_against_secure_field(loaded: &LoadedFixture) {
     }
 
     assert_eq!(
-        secret.get().expose(),
+        secret.snapshot().expose(),
         loaded.fixture.final_text,
         "{name} (SecureField): commits land as plain text edits"
     );
@@ -801,7 +802,7 @@ fn focus_move_or_window_unfocus_cancels_the_composition() {
         runtime.renderer().text_editing.ime_preedit.is_none(),
         "moving focus must cancel the composition, not commit it"
     );
-    assert!(first.get().to_string().is_empty());
+    assert!(first.snapshot().to_string().is_empty());
 
     // A window unfocus (Ime::Disabled) mid-composition cancels it too.
     runtime.push_input_event(InputEvent::ImePreedit {
@@ -818,7 +819,7 @@ fn focus_move_or_window_unfocus_cancels_the_composition() {
         runtime.renderer().text_editing.ime_preedit.is_none(),
         "window unfocus must cancel the composition"
     );
-    assert!(second.get().to_string().is_empty());
+    assert!(second.snapshot().to_string().is_empty());
 }
 
 /// A key press immediately followed by a commit is that keystroke delivered
@@ -850,7 +851,7 @@ fn a_key_co_delivered_with_its_commit_inserts_text_once() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         "a",
         "the commit carries the keystroke's text; its key press must not \
          insert a second copy"
@@ -915,11 +916,11 @@ fn enter_after_a_direct_commit_still_reaches_the_form() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        value.get().to_string().is_empty(),
+        value.snapshot().to_string().is_empty(),
         "editing ended on the field: the direct commit lands nowhere"
     );
     assert!(
-        submitted.get(),
+        submitted.snapshot(),
         "the Enter after a commit is ordinary input and must activate the \
          focused control — batch-level ownership would have swallowed it"
     );
@@ -1061,7 +1062,7 @@ fn keys_after_a_composition_commit_in_one_batch_are_ordinary_input() {
         now += Duration::from_millis(16);
         let _ = runtime.pump_at(false, now);
         assert_eq!(
-            value.get().to_string().as_str(),
+            value.snapshot().to_string().as_str(),
             "你x",
             "multiline={multiline}: the confirming Enter must stay inside \
              the composition — a leaked newline would read `你\nx` — while \
@@ -1151,7 +1152,7 @@ fn a_key_between_direct_commits_stays_ordinary_input() {
         now += Duration::from_millis(16);
         let _ = runtime.pump_at(false, now);
         assert_eq!(
-            value.get().to_string().as_str(),
+            value.snapshot().to_string().as_str(),
             "i",
             "multiline={multiline}: the Backspace is not the commit `i`'s \
              producer, so it is ordinary input and must erase `h`"
@@ -1217,11 +1218,11 @@ fn a_commit_claims_only_the_nearest_press() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        value.get().to_string().is_empty(),
+        value.snapshot().to_string().is_empty(),
         "editing ended on the field: the commit lands nowhere"
     );
     assert!(
-        submitted.get(),
+        submitted.snapshot(),
         "the Enter the commit cannot be answering is ordinary input and \
          must activate the focused control"
     );
@@ -1266,7 +1267,7 @@ fn a_tab_beside_ime_disabled_still_moves_focus() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        submitted.get(),
+        submitted.snapshot(),
         "the Tab beside ImeDisabled is ordinary input: keyboard focus \
          moved to the button, so Enter submits the form"
     );
@@ -1308,7 +1309,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
         runtime.focused_text_input_state().is_some(),
         "pressing the field must focus it"
     );
-    assert_eq!(focus.get(), Some(Field::Name));
+    assert_eq!(focus.snapshot(), Some(Field::Name));
 
     // Type "ab" and park the caret between the characters — the position
     // Shift-Tab back must restore.
@@ -1317,7 +1318,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
     });
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
-    assert_eq!(value.get().to_string().as_str(), "ab");
+    assert_eq!(value.snapshot().to_string().as_str(), "ab");
     // Caret moves measure against the retained text layout — pump first so it
     // reflects the committed text.
     for state in [KeyState::Pressed, KeyState::Released] {
@@ -1352,7 +1353,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
         "traversal onto the button must end text editing"
     );
     assert_eq!(
-        focus.get(),
+        focus.snapshot(),
         None,
         "the field's .focused(binding) must clear when the caret leaves"
     );
@@ -1367,7 +1368,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         "ab",
         "typing must not reach the field once editing ended"
     );
@@ -1390,7 +1391,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
         runtime.focused_text_input_state().is_some(),
         "Shift-Tab back onto the field must restore editing"
     );
-    assert_eq!(focus.get(), Some(Field::Name));
+    assert_eq!(focus.snapshot(), Some(Field::Name));
     for state in [KeyState::Pressed, KeyState::Released] {
         runtime.push_input_event(key_event(
             Key::Character("y".into()),
@@ -1402,7 +1403,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         "ayb",
         "typing must resume at the caret Shift-Tab restored"
     );
@@ -1431,7 +1432,7 @@ fn tabbing_away_ends_editing_and_shift_tab_restores_the_caret() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        submitted.get(),
+        submitted.snapshot(),
         "Space must activate the button keyboard focus moved to"
     );
 }
@@ -1471,7 +1472,7 @@ fn hiding_a_subtree_releases_the_focused_field_inside_it() {
         runtime.focused_text_input_state().is_some(),
         "pressing the field must focus it"
     );
-    assert_eq!(focus.get(), Some(Field::Name));
+    assert_eq!(focus.snapshot(), Some(Field::Name));
 
     // The subtree turns invisible while the field holds focus.
     shown.set(false);
@@ -1484,7 +1485,7 @@ fn hiding_a_subtree_releases_the_focused_field_inside_it() {
         "a field under an invisible subtree must not keep the caret"
     );
     assert_eq!(
-        focus.get(),
+        focus.snapshot(),
         None,
         "the field's .focused(binding) must clear when it goes invisible"
     );
@@ -1503,7 +1504,7 @@ fn hiding_a_subtree_releases_the_focused_field_inside_it() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         "",
         "typing must not reach the hidden field"
     );
@@ -1547,7 +1548,7 @@ fn tab_skips_hidden_focusables_and_resumes_from_the_released_slot() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(runtime.focused_text_input_state().is_some());
-    assert_eq!(focus.get(), Some(Field::Name));
+    assert_eq!(focus.snapshot(), Some(Field::Name));
 
     // Hide the field mid-focus: focus is released onto nothing.
     shown.set(false);
@@ -1556,7 +1557,7 @@ fn tab_skips_hidden_focusables_and_resumes_from_the_released_slot() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(runtime.focused_text_input_state().is_none());
-    assert_eq!(focus.get(), None);
+    assert_eq!(focus.snapshot(), None);
 
     // The next Tab skips the hidden field and lands on the focusable after
     // its slot — the nearest visible one in tree order, not the first.
@@ -1581,11 +1582,11 @@ fn tab_skips_hidden_focusables_and_resumes_from_the_released_slot() {
     now += Duration::from_millis(16);
     let _ = runtime.pump_at(false, now);
     assert!(
-        !first_pressed.get(),
+        !first_pressed.snapshot(),
         "Tab must not restart traversal from the first focusable"
     );
     assert!(
-        last_pressed.get(),
+        last_pressed.snapshot(),
         "Tab after the release must land on the nearest visible focusable \
          after the hidden slot"
     );

@@ -33,7 +33,7 @@ use vello::kurbo::{Affine, BezPath, Point, Rect};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
-use waterui::{Binding, Color, Computed, SignalExt as _, ViewExt as _};
+use waterui::{Binding, Color, Computed, Signal, SignalExt as _, ViewExt as _};
 use waterui_canvas::Canvas;
 use waterui_controls::button::{ButtonSize, ButtonStyle, button};
 use waterui_controls::label::{LabelDisplayMode, label};
@@ -196,7 +196,7 @@ impl<T: Clone + 'static> Signal for EmitsDuringSignalSubscription<T> {
     type Output = T;
     type Guard = ();
 
-    fn get(&self) -> Self::Output {
+    fn snapshot(&self) -> Self::Output {
         assert!(
             self.subscribed.get(),
             "animated signal must subscribe before reading its snapshot"
@@ -341,7 +341,7 @@ fn labeled_toggle_keeps_label_activation_out_of_switch_visual_interaction() {
             PointerButton::Primary,
             &env,
         );
-        assert_eq!(enabled.get(), expected);
+        assert_eq!(enabled.snapshot(), expected);
     }
 
     let switch_point = Point::new(
@@ -734,7 +734,7 @@ fn stacked_icon_buttons_above_gesture_surface_receive_clicks() {
         &env,
     ));
 
-    assert_eq!(zoom.get(), 0.5);
+    assert_eq!(zoom.snapshot(), 0.5);
     assert!(
         renderer.take_patch_request(),
         "a synchronous button action must schedule a retained-tree refresh"
@@ -1765,15 +1765,15 @@ fn interaction_focus_binding_tracks_keyboard_focus() {
     #[cfg(feature = "accessibility")]
     emit_focusable_node(&mut renderer, &key, bounds, &env, None);
 
-    assert!(!focused.get());
+    assert!(!focused.snapshot());
     assert!(renderer.handle_key_with_env(
         &KeyCode::Named("Tab".to_owned()),
         Modifiers::default(),
         &env,
     ));
-    assert!(focused.get());
+    assert!(focused.snapshot());
     assert!(renderer.set_keyboard_focus(None, false));
-    assert!(!focused.get());
+    assert!(!focused.snapshot());
 }
 
 #[test]

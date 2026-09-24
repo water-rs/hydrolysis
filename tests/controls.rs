@@ -7,6 +7,7 @@
 //! runtime.
 
 use waterui::Binding;
+use waterui::Signal as _;
 use waterui::View;
 use waterui::ViewExt as _;
 use waterui::component::{hstack, vstack};
@@ -68,7 +69,7 @@ fn disabled_toggle_ignores_input_and_reports_disabled(
         .label("Wi-Fi")
         .tap_at(0.5, 0.5);
     assert!(
-        !enabled.get(),
+        !enabled.snapshot(),
         "disabled-toggle: binding must stay unchanged"
     );
 }
@@ -106,7 +107,7 @@ fn disabled_scope_cascades_and_reenables_reactively(
         },
     );
     assert!(
-        !enabled.get(),
+        !enabled.snapshot(),
         "disabled-scope: binding must stay unchanged"
     );
 
@@ -121,7 +122,7 @@ fn disabled_scope_cascades_and_reenables_reactively(
     );
     app.query().role(Role::SWITCH).label("Notifications").tap();
     assert!(
-        enabled.get(),
+        enabled.snapshot(),
         "disabled-scope: tap after re-enable must flip the binding"
     );
 }
@@ -150,7 +151,7 @@ fn disabled_slider_ignores_value_actions(ui: UiBuilder<Styled<hydrolysis_m3::Mat
         .label("Volume")
         .drag_by(60.0, 0.0);
     assert_close(
-        value.get(),
+        value.snapshot(),
         0.5,
         0.0001,
         "disabled-slider: value must stay unchanged",
@@ -186,7 +187,7 @@ fn disabled_button_ignores_action(ui: UiBuilder<Styled<hydrolysis_m3::Material3>
         .role(Role::BUTTON)
         .label("Submit")
         .tap_at(0.5, 0.5);
-    assert_eq!(count.get(), 0, "disabled-button: action must not run");
+    assert_eq!(count.snapshot(), 0, "disabled-button: action must not run");
 }
 
 // water-rs/hydrolysis#115: an icon-only label resolves the button through

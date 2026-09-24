@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use waterui::component::list::{List, ListItem};
 use waterui::window::{Window, WindowState};
-use waterui::{Binding, ViewExt as _};
+use waterui::{Binding, Signal, ViewExt as _};
 use waterui_backend_core::widget::TextCaretMotion;
 use waterui_core::id::SelfId;
 use waterui_core::{AnyView, Environment, binding};
@@ -277,7 +277,10 @@ fn an_infinite_max_size_component_leaves_that_axis_unbounded() {
     });
     let _ = handle_input_events(&mut runtime, &env);
     let _ = pump_window_semantics(&mut runtime, &env);
-    assert_eq!(*runtime.window.frame.get().size(), Size::new(900.0, 700.0));
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(900.0, 700.0)
+    );
 
     max.set(Size::new(500.0, f32::INFINITY));
     let _ = pump_window_semantics(&mut runtime, &env);
@@ -287,7 +290,7 @@ fn an_infinite_max_size_component_leaves_that_axis_unbounded() {
         .expect("runner must apply size limits on the pump");
     assert_eq!(applied_max, Some(Size::new(500.0, f32::INFINITY)));
     assert_eq!(
-        *runtime.window.frame.get().size(),
+        *runtime.window.frame.snapshot().size(),
         Size::new(500.0, 700.0),
         "the bounded axis clamps while the +∞ axis keeps the user size"
     );
@@ -364,7 +367,10 @@ fn a_remeasure_preserves_the_user_size_inside_the_new_limits() {
     });
     let _ = handle_input_events(&mut runtime, &env);
     let _ = pump_window_semantics(&mut runtime, &env);
-    assert_eq!(*runtime.window.frame.get().size(), Size::new(900.0, 700.0));
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(900.0, 700.0)
+    );
 
     // The main screen re-measures: only the limits move.
     main.set(true);
@@ -376,7 +382,7 @@ fn a_remeasure_preserves_the_user_size_inside_the_new_limits() {
     assert_eq!(min, Some(Size::new(700.0, 500.0)));
     assert_eq!(max, None);
     assert_eq!(
-        *runtime.window.frame.get().size(),
+        *runtime.window.frame.snapshot().size(),
         Size::new(900.0, 700.0),
         "a re-measure must not override a user size inside the new limits"
     );
@@ -409,14 +415,17 @@ fn a_remeasure_clamps_the_window_size_into_the_new_limits() {
     });
     let _ = handle_input_events(&mut runtime, &env);
     let _ = pump_window_semantics(&mut runtime, &env);
-    assert_eq!(*runtime.window.frame.get().size(), Size::new(400.0, 300.0));
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(400.0, 300.0)
+    );
 
     // The new screen's minimum is larger than the user size: the window clamps
     // into the new limits — and only the size moves, not the layout semantics.
     main.set(true);
     let _ = pump_window_semantics(&mut runtime, &env);
     assert_eq!(
-        *runtime.window.frame.get().size(),
+        *runtime.window.frame.snapshot().size(),
         Size::new(700.0, 500.0),
         "a size outside the new limits clamps to the nearer bound"
     );
@@ -437,14 +446,14 @@ fn an_explicit_maximum_clamps_a_larger_window() {
     let mut runtime = runtime_window_sized(window, 800, 600);
     let _ = pump_window_semantics(&mut runtime, &Environment::new());
     assert_eq!(
-        *runtime.window.frame.get().size(),
+        *runtime.window.frame.snapshot().size(),
         Size::new(800.0, 600.0),
         "a pin the window already satisfies leaves its size alone"
     );
     pinned_max.set(Size::new(500.0, 400.0));
     let _ = pump_window_semantics(&mut runtime, &Environment::new());
     assert_eq!(
-        *runtime.window.frame.get().size(),
+        *runtime.window.frame.snapshot().size(),
         Size::new(500.0, 400.0),
         "tightening the app-pinned maximum clamps the window into it"
     );
@@ -564,8 +573,8 @@ fn rapid_resize_events_keep_the_retained_tree_at_the_latest_size() {
         "resize must retain the existing view tree"
     );
     assert_eq!(runtime.platform.surface().size(), (640, 480));
-    assert_eq!(runtime.window.frame.get().width(), 640.0);
-    assert_eq!(runtime.window.frame.get().height(), 480.0);
+    assert_eq!(runtime.window.frame.snapshot().width(), 640.0);
+    assert_eq!(runtime.window.frame.snapshot().height(), 480.0);
 }
 
 #[test]
