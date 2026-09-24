@@ -51,7 +51,7 @@ impl RenderNode {
                     styled,
                     alignment,
                     env,
-                    text.line_limit,
+                    text.line_limit.map_or(TailMark::None, TailMark::Ellipsis),
                 );
             }
             RenderNode::Container(container) => {
