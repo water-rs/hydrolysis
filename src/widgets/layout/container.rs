@@ -15,7 +15,7 @@ use waterui_layout::container::{FixedContainer, LazyContainer};
 /// Used for measurement of `AbsoluteLayout`/`ZStackLayout` collections, which
 /// (unlike scroll-virtualized stacks) lay out their whole membership.
 fn materialize_all(children: &AnyViews<AnyView>, env: &Environment) -> Vec<AnyView> {
-    let count = children.len().get();
+    let count = children.len().snapshot();
     let mut views = Vec::with_capacity(count);
     for index in 0..count {
         let view = children.get_view(index).unwrap_or_else(|| {
@@ -64,7 +64,7 @@ fn lazy_stack_sample_size(
     cross: Option<f32>,
 ) -> LayoutSize {
     let (layout, children) = view.as_inner().as_parts();
-    let child_count = children.len().get();
+    let child_count = children.len().snapshot();
     if child_count == 0 {
         return LayoutSize::zero();
     }
@@ -88,12 +88,12 @@ fn lazy_stack_sample_size(
         LazyStackAxisConfig::Vertical { spacing, .. } => {
             let width = f64::from(sample.width);
             let height = f64::from(sample.height) * count
-                + f64::from(spacing.get()) * (count - 1.0).max(0.0);
+                + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
             LayoutSize::new(width as f32, height as f32)
         }
         LazyStackAxisConfig::Horizontal { spacing, .. } => {
-            let width =
-                f64::from(sample.width) * count + f64::from(spacing.get()) * (count - 1.0).max(0.0);
+            let width = f64::from(sample.width) * count
+                + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
             let height = f64::from(sample.height);
             LayoutSize::new(width as f32, height as f32)
         }

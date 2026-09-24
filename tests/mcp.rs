@@ -16,7 +16,7 @@ use aither_mcp::transport::{DuplexTransport, Transport};
 use futures_lite::future::block_on;
 use waterui::component::{button, field, toggle, vstack};
 use waterui::text;
-use waterui::{Binding, Str};
+use waterui::{Binding, Signal as _, Str};
 use waterui_mcp::{ServerInfo, serve};
 use waterui_testing::{OffscreenApp, ui};
 
@@ -36,7 +36,7 @@ fn mount() -> OffscreenApp {
                 toggle("Enable", &enabled),
                 field("Name", &name),
                 button("Increment").action(move || {
-                    let next = count.get() + 1;
+                    let next = count.snapshot() + 1;
                     count.set(next);
                     label_for_action.set(format!("count: {next}"));
                 }),

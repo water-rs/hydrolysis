@@ -7,6 +7,7 @@
 
 use hydrolysis_m3::Material3;
 use waterui::Binding;
+use waterui::Signal as _;
 use waterui::ViewExt as _;
 use waterui::component::{text, vstack};
 use waterui_backend_core::widget::ModalInteraction;
@@ -33,7 +34,7 @@ fn modal_escape_dismisses_on_semantic_mount() {
     app.press_named_key("Escape");
     app.settle();
     assert!(
-        closed.get(),
+        closed.snapshot(),
         "Escape did not reach the modal's dismiss action"
     );
 }
@@ -50,7 +51,7 @@ fn modal_escape_dismisses_on_offscreen_mount() {
     app.press_named_key("Escape");
     app.settle();
     assert!(
-        closed.get(),
+        closed.snapshot(),
         "Escape did not reach the modal's dismiss action"
     );
 }
@@ -70,7 +71,7 @@ fn tap_only_modal_escape_dismisses_on_semantic_mount() {
     app.press_named_key("Escape");
     app.settle();
     assert!(
-        closed.get(),
+        closed.snapshot(),
         "Escape did not reach the modal's dismiss action"
     );
 }
@@ -93,7 +94,7 @@ fn tap_only_modal_escape_dismisses_on_offscreen_mount() {
     app.press_named_key("Escape");
     app.settle();
     assert!(
-        closed.get(),
+        closed.snapshot(),
         "Escape did not reach the modal's dismiss action"
     );
 }

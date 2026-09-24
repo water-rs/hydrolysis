@@ -57,7 +57,7 @@ fn try_resolve_node_text_leaf(
 ) -> Option<(ResolvedTextLayoutInput, Option<usize>)> {
     match node {
         RenderNode::Text(text) => Some((
-            resolve_text_layout_input(&text.content.get(), text.alignment.get(), env),
+            resolve_text_layout_input(&text.content.snapshot(), text.alignment.snapshot(), env),
             text.line_limit,
         )),
         RenderNode::Opacity(node) => try_resolve_node_text_leaf(&node.child, env),

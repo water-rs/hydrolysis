@@ -772,7 +772,7 @@ impl HydrolysisRenderer {
                 if let Some(menu_target) =
                     self.topmost_context_menu_target_enclosing(point, surface_bounds)
                 {
-                    let mut items = popup_menu_nodes(&menu_target.items.get());
+                    let mut items = popup_menu_nodes(&menu_target.items.snapshot());
                     self.append_inspect_element_item(&mut items, point);
                     if !items.is_empty() {
                         // The menu opens in the declaring view's environment
@@ -869,7 +869,7 @@ impl HydrolysisRenderer {
                 let menu_target = self.topmost_context_menu_target_at_point(point);
                 let mut items = menu_target
                     .as_ref()
-                    .map(|target| popup_menu_nodes(&target.items.get()))
+                    .map(|target| popup_menu_nodes(&target.items.snapshot()))
                     .unwrap_or_default();
                 self.append_inspect_element_item(&mut items, point);
                 if !items.is_empty() {
@@ -2303,7 +2303,7 @@ impl SemanticCore {
                 move |renderer: &mut SemanticCore,
                       point: vello::kurbo::Point,
                       env: &Environment| {
-                    renderer.begin_or_update_drag(data.get(), point, env)
+                    renderer.begin_or_update_drag(data.snapshot(), point, env)
                 },
             )),
             self.render_depth,

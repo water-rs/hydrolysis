@@ -122,8 +122,8 @@ impl RenderNode {
             )),
             RenderNode::Text(text) => HydrolysisRenderer::measure_text_dimensions(
                 state,
-                text.content.get(),
-                text.alignment.get(),
+                text.content.snapshot(),
+                text.alignment.snapshot(),
                 env,
                 proposal.width,
                 text.line_limit,

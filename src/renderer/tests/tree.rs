@@ -4,6 +4,7 @@ use super::{MinimalTestTheme, test_environment, test_renderer};
 use crate::renderer::{ContainerNode, RenderContext, RenderNode, TextNode};
 use core::cell::Cell;
 use nami::Computed;
+use nami::Signal as _;
 use std::rc::Rc;
 use vello::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
@@ -1119,7 +1120,7 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     renderer.prepare_window_tree(view, &env);
 
     assert_eq!(
-        opacity.get(),
+        opacity.snapshot(),
         0.0,
         "the entrance target must remain hidden until the child first flushes"
     );
@@ -1140,7 +1141,7 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     renderer.finish_rebuild_frame();
 
     assert_eq!(
-        opacity.get(),
+        opacity.snapshot(),
         1.0,
         "on_appear must update the entrance target after the initial sample"
     );
@@ -1589,8 +1590,8 @@ impl nami::Signal for MidFlushWrite {
     type Output = waterui_core::Str;
     type Guard = ();
 
-    fn get(&self) -> Self::Output {
-        // Fire the write once per arming: a `get()` that re-set `label` on
+    fn snapshot(&self) -> Self::Output {
+        // Fire the write once per arming: a `snapshot()` that re-set `label` on
         // every read would keep rewriting `pending` every frame — the mount
         // would never land while the churn continued.
         let armed = self.armed.replace(0);

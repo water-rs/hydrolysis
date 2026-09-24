@@ -872,7 +872,7 @@ pub(crate) fn render_radio_picker(
             .register_interactive_pointer_target(hit_rect, press_slot, {
                 let selection = selection.clone();
                 move |_renderer, _point, _env| {
-                    if selection.get() == tag {
+                    if selection.snapshot() == tag {
                         return false;
                     }
                     selection.set(tag);
@@ -959,7 +959,7 @@ pub(crate) fn render_segmented_picker(
             .register_interactive_pointer_target(hit_rect, press_slot, {
                 let selection = selection.clone();
                 move |_renderer, _point, _env| {
-                    if selection.get() == tag {
+                    if selection.snapshot() == tag {
                         return false;
                     }
                     selection.set(tag);

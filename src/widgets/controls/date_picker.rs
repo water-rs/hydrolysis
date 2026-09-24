@@ -8,6 +8,7 @@ use crate::renderer::{
 use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
+use nami::Signal;
 use std::cell::RefCell;
 use std::rc::Rc;
 use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size as LayoutSize, ViewDimensions};
@@ -146,7 +147,7 @@ pub(crate) fn measure_date_picker_node(
     };
     let current = config
         .value
-        .get()
+        .snapshot()
         .clamp(*config.range.start(), *config.range.end());
     let candidates = [
         config.ty.format_value(*config.range.start()),

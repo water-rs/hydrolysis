@@ -1,3 +1,4 @@
+use nami::Signal;
 use waterui_core::Environment;
 use waterui_locale::{TranslationCatalog, locale_binding};
 
@@ -41,7 +42,7 @@ pub(crate) fn text(env: &Environment, key: &str) -> String {
     let localizations = env
         .get::<HydrolysisLocalizations>()
         .expect("Hydrolysis runner must install its built-in localizations");
-    let locale = locale_binding(env).get();
+    let locale = locale_binding(env).snapshot();
     localizations
         .0
         .lookup_text(&locale, key)
