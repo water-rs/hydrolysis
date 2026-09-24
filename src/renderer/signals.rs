@@ -35,7 +35,7 @@ impl<T: 'static, G> SubscribedSnapshot<T, G> {
                 }
             }
         });
-        let snapshot = signal.get();
+        let snapshot = signal.snapshot();
         (Self { guard, state }, snapshot)
     }
 
@@ -91,7 +91,7 @@ impl SemanticCore {
         S: Signal + Clone + 'static,
     {
         self.watch_signal(signal);
-        signal.get()
+        signal.snapshot()
     }
 
     pub(crate) fn read_resolved_text_styled(

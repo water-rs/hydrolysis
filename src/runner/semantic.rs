@@ -347,10 +347,10 @@ impl SemanticRuntime {
         if self
             .popup_windows
             .iter()
-            .any(|popup| popup.window.state.get() == waterui::window::WindowState::Closed)
+            .any(|popup| popup.window.state.snapshot() == waterui::window::WindowState::Closed)
         {
             self.popup_windows
-                .retain(|popup| popup.window.state.get() != waterui::window::WindowState::Closed);
+                .retain(|popup| popup.window.state.snapshot() != waterui::window::WindowState::Closed);
             self.window.refresh_requested = true;
         }
         let rebuilt = pump_semantic_window(&mut self.window, &self.env);
@@ -411,8 +411,8 @@ impl SemanticRuntime {
 /// the same environment in both runtimes.
 fn semantic_window_origin(window: &SemanticWindow) -> HydrolysisWindowOrigin {
     HydrolysisWindowOrigin {
-        x: window.window.frame.get().x(),
-        y: window.window.frame.get().y(),
+        x: window.window.frame.snapshot().x(),
+        y: window.window.frame.snapshot().y(),
     }
 }
 
@@ -420,7 +420,7 @@ fn semantic_window_origin(window: &SemanticWindow) -> HydrolysisWindowOrigin {
 /// to the focused node through the core's key/text paths; geometry-routed
 /// events have no semantic target and are dropped.
 fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) -> bool {
-    let mut should_close = window.window.state.get() == waterui::window::WindowState::Closed;
+    let mut should_close = window.window.state.snapshot() == waterui::window::WindowState::Closed;
     let events: Vec<InputEvent> = window.pending_events.drain(..).collect();
     // Same ordered IME keystroke ownership as the rendered runner
     // (`ime::ime_owned_events` tracks the composition through the batch).
@@ -436,7 +436,7 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
                 true
             }
             InputEvent::Moved { x, y } => {
-                let frame = window.window.frame.get();
+                let frame = window.window.frame.snapshot();
                 window.window.frame.set(waterui_core::layout::Rect::new(
                     waterui_core::layout::Point::new(x, y),
                     *frame.size(),
@@ -444,7 +444,7 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
                 false
             }
             InputEvent::Resize { width, height } => {
-                let frame = window.window.frame.get();
+                let frame = window.window.frame.snapshot();
                 window.window.frame.set(waterui_core::layout::Rect::new(
                     frame.origin(),
                     waterui_core::layout::Size::new(width as f32, height as f32),
@@ -540,7 +540,7 @@ fn pump_semantic_window(window: &mut SemanticWindow, env: &Environment) -> bool 
     #[cfg(feature = "accessibility")]
     window
         .core
-        .set_accessibility_root_label(window.window.title.get().as_str());
+        .set_accessibility_root_label(window.window.title.snapshot().as_str());
 
     if window.core.take_rebuild_request() {
         window.refresh_requested = true;

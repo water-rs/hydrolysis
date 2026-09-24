@@ -757,7 +757,7 @@ impl RenderNode {
         let accessibility_container_env = item_env.as_ref().map(|_| env.clone());
         #[cfg(feature = "accessibility")]
         let env = item_env.as_ref().unwrap_or(env);
-        let len = views.len().get();
+        let len = views.len().snapshot();
         // The initial membership renders at rest — only items added or removed
         // by a *later* change animate (`reconcile` marks phases).
         let entries = (0..len)

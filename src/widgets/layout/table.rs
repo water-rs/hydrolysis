@@ -117,7 +117,7 @@ fn measure_table_intrinsic(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let columns = table.columns.get();
+    let columns = table.columns.snapshot();
     if columns.is_empty() {
         return LayoutSize::zero();
     }
@@ -155,7 +155,7 @@ pub(crate) fn table_accessibility(
             // the full table.
             slot.max_rows = columns
                 .iter()
-                .map(|column| column.rows().len().get())
+                .map(|column| column.rows().len().snapshot())
                 .max()
                 .unwrap_or(0);
         }

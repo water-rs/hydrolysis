@@ -290,7 +290,7 @@ fn toggle_binding_action(
         // interaction-only key. Restore semantic keyboard focus to the switch
         // itself when the label activates it.
         renderer.set_keyboard_focus(Some(visual_interaction_key.clone()), false);
-        binding.set(!binding.get());
+        binding.toggle();
         true
     }
 }

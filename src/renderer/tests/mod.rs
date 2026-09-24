@@ -539,7 +539,7 @@ fn state_wrapped_button_remains_non_stretch_for_layout() {
         AnyView::new(
             button("Toggle Bars")
                 .action(|waterui::State(value): waterui::State<Binding<bool>>| {
-                    value.set(!value.get());
+                    value.toggle();
                 })
                 .state(&expanded),
         ),
@@ -572,7 +572,7 @@ fn vstack_places_state_wrapped_button_at_intrinsic_width() {
         )),
         button("Toggle Bars")
             .action(|waterui::State(value): waterui::State<Binding<bool>>| {
-                value.set(!value.get());
+                value.toggle();
             })
             .state(&expanded),
     ));

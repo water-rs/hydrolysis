@@ -88,7 +88,7 @@ pub(crate) fn color_picker_accessibility(
             .semantic_text()
             .resolve(env)
             .content
-            .get()
+            .snapshot()
             .to_plain()
             .to_string();
         let value = format!("{:?}", renderer.read_signal(&color_picker.value));
@@ -316,7 +316,7 @@ pub(crate) fn render_color_picker_parts(
     // retained-refresh watcher), so a value change schedules a frame and this
     // persistent node re-renders the new swatch color.
     let color = ctx.renderer_mut().read_signal(&value_binding);
-    let swatch_color = resolved_color_to_peniko(color.resolve(env).get());
+    let swatch_color = resolved_color_to_peniko(color.resolve(env).snapshot());
     {
         let mut draw = ctx.draw_context();
         draw.fill_rounded_rect(
@@ -328,7 +328,7 @@ pub(crate) fn render_color_picker_parts(
             swatch_rect,
             RoundedRectRadii::from_single_radius(COLOR_SWATCH_RADIUS),
             &Brush::from(resolved_color_to_peniko(
-                Color::srgb(0, 0, 0).with_opacity(0.16).resolve(env).get(),
+                Color::srgb(0, 0, 0).with_opacity(0.16).resolve(env).snapshot(),
             )),
             1.0,
         );

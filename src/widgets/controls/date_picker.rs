@@ -1,4 +1,5 @@
 #[cfg(feature = "accessibility")]
+use nami::Signal;
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
     HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, WidgetRenderContext,
@@ -146,7 +147,7 @@ pub(crate) fn measure_date_picker_node(
     };
     let current = config
         .value
-        .get()
+        .snapshot()
         .clamp(*config.range.start(), *config.range.end());
     let candidates = [
         config.ty.format_value(*config.range.start()),

@@ -115,11 +115,11 @@ pub(super) fn collection_transition_runtime(
     .map(|config| match config {
         LazyStackAxisConfig::Vertical { spacing, .. } => TransitionAxis {
             vertical: true,
-            spacing: f64::from(spacing.get()),
+            spacing: f64::from(spacing.snapshot()),
         },
         LazyStackAxisConfig::Horizontal { spacing, .. } => TransitionAxis {
             vertical: false,
-            spacing: f64::from(spacing.get()),
+            spacing: f64::from(spacing.snapshot()),
         },
     });
     Some(CollectionTransitionRuntime {
@@ -506,7 +506,7 @@ impl CollectionNode {
     /// [`RenderNode::build_collection`]; only later changes reach here).
     pub(super) fn reconcile(&mut self, renderer: &mut SemanticCore) {
         let env = self.env.clone();
-        let len = self.views.len().get();
+        let len = self.views.len().snapshot();
         let now = renderer.frame_instant;
         let animated = self.transition.is_some();
 
@@ -644,7 +644,7 @@ impl LazyStackNode {
     fn spacing(&self) -> f64 {
         match &self.axis {
             LazyStackAxisConfig::Vertical { spacing, .. }
-            | LazyStackAxisConfig::Horizontal { spacing, .. } => f64::from(spacing.get()),
+            | LazyStackAxisConfig::Horizontal { spacing, .. } => f64::from(spacing.snapshot()),
         }
     }
 
@@ -716,7 +716,7 @@ impl LazyStackNode {
         self.estimate.set(extent.max(1.0));
         self.estimate_sample.set(Some((cross, size)));
         self.dirty.set(true);
-        self.prepare_extent_index(self.views.len().get());
+        self.prepare_extent_index(self.views.len().snapshot());
         self.extent_index.borrow_mut().set_measured(0, extent);
         size
     }
@@ -769,7 +769,7 @@ impl LazyStackNode {
         theme: &Rc<dyn crate::engine::WidgetTheme>,
         proposal: ProposalSize,
     ) -> ViewDimensions {
-        let count = self.views.len().get();
+        let count = self.views.len().snapshot();
         if count == 0 {
             return ViewDimensions::new(Size::zero());
         }
@@ -796,7 +796,7 @@ impl LazyStackNode {
         ctx: RenderContext,
         _env: &Environment,
     ) {
-        let count = self.views.len().get();
+        let count = self.views.len().snapshot();
         if count == 0 {
             return;
         }
@@ -832,7 +832,7 @@ impl LazyStackNode {
                 (visible.y0 - ctx.bounds.y0, visible.y1 - ctx.bounds.y0)
             }
             LazyStackAxisConfig::Horizontal { .. }
-                if self.axis.direction().get().is_right_to_left() =>
+                if self.axis.direction().snapshot().is_right_to_left() =>
             {
                 (
                     ctx.bounds.x0 + ctx.bounds.x1 - visible.x1,
@@ -916,7 +916,7 @@ impl LazyStackNode {
     /// the visible window.
     #[cfg(feature = "accessibility")]
     pub(super) fn emit_accessibility(&self, renderer: &mut SemanticCore) {
-        let count = self.views.len().get();
+        let count = self.views.len().snapshot();
         if count == 0 {
             return;
         }

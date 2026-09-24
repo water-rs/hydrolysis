@@ -374,11 +374,11 @@ pub(crate) fn resolve_text_layout_input(
         spans.push((start..end, resolve_text_style(style, env)));
     }
 
-    let default_font = font_spec(&waterui_text::font::Font::default().resolve(env).get());
+    let default_font = font_spec(&waterui_text::font::Font::default().resolve(env).snapshot());
     let default_brush = default_text_brush(env);
     let locale = text_layout_locale(env);
     let right_to_left = waterui_core::layout::layout_direction(env)
-        .get()
+        .snapshot()
         .is_right_to_left();
     let alignment_id = alignment.stable_id();
     let identity = Arc::new(TextLayoutIdentity::new(
@@ -432,11 +432,11 @@ fn font_spec(font: &waterui_text::font::ResolvedFont) -> ResolvedFontSpec {
 
 fn resolve_text_style(style: &TextStyle, env: &Environment) -> ResolvedTextStyleSpec {
     ResolvedTextStyleSpec {
-        font: font_spec(&style.font.resolve(env).get()),
+        font: font_spec(&style.font.resolve(env).snapshot()),
         foreground: style
             .foreground
             .clone()
-            .map(|color| resolved_color_to_rgba8(color.resolve(env).get())),
+            .map(|color| resolved_color_to_rgba8(color.resolve(env).snapshot())),
         italic: style.italic,
         underline: style.underline,
         strikethrough: style.strikethrough,
@@ -445,8 +445,8 @@ fn resolve_text_style(style: &TextStyle, env: &Environment) -> ResolvedTextStyle
 
 fn default_text_brush(env: &Environment) -> [u8; 4] {
     let color = theme::installed_color_signal::<theme::color::Foreground>(env).map_or_else(
-        || Color::srgb(0, 0, 0).resolve(env).get(),
-        |signal| signal.get(),
+        || Color::srgb(0, 0, 0).resolve(env).snapshot(),
+        |signal| signal.snapshot(),
     );
     resolved_color_to_rgba8(color)
 }
@@ -558,7 +558,7 @@ fn font_family(family: Option<&str>) -> parley::FontFamily<'static> {
 }
 
 fn text_layout_locale(env: &Environment) -> String {
-    waterui_locale::locale_binding(env).get().canonical_tag()
+    waterui_locale::locale_binding(env).snapshot().canonical_tag()
 }
 
 /// The marker a truncated line's tail is cut for.
