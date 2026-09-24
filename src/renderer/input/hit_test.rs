@@ -1121,11 +1121,15 @@ impl HydrolysisRenderer {
     ) -> bool {
         let point = vello::kurbo::Point::new(f64::from(x), f64::from(y));
         self.hit_test.pointer_position = Some(point);
+        let at = self.frame_instant();
+        // Same first look the press path gives: an active recognizer
+        // receives the move before any embedded surface can claim it, so a
+        // gesture in flight is not starved by whatever sits under the pointer.
+        let gesture_changed = self.gesture_engine.handle_pointer_move(point, at, env);
         if self.handle_embedded_pointer_move(point) {
             return true;
         }
-        let at = self.frame_instant();
-        let mut refresh_requested = false;
+        let mut refresh_requested = gesture_changed;
         let mut drag_changed = false;
         if let Some(index) = self.text_editing.selection_drag_index() {
             let text_drag_changed = self.update_text_selection_drag(index, point);
@@ -1140,8 +1144,6 @@ impl HydrolysisRenderer {
             drag_changed |= pointer_drag_changed;
             refresh_requested |= pointer_drag_changed;
         }
-        let gesture_changed = self.gesture_engine.handle_pointer_move(point, at, env);
-        refresh_requested |= gesture_changed;
         let hover = if pointer_kind == PointerKind::Mouse {
             self.hit_test.sync_hover_targets(point, env, true, at)
         } else {
