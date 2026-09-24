@@ -116,8 +116,22 @@ pub(crate) fn measure_transient_view_intrinsic(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
+    measure_transient_view_with_proposal(view, ProposalSize::UNSPECIFIED, state, env, theme)
+}
+
+/// Measures a view this measurement materialized rather than one the retained
+/// tree owns, under `proposal`. Same contract as
+/// [`measure_transient_view_intrinsic`]; the proposal is the rect the layout
+/// hands the content, so bounded axes answer the proposal.
+pub(crate) fn measure_transient_view_with_proposal(
+    view: &AnyView,
+    proposal: ProposalSize,
+    state: &mut HydroState,
+    env: &Environment,
+    theme: &Rc<dyn WidgetTheme>,
+) -> LayoutSize {
     state.measurement.begin_transient_measurement();
-    let size = measure_view_intrinsic(view, state, env, theme);
+    let size = measure_view_dimensions_with_proposal(view, proposal, state, env, theme).size;
     state.measurement.end_transient_measurement();
     size
 }
@@ -639,30 +653,28 @@ pub(crate) fn measure_navigation_view_intrinsic(
     LayoutSize::new(width as f32, height as f32)
 }
 
-pub(crate) fn measure_owned_navigation_view_intrinsic(
+/// Measures an owned `NavigationView` materialized for the probe — e.g. a
+/// split's detail column resolved from its selection — under `proposal`, the
+/// rect the container hands the column. The whole view dies with the call, so
+/// it is normalized and measured as transient: none of its parts may leave an
+/// entry under an address the next build is handed.
+pub(crate) fn measure_owned_navigation_view_with_proposal(
     navigation: NavigationView,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
-    let mut navigation = navigation;
-    navigation.bar.title = normalize_layout_view(navigation.bar.title, env);
-    navigation.bar.subtitle = normalize_layout_view(navigation.bar.subtitle, env);
-    for item in &mut navigation.bar.toolbar.items {
-        item.content = normalize_layout_view(core::mem::take(&mut item.content), env);
-    }
-    navigation.content = normalize_layout_view(navigation.content, env);
-    // The whole `NavigationView` was built here, so its bar, toolbar and
-    // content die with this call: measure it as transient so none of them
-    // leave an entry under an address the next build is handed.
-    state.measurement.begin_transient_measurement();
-    let size = measure_navigation_view_intrinsic(&navigation, state, env, theme);
-    state.measurement.end_transient_measurement();
-    size
+    let navigation = normalize_layout_view(AnyView::new(navigation), env);
+    measure_transient_view_with_proposal(&navigation, proposal, state, env, theme)
 }
 
-pub(crate) fn measure_tabs_intrinsic(
+/// Measures a `TabsLayout` under `proposal`: each tab's content answers the
+/// proposal its rendered content rect hands it — the pane minus the tab bar —
+/// and the layout echoes bounded axes. `intrinsic` is the `UNSPECIFIED` call.
+pub(crate) fn measure_tabs_layout(
     tabs: &TabsLayout,
+    proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
@@ -672,17 +684,19 @@ pub(crate) fn measure_tabs_intrinsic(
         "hydrolysis Tabs requires at least one tab"
     );
 
+    let metrics = theme.tabs_metrics();
+    let content_proposal = tabs_content_proposal(proposal, tabs.style, metrics.bar_height);
     let mut max_content_width: f64 = 0.0;
     let mut max_content_height: f64 = 0.0;
     let mut bar_width = 0.0;
-    let metrics = theme.tabs_metrics();
     for tab in &tabs.tabs {
         let label_size = measure_view_intrinsic(&tab.label, state, env, theme);
         bar_width += (f64::from(label_size.width) + metrics.button_horizontal_inset * 2.0)
             .max(metrics.button_min_width);
 
         let content = normalize_layout_view(AnyView::new(tab.content.build()), env);
-        let content_size = measure_transient_view_intrinsic(&content, state, env, theme);
+        let content_size =
+            measure_transient_view_with_proposal(&content, content_proposal, state, env, theme);
         max_content_width = max_content_width.max(f64::from(content_size.width));
         max_content_height = max_content_height.max(f64::from(content_size.height));
     }
@@ -697,7 +711,35 @@ pub(crate) fn measure_tabs_intrinsic(
             max_content_height.max(metrics.button_min_width * tabs.tabs.len() as f64),
         ),
     };
-    LayoutSize::new(width as f32, height as f32)
+    LayoutSize::new(
+        proposal.width.unwrap_or(width as f32),
+        proposal.height.unwrap_or(height as f32),
+    )
+}
+
+/// The proposal the rendered content rect hands a tab's content: the pane
+/// minus the tab bar — a bottom strip for `Automatic`/`TabBar`, a leading
+/// strip for `Sidebar` (see [`tabs_bar_and_content_rect`]). Bounded axes echo
+/// the offer; an axis the container left open stays open.
+pub(crate) fn tabs_content_proposal(
+    proposal: ProposalSize,
+    style: NativeTabStyle,
+    bar_extent: f64,
+) -> ProposalSize {
+    match style {
+        NativeTabStyle::Automatic | NativeTabStyle::TabBar => ProposalSize::new(
+            proposal.width,
+            proposal
+                .height
+                .map(|height| (f64::from(height) - bar_extent).max(0.0) as f32),
+        ),
+        NativeTabStyle::Sidebar => ProposalSize::new(
+            proposal
+                .width
+                .map(|width| (f64::from(width) - bar_extent).max(0.0) as f32),
+            proposal.height,
+        ),
+    }
 }
 
 pub(crate) fn tabs_bar_and_content_rect(
