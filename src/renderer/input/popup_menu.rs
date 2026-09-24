@@ -1,3 +1,4 @@
+use nami::Signal;
 use super::*;
 use core::ops::RangeInclusive;
 use core::time::Duration;
@@ -48,7 +49,7 @@ impl PopupWindowManager {
 /// value the input dispatcher installs for a root window, so a nested popup
 /// opened from this window anchors to it.
 pub(crate) fn window_in_opening_environment(mut window: Window, env: &Environment) -> Window {
-    let frame = window.frame.get();
+    let frame = window.frame.snapshot();
     let content_env = env.extending(HydrolysisWindowOrigin {
         x: frame.x(),
         y: frame.y(),
@@ -415,7 +416,7 @@ pub(crate) fn semantic_picker_menu_window(
                 button(label)
                     .style(ButtonStyle::Borderless)
                     .action(move || {
-                        if row_selection.get() != target {
+                        if row_selection.snapshot() != target {
                             row_selection.set(target);
                         }
                         row_open.set(false);
@@ -471,7 +472,7 @@ pub(crate) fn picker_menu_window(
                 let row_open = Rc::clone(&open);
                 let row = Frame::new(button(label).style(ButtonStyle::Borderless).action(
                     move || {
-                        if row_selection.get() != target {
+                        if row_selection.snapshot() != target {
                             row_selection.set(target);
                         }
                         row_open.set(false);
@@ -600,7 +601,7 @@ fn color_picker_window_base(
                     button(crate::localization::text(&popup_env, "opacity_50"))
                         .style(ButtonStyle::Borderless)
                         .action(move || {
-                            let current = selected.get();
+                            let current = selected.snapshot();
                             selected.set(current.with_opacity(0.5));
                             group.close_all();
                         }),
@@ -618,7 +619,7 @@ fn color_picker_window_base(
                     button(crate::localization::text(&popup_env, "hdr_headroom"))
                         .style(ButtonStyle::Borderless)
                         .action(move || {
-                            let current = selected.get();
+                            let current = selected.snapshot();
                             selected.set(current.with_headroom(1.0));
                             group.close_all();
                         }),
@@ -682,7 +683,7 @@ fn apply_staged_date_time(
     let hour = i8::try_from(hour).expect("date picker staged hour must fit i8");
     let minute = i8::try_from(minute).expect("date picker staged minute must fit i8");
     let second = i8::try_from(second).expect("date picker staged second must fit i8");
-    let current = value.get();
+    let current = value.snapshot();
     let time = current.time();
     let next = date
         .at(hour, minute, second, time.subsec_nanosecond())
@@ -724,7 +725,7 @@ fn date_picker_window_base(
     env: &Environment,
 ) -> (Window, Binding<WindowState>) {
     let state = Binding::container(WindowState::Normal);
-    let current = value.get().clamp(*range.start(), *range.end());
+    let current = value.snapshot().clamp(*range.start(), *range.end());
     let staged_date = Binding::container(current.date());
     let staged_visible_month = Binding::container(current.date());
     let current_time = current.time();
@@ -809,10 +810,10 @@ fn date_picker_window_base(
                         apply_staged_date_time(
                             &apply_value,
                             &apply_range,
-                            apply_date.get(),
-                            apply_hour.get(),
-                            apply_minute.get(),
-                            if uses_second { apply_second.get() } else { 0 },
+                            apply_date.snapshot(),
+                            apply_hour.snapshot(),
+                            apply_minute.snapshot(),
+                            if uses_second { apply_second.snapshot() } else { 0 },
                         );
                         apply_group.close_all();
                     }),

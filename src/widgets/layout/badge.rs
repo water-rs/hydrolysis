@@ -167,7 +167,7 @@ pub(crate) fn render_badge_parts(
     };
 
     let x0 = if waterui_core::layout::layout_direction(env)
-        .get()
+        .snapshot()
         .is_right_to_left()
     {
         ctx.bounds.x0 + offset_x - badge_width

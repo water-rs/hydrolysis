@@ -368,7 +368,7 @@ impl AccessibilityBuilder {
         // selected binding — is resolved fresh on every emission.
         let Some(state) = env
             .get::<AccessibilityStateSignal>()
-            .map(|signal| signal.state().get())
+            .map(|signal| signal.state().snapshot())
         else {
             return;
         };
@@ -426,7 +426,7 @@ impl AccessibilityBuilder {
         self.apply_state(env, &mut node);
         node.set_text_direction(
             if waterui_core::layout::layout_direction(env)
-                .get()
+                .snapshot()
                 .is_right_to_left()
             {
                 AccessibilityTextDirection::RightToLeft
@@ -827,7 +827,7 @@ impl SemanticCore {
             },
             AccessibilityActionTarget::Toggle { binding } => match action {
                 AccessibilityAction::Click => {
-                    let next = !binding.get();
+                    let next = !binding.snapshot();
                     binding.set(next);
                     true
                 }
@@ -1205,7 +1205,7 @@ impl SemanticCore {
         }
         let state_hidden = env
             .get::<AccessibilityStateSignal>()
-            .is_some_and(|signal| signal.state().get().is_hidden());
+            .is_some_and(|signal| signal.state().snapshot().is_hidden());
         let excludes_descendants = env
             .get::<AccessibilityChildren>()
             .is_some_and(AccessibilityChildren::excludes_descendants);
@@ -1485,7 +1485,7 @@ impl SemanticCore {
             .clone()
             .resolve(env)
             .accessibility_label()
-            .get()
+            .snapshot()
             .to_semantic();
         let trimmed = plain.as_str().trim();
         if trimmed.is_empty() {
@@ -1786,7 +1786,7 @@ fn handle_accessibility_slider_action(
         step > 0.0,
         "hydrolysis accessibility slider requires positive step"
     );
-    let previous = value.get().clamp(start, end);
+    let previous = value.snapshot().clamp(start, end);
     let next = match action {
         AccessibilityAction::Increment => (previous + step).min(end),
         AccessibilityAction::Decrement => (previous - step).max(start),
@@ -1819,12 +1819,12 @@ fn handle_accessibility_stepper_action(
     if matches!(action, AccessibilityAction::Focus) {
         return true;
     }
-    let step_value = step.get();
+    let step_value = step.snapshot();
     assert!(
         (step_value > 0),
         "hydrolysis accessibility stepper requires positive step"
     );
-    let previous = value.get().clamp(start, end);
+    let previous = value.snapshot().clamp(start, end);
     let next = match action {
         AccessibilityAction::Increment => previous.saturating_add(step_value).min(end),
         AccessibilityAction::Decrement => previous.saturating_sub(step_value).max(start),
@@ -1897,7 +1897,7 @@ fn handle_accessibility_date_picker_action(
                     ty.format_string(),
                 )
             });
-            let previous = value.get().clamp(*range.start(), *range.end());
+            let previous = value.snapshot().clamp(*range.start(), *range.end());
             let next = parsed.clamp(*range.start(), *range.end());
             if next != previous {
                 value.set(next);
@@ -1945,7 +1945,7 @@ fn handle_accessibility_text_field_action(
                 );
             };
             let normalized = normalized_insert_text(text.as_ref(), line_limit);
-            let mut plain = value.get().to_plain().to_string();
+            let mut plain = value.snapshot().to_plain().to_string();
             assert!(
                 apply_text_insert(&mut plain, normalized.as_str(), line_limit),
                 "hydrolysis accessibility text field ReplaceSelectedText exceeds line_limit {:?}",
@@ -1990,7 +1990,7 @@ fn handle_accessibility_secure_field_action(
                     "hydrolysis accessibility secure field ReplaceSelectedText requires Value data"
                 );
             };
-            let mut plain = value.get().expose().to_owned();
+            let mut plain = value.snapshot().expose().to_owned();
             assert!(
                 apply_text_insert(&mut plain, text.as_ref(), Some(1)),
                 "hydrolysis accessibility secure field ReplaceSelectedText exceeds line_limit 1"
@@ -2015,7 +2015,7 @@ fn handle_accessibility_picker_select_action(
 ) -> bool {
     match action {
         AccessibilityAction::Click | AccessibilityAction::Focus => {
-            if selection.get() != target {
+            if selection.snapshot() != target {
                 selection.set(target);
             }
             true

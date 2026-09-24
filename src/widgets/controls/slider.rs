@@ -11,7 +11,7 @@ use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
 use core::ops::RangeInclusive;
-use nami::Binding;
+use nami::{Binding, Signal};
 use std::cell::RefCell;
 use std::rc::Rc;
 use waterui_controls::label::Label;
@@ -433,14 +433,14 @@ pub(crate) fn render_slider_parts(
             let x = local_point.x.clamp(track_left, track_right);
             let t = (x - track_left) / usable_track;
             let next = range_start + span * t;
-            if (value_binding.get() - next).abs() <= value_epsilon {
+            if (value_binding.snapshot() - next).abs() <= value_epsilon {
                 return false;
             }
             value_binding.set(next);
             true
         },
         move |forward| {
-            let current = keyboard_value.get();
+            let current = keyboard_value.snapshot();
             let delta = if forward {
                 keyboard_step
             } else {

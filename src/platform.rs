@@ -1,3 +1,4 @@
+use nami::Signal;
 use waterui::cursor::CursorStyle;
 use waterui::window::{Window as WuiWindow, WindowState};
 use waterui_graphics::RedrawHandle;
@@ -1168,10 +1169,10 @@ impl PlatformWindow for OffscreenWindow {
     }
 
     fn apply_properties(&mut self, window: &WuiWindow) {
-        if window.state.get() == WindowState::Closed {
+        if window.state.snapshot() == WindowState::Closed {
             return;
         }
-        let frame = validated_window_frame(window.frame.get());
+        let frame = validated_window_frame(window.frame.snapshot());
         // `frame` is in logical units; the surface is allocated in physical
         // pixels, so the scale factor has to be applied here or a HiDPI window
         // would rasterize at one physical pixel per logical pixel.

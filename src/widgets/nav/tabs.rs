@@ -12,7 +12,7 @@ use crate::renderer::{
 use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
-use nami::Binding;
+use nami::{Binding, Signal};
 use waterui::navigation::tab::{NativeTabStyle, TabsLayout};
 use waterui_core::id::Id;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
@@ -378,7 +378,7 @@ pub(crate) fn render_tabs_parts(
                     hit_bounds,
                     press_slot,
                     move |_renderer, _point, _env| {
-                        if selection_binding.get() != tab_id {
+                        if selection_binding.snapshot() != tab_id {
                             selection_binding.set(tab_id);
                         }
                         true

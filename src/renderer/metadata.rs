@@ -63,7 +63,7 @@ impl HydrolysisRenderer {
             return;
         }
 
-        let brush = resolved_color_to_peniko(border.color.resolve(env).get());
+        let brush = resolved_color_to_peniko(border.color.resolve(env).snapshot());
         let width = f64::from(border.width);
 
         if border.edges.all() && border.corner_radius > 0.0 {
@@ -158,7 +158,7 @@ impl HydrolysisRenderer {
             ctx.bounds.x1 + offset_x,
             ctx.bounds.y1 + offset_y,
         );
-        let shadow_color = resolved_color_to_peniko(shadow.color.resolve(env).get());
+        let shadow_color = resolved_color_to_peniko(shadow.color.resolve(env).snapshot());
 
         renderer.scene.draw_blurred_rounded_rect(
             ctx.transform,
