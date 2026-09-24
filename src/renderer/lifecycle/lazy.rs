@@ -133,7 +133,7 @@ pub(crate) fn place_lazy_stack_item(
             } else {
                 bounds.x0 + (bounds.width() - child_width) / 2.0
             };
-            let x = if axis_config.direction().get().is_right_to_left() {
+            let x = if axis_config.direction().snapshot().is_right_to_left() {
                 bounds.x0 + bounds.x1 - logical_x - child_width
             } else {
                 logical_x
@@ -165,7 +165,7 @@ pub(crate) fn place_lazy_stack_item(
             } else {
                 bounds.y0 + (bounds.height() - child_height) / 2.0
             };
-            let x = if axis_config.direction().get().is_right_to_left() {
+            let x = if axis_config.direction().snapshot().is_right_to_left() {
                 bounds.x0 + bounds.x1 - cursor - child_width
             } else {
                 cursor

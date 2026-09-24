@@ -386,17 +386,20 @@ fn native_window_attributes(
     activates: bool,
     icon: Option<winit::window::Icon>,
 ) -> winit::window::WindowAttributes {
-    let frame = crate::platform::validated_window_frame(window.frame.get());
+    let frame = crate::platform::validated_window_frame(window.frame.snapshot());
     // A Fullscreen request present at creation travels as a window
     // attribute — the same way the position does — so the window manager
     // sees it with the map request instead of after it. The retry in
     // `apply_properties` still re-delivers it on the first mapped event:
     // a state written between creation and map, or a manager that ignored
     // the attribute, is covered by the same mapped signal.
-    let fullscreen = matches!(window.state.get(), waterui::window::WindowState::Fullscreen);
+    let fullscreen = matches!(
+        window.state.snapshot(),
+        waterui::window::WindowState::Fullscreen
+    );
     NativeWindow::default_attributes()
         .with_window_icon(icon)
-        .with_title(window.display_title().get().as_str())
+        .with_title(window.display_title().snapshot().as_str())
         .with_resizable(window.resizable)
         .with_visible(false)
         .with_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None)))
@@ -505,7 +508,7 @@ impl WinitRunner {
             tracing::trace!(
                 target: "waterui::hydrolysis::a11y",
                 window_id = ?runtime.platform.id(),
-                title = runtime.window.title.get().as_str(),
+                title = runtime.window.title.snapshot().as_str(),
                 "created accesskit adapter for window"
             );
             self.last_accessibility_updates
@@ -578,7 +581,7 @@ impl WinitRunner {
         let mut close_ids = Vec::new();
         for (id, runtime) in &mut self.windows {
             runtime.platform.apply_properties(&runtime.window);
-            if runtime.window.state.get() == WindowState::Closed {
+            if runtime.window.state.snapshot() == WindowState::Closed {
                 close_ids.push(*id);
             }
         }

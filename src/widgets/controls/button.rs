@@ -407,7 +407,7 @@ pub(crate) fn menu_accessibility(
         let activation = AccessibilityActionTarget::Activate {
             action: Rc::new(RefCell::new(
                 move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
-                    let nodes = popup_menu_nodes(&items.get());
+                    let nodes = popup_menu_nodes(&items.snapshot());
                     let env = menu_env.layered_on(env);
                     match request {
                         Some((anchor, metrics)) => {
@@ -736,7 +736,7 @@ pub(crate) fn render_menu_parts(
         move |renderer, _point, env| {
             let env = menu_env.layered_on(env);
             renderer.show_popup_menu_nodes(
-                popup_menu_nodes(&items.get()),
+                popup_menu_nodes(&items.snapshot()),
                 anchor,
                 menu_metrics,
                 &env,
@@ -983,7 +983,7 @@ fn styled_button_title(
     } else {
         title
     };
-    title.resolve(env).content.get()
+    title.resolve(env).content.snapshot()
 }
 
 /// Subscribes to a label's reactive title content so a change schedules a frame

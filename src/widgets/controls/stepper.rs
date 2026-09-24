@@ -315,9 +315,9 @@ pub(crate) fn render_stepper_parts(
         minus_hit_bounds,
         minus_press_slot,
         move |_renderer, _point, _env| {
-            let step = step_signal_minus.get();
+            let step = step_signal_minus.snapshot();
             assert!((step > 0), "hydrolysis stepper requires positive step");
-            let current = value_binding_minus.get();
+            let current = value_binding_minus.snapshot();
             let next = current.saturating_sub(step).clamp(range_start, range_end);
             value_binding_minus.set(next);
             true
@@ -327,9 +327,9 @@ pub(crate) fn render_stepper_parts(
         plus_hit_bounds,
         plus_press_slot,
         move |_renderer, _point, _env| {
-            let step = step_signal_plus.get();
+            let step = step_signal_plus.snapshot();
             assert!((step > 0), "hydrolysis stepper requires positive step");
-            let current = value_binding_plus.get();
+            let current = value_binding_plus.snapshot();
             let next = current.saturating_add(step).clamp(range_start, range_end);
             value_binding_plus.set(next);
             true

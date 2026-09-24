@@ -21,8 +21,8 @@ pub(crate) fn popup_menu_nodes(items: &[ResolvedMenuItem]) -> Vec<PopupMenuNode>
 pub(crate) fn popup_menu_node(item: ResolvedMenuItem) -> PopupMenuNode {
     match item {
         ResolvedMenuItem::Command(command) => {
-            let mut styled = command.label.content.get();
-            if command.selected.get() {
+            let mut styled = command.label.content.snapshot();
+            if command.selected.snapshot() {
                 styled = StyledStr::plain("✓ ") + styled;
             }
             let plain_label = styled.to_plain().to_string();
@@ -31,18 +31,18 @@ pub(crate) fn popup_menu_node(item: ResolvedMenuItem) -> PopupMenuNode {
                 label,
                 plain_label,
                 action: command.action,
-                disabled: command.disabled.get(),
+                disabled: command.disabled.snapshot(),
             }
         }
         ResolvedMenuItem::Divider => PopupMenuNode::Divider,
         ResolvedMenuItem::Menu(menu) => {
-            let styled = menu.label.content.get() + StyledStr::plain(" ›");
+            let styled = menu.label.content.snapshot() + StyledStr::plain(" ›");
             let plain_label = styled.to_plain().to_string();
             let label = menu.semantic_label.text(Text::new(styled));
             PopupMenuNode::Menu {
                 label,
                 plain_label,
-                items: popup_menu_nodes(&menu.items.get()),
+                items: popup_menu_nodes(&menu.items.snapshot()),
             }
         }
     }

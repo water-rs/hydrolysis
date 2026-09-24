@@ -239,8 +239,8 @@ pub(crate) enum ActiveTextContextMenu {
 impl TextInputModel {
     pub(crate) fn plain_text(&self) -> String {
         match self {
-            Self::TextField { value, .. } => value.get().to_plain().to_string(),
-            Self::SecureField { value } => value.get().expose().to_owned(),
+            Self::TextField { value, .. } => value.snapshot().to_plain().to_string(),
+            Self::SecureField { value } => value.snapshot().expose().to_owned(),
         }
     }
 
@@ -268,7 +268,7 @@ impl TextInputModel {
 
     pub(crate) fn custom_selection_menu_items(&self) -> Vec<ResolvedMenuItem> {
         match self {
-            Self::TextField { selection_menu, .. } => selection_menu.get(),
+            Self::TextField { selection_menu, .. } => selection_menu.snapshot(),
             Self::SecureField { .. } => Vec::new(),
         }
     }
@@ -1586,7 +1586,7 @@ impl SemanticCore {
                 match item {
                     ResolvedMenuItem::Command(command) => {
                         entries.push(TextContextMenuEntry::Command {
-                            label: command.label.content.get().to_plain().to_string(),
+                            label: command.label.content.snapshot().to_plain().to_string(),
                             action: Box::new(TextContextMenuAction::Custom(command)),
                         });
                     }

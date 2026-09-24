@@ -346,7 +346,7 @@ pub(crate) fn measure_navigation_view_node(
     if let (Some(width), Some(height)) = (proposal.width, proposal.height) {
         return ViewDimensions::new(LayoutSize::new(width, height));
     }
-    let bar_hidden = state.hidden.get();
+    let bar_hidden = state.hidden.snapshot();
     let metrics = theme.navigation_metrics();
     let bar_height = if bar_hidden {
         0.0
@@ -859,7 +859,7 @@ impl NavigationSplitRenderState {
     /// prepare pass, and keeps whichever compact variant the column last built.
     pub(crate) fn prepare_columns(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
         self.prebuild(renderer, env);
-        let primary_selection = self.primary_selection.get();
+        let primary_selection = self.primary_selection.snapshot();
         if let Some(selected) = primary_selection.filter(|_| self.content_builder.is_some()) {
             let compact = self
                 .content
@@ -870,7 +870,7 @@ impl NavigationSplitRenderState {
         let detail_selection = self
             .secondary_selection
             .as_ref()
-            .map_or(primary_selection, Signal::get);
+            .map_or(primary_selection, Signal::snapshot);
         if let Some(selected) = detail_selection {
             let compact = self.detail.as_ref().is_some_and(|(_, compact, _)| *compact);
             self.ensure_detail(selected, compact, renderer, env);
@@ -1036,15 +1036,15 @@ fn measure_navigation_split_layout(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let primary_selection = split.primary_selection().get();
+    let primary_selection = split.primary_selection().snapshot();
     let detail_selection = split
         .secondary_selection()
-        .map_or(primary_selection, Signal::get);
+        .map_or(primary_selection, Signal::snapshot);
     let plan = split_measure_plan(
         split.content_builder().is_some(),
         split.sidebar_width_constraints(),
         split.native_style(),
-        split.column_visibility_signal().get(),
+        split.column_visibility_signal().snapshot(),
         proposal,
     );
 
@@ -1149,16 +1149,16 @@ pub(crate) fn measure_navigation_split_node(
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let primary_selection = split.primary_selection.get();
+    let primary_selection = split.primary_selection.snapshot();
     let detail_selection = split
         .secondary_selection
         .as_ref()
-        .map_or(primary_selection, Signal::get);
+        .map_or(primary_selection, Signal::snapshot);
     let plan = split_measure_plan(
         split.is_three_column(),
         split.column_width,
         split.style,
-        split.visibility.get(),
+        split.visibility.snapshot(),
         proposal,
     );
 

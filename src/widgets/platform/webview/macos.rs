@@ -338,7 +338,7 @@ define_class!(
                 from: SharedState::parse_url(from),
                 to: SharedState::parse_url(to.clone()),
             });
-            if self.ivars().shared.redirects_enabled.borrow().get() {
+            if self.ivars().shared.redirects_enabled.borrow().snapshot() {
                 self.ivars()
                     .shared
                     .last_navigation_url

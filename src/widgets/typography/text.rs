@@ -16,8 +16,8 @@ impl HydroNativeView for Native<TextConfig> {
     ) -> LayoutSize {
         HydrolysisRenderer::measure_text_dimensions(
             state,
-            view.as_inner().content.get(),
-            view.as_inner().paragraph_alignment.get(),
+            view.as_inner().content.snapshot(),
+            view.as_inner().paragraph_alignment.snapshot(),
             env,
             None,
             view.as_inner().line_limit.map(NonZeroUsize::get),
@@ -34,8 +34,8 @@ impl HydroNativeView for Native<TextConfig> {
     ) -> ViewDimensions {
         HydrolysisRenderer::measure_text_dimensions(
             state,
-            view.as_inner().content.get(),
-            view.as_inner().paragraph_alignment.get(),
+            view.as_inner().content.snapshot(),
+            view.as_inner().paragraph_alignment.snapshot(),
             env,
             proposal.width,
             view.as_inner().line_limit.map(NonZeroUsize::get),

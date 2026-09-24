@@ -134,7 +134,7 @@ pub(super) fn apply_window_size_limits<P: PlatformWindow>(
     runtime.applied_size_limits = Some(limits);
     runtime.platform.set_size_limits(min, max);
     if limits_changed {
-        let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
+        let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
         let clamped = clamp_window_size(*frame.size(), min, max);
         if clamped != *frame.size() {
             runtime
@@ -344,7 +344,7 @@ pub(super) fn window_clear_color(window: &Window, env: &Environment) -> vello::p
 }
 
 pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vello::peniko::Color {
-    let resolved = color.resolve(env).get();
+    let resolved = color.resolve(env).snapshot();
     let srgb = resolved.to_srgb_with_headroom();
     vello::peniko::Color::new([srgb.red, srgb.green, srgb.blue, resolved.opacity])
 }
@@ -353,7 +353,7 @@ pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vel
 pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
     match &window.background {
         WindowBackground::Opaque => false,
-        WindowBackground::Color(color) => color.resolve(env).get().opacity < 1.0,
+        WindowBackground::Color(color) => color.resolve(env).snapshot().opacity < 1.0,
     }
 }
 
@@ -580,7 +580,7 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
     #[cfg(feature = "winit")]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
 
     if runtime.renderer.take_rebuild_request() {
         runtime.request_refresh();
@@ -714,7 +714,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     #[cfg(feature = "winit")]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
     let mut snapshot = None;
     let mut rebuilt = false;
     let profile;
@@ -938,7 +938,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         };
 
         if diagnostics_enabled {
-            let window_title = runtime.window.title.get();
+            let window_title = runtime.window.title.snapshot();
             runtime.render_diagnostics.record_frame(
                 window_title.as_str(),
                 RenderPhaseSample {
@@ -1014,7 +1014,7 @@ pub(super) fn handle_input_events<P: PlatformWindow>(
 pub(super) fn runtime_window_origin<P: PlatformWindow>(
     runtime: &RuntimeWindow<P>,
 ) -> HydrolysisWindowOrigin {
-    let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
+    let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
     HydrolysisWindowOrigin {
         x: frame.x(),
         y: frame.y(),
@@ -1081,7 +1081,7 @@ where
     P: PlatformWindow,
     F: Fn(&RuntimeWindow<P>, &Environment) -> Environment,
 {
-    let mut should_close = runtime.window.state.get() == waterui::window::WindowState::Closed;
+    let mut should_close = runtime.window.state.snapshot() == waterui::window::WindowState::Closed;
     let events = runtime.platform.drain_events();
     if !events.is_empty() {
         refresh_pending_input_geometry(runtime, env);
@@ -1104,14 +1104,16 @@ where
                 should_close = true;
             }
             InputEvent::Moved { x, y } => {
-                let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 runtime.window.frame.set(waterui_core::layout::Rect::new(
                     waterui_core::layout::Point::new(x, y),
                     *frame.size(),
                 ));
             }
             InputEvent::Resize { width, height } => {
-                let frame = crate::platform::validated_window_frame(runtime.window.frame.get());
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 let logical_width =
                     physical_to_logical_dimension(width, runtime.platform.scale_factor());
                 let logical_height =

@@ -44,7 +44,7 @@ pub(crate) fn table_data_cell_rect(
 }
 
 fn navigation_bar_height(view: &NavigationView, theme: &Rc<dyn WidgetTheme>) -> f64 {
-    if view.bar.hidden.get() {
+    if view.bar.hidden.snapshot() {
         0.0
     } else {
         let metrics = theme.navigation_metrics();
@@ -261,8 +261,8 @@ fn measure_view_dimensions_with_proposal_with_budget(
         let resolved = text.resolve(&scoped_env);
         return HydrolysisRenderer::measure_text_dimensions(
             state,
-            resolved.content.get(),
-            resolved.paragraph_alignment.get(),
+            resolved.content.snapshot(),
+            resolved.paragraph_alignment.snapshot(),
             &scoped_env,
             proposal.width,
             resolved.line_limit.map(core::num::NonZeroUsize::get),
@@ -815,11 +815,11 @@ pub(crate) fn measure_list_intrinsic(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
-    let row_count = list.contents.len().get();
+    let row_count = list.contents.len().snapshot();
     if row_count == 0 {
         return LayoutSize::zero();
     }
-    let editing = list.editing.get();
+    let editing = list.editing.snapshot();
     let mut first_item = list
         .contents
         .get_view(0)
@@ -898,10 +898,14 @@ pub(crate) fn measure_progress_intrinsic(
         ProgressStyle::Linear => {
             let metrics = theme
                 .progress_metrics(waterui_backend_core::widget::ProgressIndicatorStyle::Linear);
-            let label_height =
-                f64::from(waterui_text::font::Font::default().resolve(env).get().size)
-                    .max(metrics.label_height);
-            let value_label_height = if progress.value.get().is_finite() {
+            let label_height = f64::from(
+                waterui_text::font::Font::default()
+                    .resolve(env)
+                    .snapshot()
+                    .size,
+            )
+            .max(metrics.label_height);
+            let value_label_height = if progress.value.snapshot().is_finite() {
                 metrics.value_label_top_spacing + label_height
             } else {
                 0.0
@@ -969,8 +973,8 @@ pub(crate) fn measure_text_field_size_with_label_size(
 ) -> LayoutSize {
     let metrics = theme.input_field_metrics();
     let line_limit = text_field.line_limit.map(NonZeroUsize::get);
-    let prompt = text_field.prompt.content.get();
-    let value = text_field.value.get();
+    let prompt = text_field.prompt.content.snapshot();
+    let value = text_field.value.snapshot();
     let prompt_size = HydrolysisRenderer::measure_text_intrinsic_size_with_line_limit(
         state, prompt, env, line_limit,
     );
@@ -1047,7 +1051,7 @@ pub(crate) fn measure_secure_field_size_with_label_size(
     proposal: ProposalSize,
 ) -> LayoutSize {
     let metrics = theme.input_field_metrics();
-    let secure_len = secure_field.value.get().expose().chars().count();
+    let secure_len = secure_field.value.snapshot().expose().chars().count();
     let masked = if secure_len == 0 {
         StyledStr::plain("")
     } else {
@@ -1104,7 +1108,7 @@ pub(crate) fn measure_table_metrics(
         width = width.max(f64::from(label_size.width) + metrics.cell_horizontal_padding);
 
         let rows = column.rows();
-        max_rows = max_rows.max(rows.len().get());
+        max_rows = max_rows.max(rows.len().snapshot());
         column_widths.push(width);
     }
 
@@ -1135,7 +1139,7 @@ pub(crate) fn refresh_table_slot_baseline(
         if slot.column_widths[index] < width {
             slot.column_widths[index] = width;
         }
-        slot.max_rows = slot.max_rows.max(column.rows().len().get());
+        slot.max_rows = slot.max_rows.max(column.rows().len().snapshot());
     }
 }
 
@@ -1204,7 +1208,7 @@ pub(crate) fn measure_slider_intrinsic(
 }
 
 fn resolved_text_styled(text: &Text, env: &Environment) -> StyledStr {
-    text.resolve(env).content.get()
+    text.resolve(env).content.snapshot()
 }
 
 pub(crate) fn measure_date_picker_intrinsic(
@@ -1224,7 +1228,7 @@ pub(crate) fn measure_date_picker_intrinsic(
     };
     let current = date_picker
         .value
-        .get()
+        .snapshot()
         .clamp(*date_picker.range.start(), *date_picker.range.end());
     let candidates = [
         date_picker.ty.format_value(*date_picker.range.start()),
@@ -1302,7 +1306,7 @@ pub(crate) fn measure_picker_intrinsic_with_label_size(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
-    let items = picker.items.get();
+    let items = picker.items.snapshot();
     assert!(
         !(items.is_empty()),
         "hydrolysis picker requires at least one item"

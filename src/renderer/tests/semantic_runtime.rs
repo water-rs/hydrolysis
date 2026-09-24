@@ -182,7 +182,7 @@ fn text_and_button_emit_and_click_fires() {
         act(&mut runtime, Action::Click, tap),
         "Click changed nothing"
     );
-    assert!(fired.get(), "the button action did not fire");
+    assert!(fired.snapshot(), "the button action did not fire");
     let update = pumped(&mut runtime);
     assert_rooted(&update);
 }
@@ -222,7 +222,7 @@ fn toggle_emits_and_click_flips() {
         act(&mut runtime, Action::Click, switch),
         "Click changed nothing"
     );
-    assert!(on.get(), "the toggle binding did not flip");
+    assert!(on.snapshot(), "the toggle binding did not flip");
 
     let update = pumped(&mut runtime);
     let (_, switch_node) = find_by_label(&update, Role::Switch, "Airplane mode")
@@ -260,12 +260,12 @@ fn slider_emits_and_value_actions_step() {
         act(&mut runtime, Action::Increment, slider_id),
         "Increment changed nothing"
     );
-    assert_eq!(value.get(), 0.51, "Increment did not step the binding");
+    assert_eq!(value.snapshot(), 0.51, "Increment did not step the binding");
     assert!(
         act(&mut runtime, Action::Decrement, slider_id),
         "Decrement changed nothing"
     );
-    assert_eq!(value.get(), 0.5, "Decrement did not step the binding");
+    assert_eq!(value.snapshot(), 0.5, "Decrement did not step the binding");
     assert!(
         act_with_data(
             &mut runtime,
@@ -275,7 +275,7 @@ fn slider_emits_and_value_actions_step() {
         ),
         "SetValue changed nothing"
     );
-    assert_eq!(value.get(), 0.25, "SetValue did not write the binding");
+    assert_eq!(value.snapshot(), 0.25, "SetValue did not write the binding");
 
     let update = pumped(&mut runtime);
     let (_, slider_node) = find_by_label(&update, Role::Slider, "Volume")
@@ -312,12 +312,12 @@ fn stepper_emits_and_value_actions_step() {
         act(&mut runtime, Action::Increment, stepper_id),
         "Increment changed nothing"
     );
-    assert_eq!(value.get(), 4, "Increment did not step the binding");
+    assert_eq!(value.snapshot(), 4, "Increment did not step the binding");
     assert!(
         act(&mut runtime, Action::Decrement, stepper_id),
         "Decrement changed nothing"
     );
-    assert_eq!(value.get(), 3, "Decrement did not step the binding");
+    assert_eq!(value.snapshot(), 3, "Decrement did not step the binding");
     assert!(
         act_with_data(
             &mut runtime,
@@ -327,7 +327,7 @@ fn stepper_emits_and_value_actions_step() {
         ),
         "SetValue changed nothing"
     );
-    assert_eq!(value.get(), 7, "SetValue did not write the binding");
+    assert_eq!(value.snapshot(), 7, "SetValue did not write the binding");
 }
 
 #[test]
@@ -380,7 +380,7 @@ fn text_field_emits_and_set_value_edits() {
         "SetValue changed nothing"
     );
     assert_eq!(
-        value.get().to_string().as_str(),
+        value.snapshot().to_string().as_str(),
         "Ada",
         "SetValue did not write the binding"
     );
@@ -413,7 +413,7 @@ fn secure_field_emits_and_set_value_edits() {
         "SetValue changed nothing"
     );
     assert_eq!(
-        secret.get().expose(),
+        secret.snapshot().expose(),
         "hunter2",
         "SetValue did not write the secure binding"
     );
@@ -466,7 +466,7 @@ fn menu_picker_emits_options_and_selects() {
         act(&mut runtime, Action::Click, children[1]),
         "the option Click changed nothing"
     );
-    assert_eq!(selection.get(), 1, "the option did not select");
+    assert_eq!(selection.snapshot(), 1, "the option did not select");
     let update = pumped(&mut runtime);
     let (_, combo_node) =
         find_by_label(&update, Role::ComboBox, "Size").expect("the picker vanished");
@@ -547,7 +547,7 @@ fn radio_picker_emits_group_and_selects() {
         act(&mut runtime, Action::Click, children[1]),
         "the radio Click changed nothing"
     );
-    assert_eq!(selection.get(), 1, "the radio option did not select");
+    assert_eq!(selection.snapshot(), 1, "the radio option did not select");
 }
 
 /// A visually hidden radio-picker label draws nothing and takes no space, but
@@ -607,7 +607,7 @@ fn date_picker_emits_and_set_value_edits() {
         "SetValue changed nothing"
     );
     assert_eq!(
-        day.get(),
+        day.snapshot(),
         jiff::civil::date(2030, 5, 6),
         "SetValue did not write the date binding"
     );
@@ -656,8 +656,8 @@ fn color_picker_emits_and_popup_swatches_select() {
 
     // The swatch wrote the binding and its `close_all` dismissed the panel.
     let env = Environment::new();
-    let picked = tint.get().resolve(&env).get();
-    let expected = Color::srgb(0xba, 0x1a, 0x1a).resolve(&env).get();
+    let picked = tint.snapshot().resolve(&env).snapshot();
+    let expected = Color::srgb(0xba, 0x1a, 0x1a).resolve(&env).snapshot();
     for (picked, expected, channel) in [
         (picked.red, expected.red, "red"),
         (picked.green, expected.green, "green"),
@@ -713,7 +713,7 @@ fn menu_opens_a_semantic_popup_window_and_commands_fire() {
         act(&mut runtime, Action::Click, export),
         "the command Click changed nothing"
     );
-    assert!(fired.get(), "the menu command did not fire");
+    assert!(fired.snapshot(), "the menu command did not fire");
     let update = pumped(&mut runtime);
     assert!(
         find_by_label(&update, Role::Button, "Export").is_none(),
@@ -910,7 +910,7 @@ fn list_toggle_row_emits_actionable_switch() {
         act(&mut runtime, Action::Click, switch),
         "Click changed nothing"
     );
-    assert!(on.get(), "the toggle binding did not flip");
+    assert!(on.snapshot(), "the toggle binding did not flip");
 }
 
 /// An explicit `a11y_label` on the row's content names the `ListItem` node —
@@ -1093,7 +1093,7 @@ fn tabs_emit_tab_list_and_click_selects() {
         act(&mut runtime, Action::Click, children[1]),
         "the tab Click changed nothing"
     );
-    assert_eq!(selection.get(), 1, "the tab did not select");
+    assert_eq!(selection.snapshot(), 1, "the tab did not select");
     let update = pumped(&mut runtime);
     let (_, tab_list) = find_only(&update, Role::TabList).expect("the tab list vanished");
     let children = tab_list.children();
@@ -1323,7 +1323,10 @@ fn tab_traverses_the_semantic_tree_and_activation_dispatches_click() {
         Modifiers::default(),
     );
     let _ = pumped(&mut runtime);
-    assert!(tapped.get(), "Enter did not activate the focused button");
+    assert!(
+        tapped.snapshot(),
+        "Enter did not activate the focused button"
+    );
 
     // Space on the focused toggle flips its binding through the same path.
     press(
@@ -1339,7 +1342,7 @@ fn tab_traverses_the_semantic_tree_and_activation_dispatches_click() {
         Modifiers::default(),
     );
     let _ = pumped(&mut runtime);
-    assert!(on.get(), "Space did not activate the focused toggle");
+    assert!(on.snapshot(), "Space did not activate the focused toggle");
 }
 
 #[test]
@@ -1552,7 +1555,7 @@ fn navigation_split_emits_sidebar_and_selected_detail() {
         "the sidebar Click changed nothing"
     );
     assert_eq!(
-        selection.get(),
+        selection.snapshot(),
         Some(7),
         "the sidebar did not write the selection"
     );
@@ -1616,7 +1619,7 @@ fn segmented_picker_emits_group_and_click_selects() {
         act(&mut runtime, Action::Click, children[1]),
         "the segment Click changed nothing"
     );
-    assert_eq!(selection.get(), 1, "the segment did not select");
+    assert_eq!(selection.snapshot(), 1, "the segment did not select");
     let update = pumped(&mut runtime);
     let (_, group_node) =
         find_by_label(&update, Role::Group, "Mode").expect("the segmented group vanished");
@@ -1801,14 +1804,14 @@ fn focused_binding_moves_ui_focus_and_tree_focus() {
         Some(email_node),
         "UI focus is the text caret — the button holds only the tree's focus"
     );
-    assert_eq!(focus.get(), Some(Field::Email));
+    assert_eq!(focus.snapshot(), Some(Field::Email));
 
     // Clearing the binding clears UI focus and writes None back; the tree's
     // focus stays on the button it moved to.
     focus.set(None);
     let update = pumped(&mut runtime);
     assert_eq!(runtime.focused_ui_node(), None);
-    assert_eq!(focus.get(), None);
+    assert_eq!(focus.snapshot(), None);
     assert_eq!(update.focus, done);
 
     // A cleared UI focus accepts a new target: an accessibility Focus on the
@@ -1817,5 +1820,5 @@ fn focused_binding_moves_ui_focus_and_tree_focus() {
     let update = pumped(&mut runtime);
     assert_eq!(update.focus, name_node);
     assert_eq!(runtime.focused_ui_node(), Some(name_node));
-    assert_eq!(focus.get(), Some(Field::Name));
+    assert_eq!(focus.snapshot(), Some(Field::Name));
 }

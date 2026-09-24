@@ -406,7 +406,7 @@ impl HeadlessRuntime {
     }
 
     fn create_popup_runtime(&self, window: Window) -> RuntimeWindow<HeadlessPlatformWindow> {
-        let frame = crate::platform::validated_window_frame(window.frame.get());
+        let frame = crate::platform::validated_window_frame(window.frame.snapshot());
         let width = frame.width().max(1.0) as u32;
         let height = frame.height().max(1.0) as u32;
         let mut platform = HeadlessPlatformWindow::on_context(
@@ -611,10 +611,11 @@ impl HeadlessRuntime {
         if self
             .popup_windows
             .iter()
-            .any(|popup| popup.window.state.get() == waterui::window::WindowState::Closed)
+            .any(|popup| popup.window.state.snapshot() == waterui::window::WindowState::Closed)
         {
-            self.popup_windows
-                .retain(|popup| popup.window.state.get() != waterui::window::WindowState::Closed);
+            self.popup_windows.retain(|popup| {
+                popup.window.state.snapshot() != waterui::window::WindowState::Closed
+            });
             self.runtime.request_refresh();
             self.runtime.platform.request_redraw();
         }
@@ -656,7 +657,7 @@ impl HeadlessRuntime {
                 composite_popup_snapshot(
                     snapshot,
                     &popup_snapshot,
-                    crate::platform::validated_window_frame(popup.window.frame.get()),
+                    crate::platform::validated_window_frame(popup.window.frame.snapshot()),
                 );
             }
         }

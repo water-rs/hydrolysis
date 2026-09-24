@@ -183,8 +183,8 @@ fn try_resolve_text_leaf(
         let resolved = text.resolve(&scoped_env);
         return Some((
             resolve_text_layout_input(
-                &resolved.content.get(),
-                resolved.paragraph_alignment.get(),
+                &resolved.content.snapshot(),
+                resolved.paragraph_alignment.snapshot(),
                 &scoped_env,
             ),
             resolved.line_limit.map(core::num::NonZeroUsize::get),
@@ -195,8 +195,8 @@ fn try_resolve_text_leaf(
         let config = text.as_inner();
         return Some((
             resolve_text_layout_input(
-                &config.content.get(),
-                config.paragraph_alignment.get(),
+                &config.content.snapshot(),
+                config.paragraph_alignment.snapshot(),
                 &scoped_env,
             ),
             config.line_limit.map(core::num::NonZeroUsize::get),
