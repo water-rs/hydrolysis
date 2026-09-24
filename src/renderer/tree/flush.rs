@@ -146,7 +146,10 @@ impl RenderNode {
             }
             RenderNode::Dynamic(node) => node.child.flush(renderer, ctx, env),
             RenderNode::Retain(node) => node.child.flush(renderer, ctx, env),
-            RenderNode::Env(node) => node.child.flush(renderer, ctx, &node.env),
+            RenderNode::Env(node) => {
+                renderer.register_modal_scope(&node.env);
+                node.child.flush(renderer, ctx, &node.env);
+            }
             RenderNode::Wrapper(node) => {
                 #[cfg(feature = "accessibility")]
                 renderer.push_accessibility_owner(&node.accessibility_identity);
@@ -509,7 +512,10 @@ impl RenderNode {
             RenderNode::Offset(node) => node.child.emit_accessibility(renderer, env),
             RenderNode::Dynamic(node) => node.child.emit_accessibility(renderer, env),
             RenderNode::Retain(node) => node.child.emit_accessibility(renderer, env),
-            RenderNode::Env(node) => node.child.emit_accessibility(renderer, &node.env),
+            RenderNode::Env(node) => {
+                renderer.register_modal_scope(&node.env);
+                node.child.emit_accessibility(renderer, &node.env);
+            }
             RenderNode::Wrapper(node) => {
                 renderer.push_accessibility_owner(&node.accessibility_identity);
                 let child_env = &node.env;
