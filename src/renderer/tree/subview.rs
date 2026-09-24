@@ -125,7 +125,10 @@ impl SubView for NodeSubView<'_> {
         // Worker-safe path: shaping a resolved text leaf touches no
         // `MainThreadBound` state, so it may run on any thread.
         if let Some(resolved) = &self.resolved_text {
-            let layout = resolved.service.shape(&resolved.input, proposal.width);
+            let layout =
+                resolved
+                    .service
+                    .shape_limited(&resolved.input, proposal.width, resolved.max_lines);
             let dimensions = text_dimensions_from_layout(&layout, resolved.max_lines);
             return self.apply_stretch(dimensions, proposal);
         }

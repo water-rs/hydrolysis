@@ -1,7 +1,7 @@
 use crate::animation::AnimationKey;
 use crate::platform::TextInputPurpose;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RetainedSubview, TextInputModel,
+    HydroNativeView, HydroState, HydrolysisRenderer, RetainedSubview, TailMark, TextInputModel,
     TextInputTargetRegistration, TextSelectionSlot, WidgetRenderContext, clamp_to_char_boundary,
     measure_label_intrinsic, measure_secure_field_intrinsic,
     measure_secure_field_size_with_label_size, measure_text_field_intrinsic,
@@ -969,7 +969,7 @@ fn flush_material_prompt_label(
         prompt_styled,
         HorizontalAlignment::Leading,
         env,
-        Some(1),
+        TailMark::Clip(1),
     );
 }
 

@@ -393,3 +393,137 @@ fn text_field_fills_wide_container(app: &mut OffscreenApp) {
         "a field should fill its 600-wide container: {field:?}"
     );
 }
+
+/// The conversation row from water-rs/waterui#1219: a one-line preview that
+/// truncates in the second row. The truncated leaf reports the width it
+/// drew — its laid-out line including the ellipsis — so what it declines
+/// reaches the row's spacer and the trailing badge ends on the row's
+/// trailing edge, where the timestamp in the row above already lands.
+fn compressed_row_view() -> impl View {
+    hstack((
+        text("RC").padding_with(44.0),
+        vstack((
+            hstack((
+                text("Ada").a11y_label("title"),
+                spacer(),
+                text("14:32").a11y_label("stamp"),
+            ))
+            .spacing(4.0),
+            hstack((
+                text("On my way — see you at the gate in about ten minutes")
+                    .caption()
+                    .line_limit(core::num::NonZeroUsize::MIN)
+                    .a11y_label("preview"),
+                spacer(),
+                text("2").caption().a11y_label("badge"),
+            ))
+            .spacing(4.0),
+        ))
+        .spacing(2.0)
+        .leading(),
+    ))
+    .spacing(10.0)
+    .padding_with((6.0, 10.0))
+}
+
+#[waterui::test(compressed_row_view, theme = hydrolysis_m3::Material3::defaults(), offscreen, viewport = (340, 200))]
+fn a_compressed_limited_text_leaves_its_spacer_nothing(app: &mut OffscreenApp) {
+    let stamp = app.query().label("stamp").single().bounds();
+    let badge = app.query().label("badge").single().bounds();
+    // The outer padding insets horizontally by 10, so the trailing edge of
+    // either stretched row lands at 340 - 10.
+    let trailing = 330.0;
+    assert!(
+        (stamp.x() + stamp.width() - trailing).abs() <= 1.0,
+        "the timestamp should end on the row's trailing edge: {stamp:?}"
+    );
+    assert!(
+        (badge.x() + badge.width() - trailing).abs() <= 1.0,
+        "the badge should end on the row's trailing edge: {badge:?}"
+    );
+}
+
+/// water-rs/hydrolysis#141 end to end: a line-limited text beside a trailing
+/// sibling compresses into its share and draws the truncation mark — three
+/// ink dots riding the baseline at the leaf's trailing edge — while the
+/// sibling keeps the width it takes when the row has room to spare.
+fn truncated_row_view() -> impl View {
+    vstack((
+        hstack((
+            text("On my way — see you at the gate in about ten minutes")
+                .line_limit(core::num::NonZeroUsize::MIN)
+                .a11y_label("preview"),
+            text("2").a11y_label("tight"),
+        ))
+        .spacing(4.0),
+        hstack((text("x").a11y_label("short"), text("2").a11y_label("free"))).spacing(4.0),
+    ))
+    .spacing(8.0)
+    .leading()
+    .padding_with((6.0, 10.0))
+}
+
+#[waterui::test(truncated_row_view, theme = hydrolysis_m3::Material3::defaults(), offscreen, viewport = (220, 120))]
+fn a_limited_text_truncates_with_an_ellipsis_beside_its_sibling(app: &mut OffscreenApp) {
+    let preview = app.query().label("preview").single().bounds();
+    let tight = app.query().label("tight").single().bounds();
+    let free = app.query().label("free").single().bounds();
+
+    assert!(
+        (tight.width() - free.width()).abs() <= 1.0,
+        "the sibling keeps the width it takes unconstrained: tight={tight:?} free={free:?}"
+    );
+    assert!(
+        preview.x() + preview.width() <= tight.x(),
+        "text and sibling share the row without overlapping: preview={preview:?} tight={tight:?}"
+    );
+
+    // The respelled line ends in "…" — three separated ink dots riding the
+    // baseline. Walk left from the leaf's last inked column while columns
+    // carry ink only below the midline; a clipped line instead ends
+    // mid-glyph with tall ink at its trailing edge.
+    let snapshot = app.snapshot();
+    let x0 = preview.x().max(0.0) as usize;
+    let x1 = ((preview.x() + preview.width()) as usize).min(snapshot.width as usize);
+    let y0 = preview.y().max(0.0) as usize;
+    let y1 = ((preview.y() + preview.height()) as usize).min(snapshot.height as usize);
+    let mid = y0 + (y1 - y0) / 2;
+    let bg: [u8; 4] = snapshot.rgba8[(y0 * snapshot.width as usize + x0.saturating_sub(6)) * 4..]
+        [..4]
+        .try_into()
+        .unwrap();
+    let ink = |x: usize, y: usize| -> bool {
+        let px: [u8; 4] = snapshot.rgba8[(y * snapshot.width as usize + x) * 4..][..4]
+            .try_into()
+            .unwrap();
+        (0..3).any(|c| px[c].abs_diff(bg[c]) > 48)
+    };
+
+    let last_ink_x = (x0..x1)
+        .rev()
+        .find(|&x| (y0..y1).any(|y| ink(x, y)))
+        .expect("the truncated text drew ink");
+    let tall = |x: usize| (y0..mid).any(|y| ink(x, y));
+    let low = |x: usize| (mid..y1).any(|y| ink(x, y));
+    assert!(
+        !tall(last_ink_x),
+        "the leaf's trailing ink should sit on the baseline — a tall trailing column is a clipped glyph: {preview:?}"
+    );
+    let zone_x0 = (x0..last_ink_x)
+        .rev()
+        .find(|&x| tall(x))
+        .map_or(x0, |x| x + 1);
+
+    let mut runs = 0usize;
+    let mut in_run = false;
+    for x in zone_x0..=last_ink_x {
+        if low(x) && !in_run {
+            runs += 1;
+        }
+        in_run = low(x);
+    }
+    assert!(
+        runs >= 3,
+        "the truncated line should end in a '…' — {runs} baseline ink runs in its tail: {preview:?}"
+    );
+}

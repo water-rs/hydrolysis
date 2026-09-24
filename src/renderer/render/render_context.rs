@@ -1,4 +1,4 @@
-use super::HydrolysisRenderer;
+use super::{HydrolysisRenderer, TailMark};
 use crate::engine::vello_backend::VelloDrawContext;
 use crate::renderer::HydroState;
 use crate::renderer::navigation::{
@@ -151,7 +151,13 @@ impl<'a> WidgetRenderContext<'a> {
         let renderer = self.renderer_mut();
         let (state, scene) = renderer.state_and_scene_mut();
         HydrolysisRenderer::render_styled_text_limited(
-            state, scene, child_ctx, styled, alignment, env, max_lines,
+            state,
+            scene,
+            child_ctx,
+            styled,
+            alignment,
+            env,
+            max_lines.map_or(TailMark::None, TailMark::Clip),
         );
     }
 
