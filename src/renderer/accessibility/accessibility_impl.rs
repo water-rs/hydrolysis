@@ -510,7 +510,6 @@ impl AccessibilityBuilder {
             || container.toggled().is_some()
             || container.is_disabled()
             || container.is_busy()
-            || container.is_hidden()
         {
             return;
         }
