@@ -393,7 +393,10 @@ fn native_window_attributes(
     // `apply_properties` still re-delivers it on the first mapped event:
     // a state written between creation and map, or a manager that ignored
     // the attribute, is covered by the same mapped signal.
-    let fullscreen = matches!(window.state.snapshot(), waterui::window::WindowState::Fullscreen);
+    let fullscreen = matches!(
+        window.state.snapshot(),
+        waterui::window::WindowState::Fullscreen
+    );
     NativeWindow::default_attributes()
         .with_window_icon(icon)
         .with_title(window.display_title().snapshot().as_str())
