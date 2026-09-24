@@ -62,11 +62,12 @@ pub(crate) struct TextMeasureService {
 }
 
 /// Cache identity for an encoded glyph scene: the shaped layout it draws plus
-/// the line limit applied while drawing.
+/// the line limit and tail truncation applied while drawing.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TextSceneCacheKey {
     layout: TextLayoutCacheKey,
     max_lines: Option<usize>,
+    tail_ellipsis: bool,
 }
 
 /// Owned, mutable shaping scratch for one in-flight shape call.
@@ -147,21 +148,87 @@ impl TextMeasureService {
         layout
     }
 
-    /// The encoded glyph scene for `input` at `max_width`, drawn with at most
-    /// `max_lines` lines, at the local origin (identity transform). A miss
-    /// shapes through [`Self::shape`] and encodes once via `encode`; a hit
-    /// returns the shared fragment so the caller only pays a transformed
-    /// append into the frame's scene.
-    pub(crate) fn glyph_scene_with(
+    /// Shape `input` with at most `max_lines` laid-out lines, truncating the
+    /// last allowed line to a trailing ellipsis when the text does not fit.
+    /// The truncated line is respelled — its kept clusters plus the marker —
+    /// and re-shaped, so the layout's widest line is the honest laid-out
+    /// width the leaf reports, and the drawn line is cached and encoded
+    /// through the same paths as any other.
+    pub(crate) fn shape_limited(
         &self,
         input: &ResolvedTextLayoutInput,
         max_width: Option<f32>,
         max_lines: Option<usize>,
+    ) -> Arc<parley::Layout<[u8; 4]>> {
+        let mut layout = self.shape(input, max_width);
+        let Some(limit) = max_lines.filter(|limit| *limit > 0) else {
+            return layout;
+        };
+        if !needs_tail_truncation(&layout, limit) {
+            return layout;
+        }
+
+        let ellipsis_advance = self.ellipsis_advance(input, &layout, limit);
+        let mut text = input.plain.clone();
+        let mut spans = input.spans.clone();
+        while let Some(cut) = truncate_layout_tail(&layout, &text, &spans, limit, ellipsis_advance)
+        {
+            if cut.0 == text {
+                break;
+            }
+            text = cut.0;
+            spans = cut.1;
+            layout = self.shape(&input.respell(text.clone(), spans.clone()), max_width);
+            if !needs_tail_truncation(&layout, limit) {
+                break;
+            }
+        }
+        layout
+    }
+
+    /// The marker's advance in the style at the tail of the last allowed line,
+    /// so the truncation cut can reserve room for it.
+    fn ellipsis_advance(
+        &self,
+        input: &ResolvedTextLayoutInput,
+        layout: &parley::Layout<[u8; 4]>,
+        limit: usize,
+    ) -> f32 {
+        let Some(line) = layout.get(layout.len().min(limit) - 1) else {
+            return 0.0;
+        };
+        let end = line.text_range().end;
+        let spans = input
+            .spans
+            .iter()
+            .rev()
+            .find(|(range, _)| range.start < end)
+            .map_or_else(Vec::new, |(_, style)| {
+                vec![(0..TAIL_ELLIPSIS.len_utf8(), style.clone())]
+            });
+        self.shape(&input.respell(String::from(TAIL_ELLIPSIS), spans), None)
+            .get(0)
+            .map_or(0.0, |line| line.metrics().advance)
+    }
+
+    /// The encoded glyph scene for `input` at `max_width`, drawn with its
+    /// `tail` treatment, at the local origin (identity transform). A miss
+    /// shapes through [`Self::shape`] — or [`Self::shape_limited`] for
+    /// [`TailMark::Ellipsis`] — and encodes once via `encode`; a hit returns
+    /// the shared fragment so the caller only pays a transformed append into
+    /// the frame's scene.
+    pub(crate) fn glyph_scene_with(
+        &self,
+        input: &ResolvedTextLayoutInput,
+        max_width: Option<f32>,
+        tail: TailMark,
         encode: impl FnOnce(&parley::Layout<[u8; 4]>, &mut vello::Scene),
     ) -> Arc<vello::Scene> {
+        let (max_lines, tail_ellipsis) = tail.parts();
         let key = TextSceneCacheKey {
             layout: input.cache_key(max_width),
             max_lines,
+            tail_ellipsis,
         };
         if let Some(scene) = self
             .scene_cache
@@ -171,7 +238,11 @@ impl TextMeasureService {
         {
             return Arc::clone(scene);
         }
-        let layout = self.shape(input, max_width);
+        let layout = if tail_ellipsis {
+            self.shape_limited(input, max_width, max_lines)
+        } else {
+            self.shape(input, max_width)
+        };
         let mut scene = vello::Scene::new();
         encode(&layout, &mut scene);
         let scene = Arc::new(scene);
@@ -231,10 +302,42 @@ impl ResolvedTextLayoutInput {
             max_width: max_width.map(f32::to_bits),
         }
     }
+
+    /// The same shaping defaults respelled over different text — how the
+    /// ellipsis probe and each truncated re-shape mint their inputs.
+    fn respell(&self, plain: String, spans: Vec<(Range<usize>, ResolvedTextStyleSpec)>) -> Self {
+        let alignment_id = self.alignment.stable_id();
+        let identity = Arc::new(TextLayoutIdentity::new(
+            plain.clone(),
+            spans
+                .iter()
+                .map(|(range, style)| span_cache_key(range, style))
+                .collect(),
+            text_layout_font_cache_key(&self.default_font),
+            self.default_brush,
+            self.locale.clone(),
+            TextLayoutAlignmentCacheKey {
+                low: alignment_id.low(),
+                high: alignment_id.high(),
+                right_to_left: self.right_to_left,
+            },
+        ));
+        Self {
+            plain,
+            spans,
+            default_font: self.default_font.clone(),
+            default_brush: self.default_brush,
+            locale: self.locale.clone(),
+            alignment: self.alignment,
+            right_to_left: self.right_to_left,
+            identity,
+        }
+    }
 }
 
 /// `Send` projection of a resolved font (the `!Send` [`Str`] family is copied
 /// into an owned [`String`]).
+#[derive(Clone)]
 struct ResolvedFontSpec {
     size: f32,
     weight: TextFontWeight,
@@ -244,6 +347,7 @@ struct ResolvedFontSpec {
 }
 
 /// `Send` projection of a resolved text run style.
+#[derive(Clone)]
 struct ResolvedTextStyleSpec {
     font: ResolvedFontSpec,
     foreground: Option<[u8; 4]>,
@@ -281,15 +385,7 @@ pub(crate) fn resolve_text_layout_input(
         plain.clone(),
         spans
             .iter()
-            .map(|(range, style)| TextLayoutSpanCacheKey {
-                start: range.start,
-                end: range.end,
-                font: text_layout_font_cache_key(&style.font),
-                foreground: style.foreground,
-                italic: style.italic,
-                underline: style.underline,
-                strikethrough: style.strikethrough,
-            })
+            .map(|(range, style)| span_cache_key(range, style))
             .collect(),
         text_layout_font_cache_key(&default_font),
         default_brush,
@@ -309,6 +405,18 @@ pub(crate) fn resolve_text_layout_input(
         alignment,
         right_to_left,
         identity,
+    }
+}
+
+fn span_cache_key(range: &Range<usize>, style: &ResolvedTextStyleSpec) -> TextLayoutSpanCacheKey {
+    TextLayoutSpanCacheKey {
+        start: range.start,
+        end: range.end,
+        font: text_layout_font_cache_key(&style.font),
+        foreground: style.foreground,
+        italic: style.italic,
+        underline: style.underline,
+        strikethrough: style.strikethrough,
     }
 }
 
@@ -451,6 +559,144 @@ fn font_family(family: Option<&str>) -> parley::FontFamily<'static> {
 
 fn text_layout_locale(env: &Environment) -> String {
     waterui_locale::locale_binding(env).get().canonical_tag()
+}
+
+/// The marker a truncated line's tail is cut for.
+const TAIL_ELLIPSIS: char = '\u{2026}';
+
+/// How a drawn text treats the tail that a line limit cuts off.
+#[derive(Clone, Copy)]
+pub(crate) enum TailMark {
+    /// No line limit — every laid-out line draws.
+    None,
+    /// At most the given lines draw; the rest are clipped.
+    Clip(usize),
+    /// At most the given lines draw and the last carries a trailing
+    /// ellipsis — what a `Text` leaf's `line_limit` means.
+    Ellipsis(usize),
+}
+
+impl TailMark {
+    pub(crate) const fn parts(self) -> (Option<usize>, bool) {
+        match self {
+            Self::None => (None, false),
+            Self::Clip(limit) => (Some(limit), false),
+            Self::Ellipsis(limit) => (Some(limit), true),
+        }
+    }
+}
+
+/// Whether the laid-out text needs its tail truncated: more lines than the
+/// limit allows, or a last visible line that overruns the bound — which is
+/// how a single unbreakable cluster presents. Lines a plain wrap produced
+/// stay inside the bound, so a small epsilon keeps benign rounding from
+/// declaring a truncation.
+fn needs_tail_truncation(layout: &parley::Layout<[u8; 4]>, limit: usize) -> bool {
+    if layout.is_empty() {
+        return false;
+    }
+    if layout.len() > limit {
+        return true;
+    }
+    layout
+        .get(layout.len() - 1)
+        .is_some_and(|line| line.metrics().advance - layout.layout_max_advance() > 0.01)
+}
+
+/// The text and styled spans a tail cut leaves for the re-shape.
+type RespelledTail = (String, Vec<(Range<usize>, ResolvedTextStyleSpec)>);
+
+/// The `text`/`spans` pair with `text`'s last allowed line shortened to make
+/// room for — and end in — the ellipsis marker. `None` when the text is
+/// already exactly that, which is how the re-shape loop knows it cannot
+/// shorten further.
+fn truncate_layout_tail(
+    layout: &parley::Layout<[u8; 4]>,
+    text: &str,
+    spans: &[(Range<usize>, ResolvedTextStyleSpec)],
+    limit: usize,
+    ellipsis_advance: f32,
+) -> Option<RespelledTail> {
+    let last_index = layout.len().min(limit) - 1;
+    let line = layout.get(last_index)?;
+    let bound = layout.layout_max_advance();
+    let line_start = line.text_range().start;
+
+    // The tail is every cluster from the last allowed line on: the truncated
+    // line refills its bound from content a wrap placed on later lines. Byte
+    // order cuts the *logical* tail, which is the edge the ellipsis belongs on
+    // for either direction. A hard break ends the kept prefix — the marker
+    // replaces the paragraph's tail, never the break itself — and a marker an
+    // earlier pass appended is skipped so re-truncating only ever removes
+    // real content.
+    let marker_start = text.len().saturating_sub(TAIL_ELLIPSIS.len_utf8());
+    let has_marker = text.ends_with(TAIL_ELLIPSIS);
+    let mut clusters: Vec<(Range<usize>, f32)> = Vec::new();
+    'lines: for line_index in last_index..layout.len() {
+        let Some(tail_line) = layout.get(line_index) else {
+            break;
+        };
+        for run in tail_line.runs() {
+            for cluster in run.clusters() {
+                if cluster.is_hard_line_break() {
+                    break 'lines;
+                }
+                let range = cluster.text_range();
+                if has_marker && range.end > marker_start {
+                    continue;
+                }
+                clusters.push((range, cluster.advance()));
+            }
+        }
+    }
+    clusters.sort_by_key(|(range, _)| range.start);
+
+    let mut used = 0.0_f32;
+    let mut cut = line_start;
+    for (range, advance) in clusters {
+        if used + advance + ellipsis_advance > bound {
+            break;
+        }
+        used += advance;
+        cut = range.end;
+    }
+
+    let kept_end = line_start + text[line_start..cut].trim_end().len();
+    let mut truncated = String::with_capacity(kept_end + TAIL_ELLIPSIS.len_utf8());
+    truncated.push_str(&text[..line_start]);
+    truncated.push_str(&text[line_start..kept_end]);
+    truncated.push(TAIL_ELLIPSIS);
+    if truncated == text {
+        return None;
+    }
+    let truncated_len = truncated.len();
+    Some((truncated, truncate_spans(spans, kept_end, truncated_len)))
+}
+
+/// Span ranges for the truncated text: clamped to what the cut kept, then the
+/// span covering the cut extended to dress the marker too — the way a native
+/// truncation takes the last visible run's style.
+fn truncate_spans(
+    spans: &[(Range<usize>, ResolvedTextStyleSpec)],
+    kept_end: usize,
+    truncated_len: usize,
+) -> Vec<(Range<usize>, ResolvedTextStyleSpec)> {
+    let mut truncated: Vec<_> = spans
+        .iter()
+        .filter_map(|(range, style)| {
+            let start = range.start.min(kept_end);
+            let end = range.end.min(kept_end);
+            (start < end).then(|| (start..end, style.clone()))
+        })
+        .collect();
+    if let Some((range, _)) = truncated
+        .iter_mut()
+        .rev()
+        .find(|(range, _)| range.end == kept_end)
+    {
+        range.end = truncated_len;
+    }
+    truncated
 }
 
 /// Compute view dimensions (size plus first/last baselines) from a shaped
@@ -647,5 +893,147 @@ mod font_family_tests {
         env.insert(locales::ZH_TW);
 
         assert_eq!(text_layout_locale(&env), "zh-TW");
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+    use crate::renderer::tests::test_environment;
+
+    fn test_input(env: &Environment, text: &'static str) -> ResolvedTextLayoutInput {
+        resolve_text_layout_input(&StyledStr::plain(text), HorizontalAlignment::Leading, env)
+    }
+
+    /// The logically-last cluster's character on a line — where the marker
+    /// sits after tail truncation.
+    fn last_cluster_char(line: &parley::Line<'_, [u8; 4]>) -> Option<char> {
+        let mut tail = None;
+        for run in line.runs() {
+            for cluster in run.clusters() {
+                tail = Some(cluster.source_char());
+            }
+        }
+        tail
+    }
+
+    #[test]
+    fn a_truncated_line_ends_in_an_ellipsis_inside_its_bound() {
+        let env = test_environment();
+        let service = TextMeasureService::new();
+        let input = test_input(
+            &env,
+            "a preview long enough that a single line cannot hold it",
+        );
+
+        let layout = service.shape_limited(&input, Some(60.0), Some(1));
+
+        assert_eq!(layout.len(), 1, "a one-line limit lays out one line");
+        let line = layout.get(0).expect("one line");
+        assert!(
+            line.metrics().advance <= 60.0,
+            "the truncated line stays inside its bound"
+        );
+        assert!(
+            line.metrics().advance > 45.0,
+            "the cut fills the bound to glyph granularity"
+        );
+        assert_eq!(
+            last_cluster_char(&line),
+            Some(TAIL_ELLIPSIS),
+            "the drawn line ends in an ellipsis"
+        );
+    }
+
+    #[test]
+    fn a_multiline_limit_carries_the_ellipsis_on_the_last_line() {
+        let env = test_environment();
+        let service = TextMeasureService::new();
+        let input = test_input(
+            &env,
+            "a preview long enough that it wraps well past the two lines it may show",
+        );
+
+        let layout = service.shape_limited(&input, Some(80.0), Some(2));
+
+        assert_eq!(
+            layout.len(),
+            2,
+            "the truncated text keeps its allowed lines"
+        );
+        let last = layout.get(1).expect("last line");
+        assert!(last.metrics().advance <= 80.0);
+        assert_eq!(last_cluster_char(&last), Some(TAIL_ELLIPSIS));
+        let first = layout.get(0).expect("first line");
+        assert_ne!(
+            last_cluster_char(&first),
+            Some(TAIL_ELLIPSIS),
+            "only the last line carries the marker"
+        );
+    }
+
+    #[test]
+    fn a_text_that_fits_its_limit_is_not_truncated() {
+        let env = test_environment();
+        let service = TextMeasureService::new();
+        let input = test_input(&env, "short");
+
+        let layout = service.shape_limited(&input, Some(200.0), Some(1));
+
+        let line = layout.get(0).expect("one line");
+        assert_eq!(last_cluster_char(&line), Some('t'));
+    }
+
+    /// The leaf contract (docs/layout-spec.md §6): the answer is the laid-out
+    /// width of the truncated line — its kept clusters plus the ellipsis —
+    /// never the proposal. The cut packs clusters to glyph granularity, so
+    /// the laid-out line sits within one dropped cluster of the bound.
+    #[test]
+    fn a_truncated_leaf_reports_the_drawn_line() {
+        let env = test_environment();
+        let mut state = HydroState::default();
+        let styled = StyledStr::plain("aaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+        let dimensions = HydrolysisRenderer::measure_text_dimensions(
+            &mut state,
+            styled,
+            HorizontalAlignment::Leading,
+            &env,
+            Some(100.0),
+            Some(1),
+        );
+
+        assert!(
+            dimensions.size.width <= 100.0,
+            "the laid-out line stays inside its bound"
+        );
+        assert!(
+            dimensions.size.width > 85.0,
+            "the laid-out line fills the bound to within a cluster"
+        );
+    }
+
+    /// A tail the line count alone cuts — the kept line never reached the
+    /// bound — reports its drawn extent, not the bound.
+    #[test]
+    fn a_line_count_truncation_reports_the_drawn_extent() {
+        let env = test_environment();
+        let mut state = HydroState::default();
+        let styled = StyledStr::plain("a\nb\nc");
+
+        let dimensions = HydrolysisRenderer::measure_text_dimensions(
+            &mut state,
+            styled,
+            HorizontalAlignment::Leading,
+            &env,
+            Some(200.0),
+            Some(1),
+        );
+
+        assert!(
+            dimensions.size.width < 200.0,
+            "a bound the text never filled is not reported"
+        );
+        assert!(dimensions.size.width > 0.0);
     }
 }

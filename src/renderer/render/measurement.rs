@@ -418,7 +418,7 @@ impl HydrolysisRenderer {
         alignment: HorizontalAlignment,
         env: &Environment,
     ) {
-        Self::render_styled_text_limited(state, scene, ctx, styled, alignment, env, None);
+        Self::render_styled_text_limited(state, scene, ctx, styled, alignment, env, TailMark::None);
     }
 
     pub(crate) fn render_styled_text_limited(
@@ -428,14 +428,14 @@ impl HydrolysisRenderer {
         styled: StyledStr,
         alignment: HorizontalAlignment,
         env: &Environment,
-        max_lines: Option<usize>,
+        tail: TailMark,
     ) {
         let input = resolve_text_layout_input(&styled, alignment, env);
         let fragment = state.text.glyph_scene_with(
             &input,
             Some(ctx.bounds.width() as f32),
-            max_lines,
-            |layout, fragment| Self::encode_text_layout(fragment, layout, max_lines),
+            tail,
+            |layout, fragment| Self::encode_text_layout(fragment, layout, tail.parts().0),
         );
         scene.append(
             &fragment,
@@ -460,11 +460,12 @@ impl HydrolysisRenderer {
         let height = f64::from(metrics.line_height);
         let x = ((ctx.bounds.width() - width) * 0.5).max(0.0);
         let y = ((ctx.bounds.height() - height) * 0.5).max(0.0);
-        let fragment = state
-            .text
-            .glyph_scene_with(&input, None, Some(1), |layout, fragment| {
-                Self::encode_text_layout(fragment, layout, Some(1));
-            });
+        let fragment =
+            state
+                .text
+                .glyph_scene_with(&input, None, TailMark::Clip(1), |layout, fragment| {
+                    Self::encode_text_layout(fragment, layout, Some(1));
+                });
         scene.append(
             &fragment,
             Some(ctx.transform * vello::kurbo::Affine::translate((x, y))),
@@ -537,7 +538,8 @@ impl HydrolysisRenderer {
         max_width: Option<f32>,
         max_lines: Option<usize>,
     ) -> ViewDimensions {
-        let layout = Self::build_text_layout(state, styled, alignment, env, max_width);
+        let input = resolve_text_layout_input(&styled, alignment, env);
+        let layout = state.text.shape_limited(&input, max_width, max_lines);
         text_dimensions_from_layout(&layout, max_lines)
     }
 
