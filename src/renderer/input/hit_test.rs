@@ -198,6 +198,10 @@ pub(crate) struct HitTestState {
     /// Whether an input-method composition session is open on the focused
     /// sink, so pre-edit updates and commits form a well-formed W3C session.
     pub(crate) embedded_composing: bool,
+    /// Whether the window itself is unfocused. While it is, no surface is
+    /// told it holds focus — element-focus moves stay silent until the
+    /// window is reactivated, when the holder hears a single `Focus(true)`.
+    pub(crate) window_blurred: bool,
     pub(crate) native_view_occlusions: Vec<NativeViewOcclusion>,
     pub(crate) pointer_targets: Vec<PointerTarget>,
     pub(crate) active_pointer_target: Option<PointerTarget>,
@@ -296,7 +300,9 @@ impl HitTestState {
                 self.embedded_composing = false;
                 sink.composition_cancel();
             }
-            sink.set_focus(false);
+            if !self.window_blurred {
+                sink.set_focus(false);
+            }
         }
         self.focused_embedded_key = next_key;
         self.focused_embedded_sink = index.map(|i| Rc::clone(&self.embedded_input_targets[i].sink));
@@ -305,7 +311,9 @@ impl HitTestState {
         if let Some(binding) = self.focused_embedded_binding.as_ref() {
             binding.set(true);
         }
-        if let Some(sink) = self.focused_embedded_sink.as_ref() {
+        if let Some(sink) = self.focused_embedded_sink.as_ref()
+            && !self.window_blurred
+        {
             sink.set_focus(true);
         }
         true

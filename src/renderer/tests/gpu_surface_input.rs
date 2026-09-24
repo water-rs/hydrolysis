@@ -1085,6 +1085,62 @@ fn hiding_the_focused_tab_moves_focus_to_the_shown_tab() {
     );
 }
 
+/// The window's own focus changes reach the surface holding keyboard focus:
+/// blur reports `Focus(false)` and the refocus `Focus(true)`, while keyboard
+/// focus inside the window is kept — as platforms report it. The winit arm
+/// that produces [`InputEvent::Focused`] is the one link a headless test
+/// cannot reach, so this drives the platform-neutral event the runner would
+/// have drained. water-rs/hydrolysis#139.
+#[test]
+fn window_focus_changes_reach_the_focused_surface() {
+    let log = ProbeLog::default();
+    let mut runtime = runtime_with(GpuSurface::new(InputProbe {
+        log: log.clone(),
+        caret: None,
+    }));
+    let start = Instant::now();
+    settled(&mut runtime, start);
+    press_at(&mut runtime, 10.0, 10.0);
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    let _ = log.drain();
+
+    // The window losing focus tells the surface — without moving keyboard
+    // focus off it.
+    runtime.push_input_event(InputEvent::Focused(false));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(116));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(false)],
+        "window blur must reach the focused surface"
+    );
+
+    // Keyboard focus inside the window is kept: the surface still owns the
+    // keys while the window is unfocused.
+    runtime.push_input_event(key_event("a", Code::KeyA, KeyState::Pressed));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(132));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Key {
+            pressed: true,
+            key: Key::Character("a".to_owned()),
+            code: Code::KeyA,
+            modifiers: W3cModifiers::empty(),
+            repeat: false,
+        }],
+        "keyboard focus inside the window is preserved across the blur"
+    );
+
+    // Regaining window focus restores the report — one Focus(true), to the
+    // surface that kept the keyboard focus.
+    runtime.push_input_event(InputEvent::Focused(true));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(148));
+    assert_eq!(
+        log.drain(),
+        vec![SurfaceInputEvent::Focus(true)],
+        "window refocus restores the focused surface's report"
+    );
+}
+
 /// The winit translation this backend delegates to `ui-events-winit` is not
 /// reachable from a headless test, so the two quirks the mapping depends on
 /// are pinned here directly: get either wrong and space stops activating

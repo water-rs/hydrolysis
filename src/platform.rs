@@ -196,6 +196,13 @@ pub enum InputEvent {
         width: u32,
         height: u32,
     },
+    /// The OS window gained (`true`) or lost (`false`) focus.
+    ///
+    /// This is the window's own activation, not a focus move inside it:
+    /// keyboard focus stays where it was, and the surface holding it is
+    /// told focus left and returned so it can report the transition (a
+    /// terminal's DECSET 1004 focus tracking, for one).
+    Focused(bool),
     CloseRequested,
 }
 
@@ -2275,6 +2282,9 @@ mod winit_impl {
                         x: logical.x as f32,
                         y: logical.y as f32,
                     });
+                }
+                WindowEvent::Focused(focused) => {
+                    self.pending_events.push(InputEvent::Focused(*focused));
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     self.pointer_position =

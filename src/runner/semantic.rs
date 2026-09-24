@@ -488,6 +488,7 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
             }
             InputEvent::ImeCommit { text } => window.core.handle_ime_commit(text.as_str()),
             InputEvent::ImeDisabled => window.core.handle_ime_disabled(),
+            InputEvent::Focused(focused) => window.core.handle_window_focused(focused),
             geometric => {
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",

@@ -516,6 +516,28 @@ impl SemanticCore {
         }
     }
 
+    /// The window itself gained or lost focus.
+    ///
+    /// Blur is not a focus move: the sink holding keyboard focus keeps it —
+    /// as platforms keep the focused element of an inactive window — and is
+    /// only told focus left (`Focus(false)`), hearing it return
+    /// (`Focus(true)`) on the refocus, which is what a terminal's focus
+    /// reporting (DECSET 1004) needs. Element-focus moves made while the
+    /// window is blurred emit no Focus events at all — both surfaces stay
+    /// reportably unfocused — so the holder hears a single `Focus(true)` on
+    /// the refocus.
+    pub(crate) fn handle_window_focused(&mut self, focused: bool) -> bool {
+        if self.hit_test.window_blurred == !focused {
+            return false;
+        }
+        self.hit_test.window_blurred = !focused;
+        let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() else {
+            return false;
+        };
+        sink.set_focus(focused);
+        true
+    }
+
     /// The embedded-input target registered for the surface owner behind
     /// `key`, if the surface is still mounted.
     pub(crate) fn embedded_index_for_key(&self, key: &InteractionKey) -> Option<usize> {
