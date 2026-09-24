@@ -219,6 +219,7 @@ impl HydrolysisRenderer {
         let enabled = renderer.read_signal(&value.enabled);
         let pointer_start = renderer.hit_test.pointer_targets.len();
         let gesture_start = renderer.gesture_engine.target_count();
+        let gesture_region_start = renderer.hit_test.gesture_regions.len();
         let cursor_start = renderer.hit_test.cursor_targets.len();
         let hover_start = renderer.hit_test.hover_targets.len();
         let scroll_start = renderer.hit_test.scroll_targets.len();
@@ -234,6 +235,10 @@ impl HydrolysisRenderer {
         renderer.hit_test.pointer_targets.truncate(pointer_start);
         renderer.ensure_active_pointer_drag_target_is_live();
         renderer.gesture_engine.truncate_targets(gesture_start);
+        renderer
+            .hit_test
+            .gesture_regions
+            .truncate(gesture_region_start);
         renderer.hit_test.cursor_targets.truncate(cursor_start);
         let removed_hover: Vec<_> = renderer.hit_test.hover_targets[hover_start..]
             .iter()

@@ -1325,13 +1325,33 @@ pub(crate) fn render_list_parts(
         // A selectable row owns the whole row rect as a press target: a
         // plain click selects it, the toggle modifier toggles it and Shift
         // extends the anchored range — while the controls and the content
-        // flushed after it still take their own presses first.
+        // flushed after it still take their own presses first. The press
+        // belongs to the row's own view — the content sub-view's root — so the
+        // ancestry check tells a gesture or tap registered inside the row (a
+        // nested `on_tap`) from one attached to that same root: a descendant's
+        // claims the press, the row's own handler coexists with it
+        // (water-rs/hydrolysis#175).
+        let mut content = Some(item.content);
         if let Some(selection) = state.borrow().row_selection.clone() {
             let hit_bounds = transformed_rect(ctx.hit_transform, row_rect);
             let key = crate::renderer::InteractionKey::for_rc(state, row_interaction_base + 3);
             let (_, press_slot, _) = ctx
                 .renderer_mut()
                 .bind_interaction_target(key, hit_bounds, &row_env);
+            let row_owner = {
+                let state_ref = state.borrow();
+                let mut cache = state_ref.item_cache.borrow_mut();
+                let subview = cache.entry(row_id, || {
+                    content
+                        .take()
+                        .expect("hydrolysis list row sub-view missing")
+                });
+                subview.ensure_built(ctx.renderer_mut(), &subtree_env);
+                subview.root_accessibility_identity()
+            };
+            if let Some(owner) = row_owner.as_ref() {
+                ctx.renderer_mut().push_input_owner(owner);
+            }
             ctx.renderer_mut().register_interactive_pointer_target(
                 hit_bounds,
                 press_slot,
@@ -1340,6 +1360,9 @@ pub(crate) fn render_list_parts(
                     true
                 },
             );
+            if row_owner.is_some() {
+                ctx.renderer_mut().pop_input_owner();
+            }
         }
 
         // Swipe-to-dismiss covers the whole row and is available whenever the
@@ -1516,10 +1539,6 @@ pub(crate) fn render_list_parts(
             // control and image in the row a descendant of its `ListItem`. When the
             // row emitted no node (a hidden or otherwise suppressed row), the subtree
             // suppresses the same way the old flush-wide suppression did.
-            let id = contents
-                .get_id(index)
-                .unwrap_or_else(|| panic!("hydrolysis list row {index} has no id"));
-            let content = item.content;
             #[cfg(feature = "accessibility")]
             let row_node_id =
                 ctx.renderer_mut()
@@ -1541,7 +1560,11 @@ pub(crate) fn render_list_parts(
             {
                 let state_ref = state.borrow();
                 let mut cache = state_ref.item_cache.borrow_mut();
-                let subview = cache.entry(id, move || content);
+                let subview = cache.entry(row_id, || {
+                    content
+                        .take()
+                        .expect("hydrolysis list row sub-view missing")
+                });
                 subview.flush_in_rect(
                     ctx.renderer_mut(),
                     render_ctx,

@@ -233,6 +233,11 @@ impl SemanticCore {
             return None;
         }
         let order = self.hit_test.next_hit_test_order();
+        self.hit_test.gesture_regions.push(GestureRegion {
+            bounds,
+            order,
+            owners: self.owner_stack.clone(),
+        });
         Some(self.gesture_engine.register_target(
             bounds,
             gesture,
@@ -256,6 +261,11 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        self.hit_test.gesture_regions.push(GestureRegion {
+            bounds,
+            order: target.order,
+            owners: self.owner_stack.clone(),
+        });
         self.gesture_engine
             .register_existing_target(target.with_bounds_depth_and_group(
                 bounds,

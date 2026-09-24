@@ -32,8 +32,7 @@ impl RenderNode {
                 );
             }
             RenderNode::Text(text) => {
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&text.accessibility_identity);
+                renderer.push_render_owner(&text.accessibility_identity);
                 // Read the content/alignment signals through `read_signal` so a change
                 // re-subscribes this frame and schedules a window refresh — the same
                 // cheap pump every other reactive leaf uses. (A bare reactive `Text`
@@ -41,8 +40,7 @@ impl RenderNode {
                 let styled = renderer.read_signal(&text.content);
                 let alignment = renderer.read_signal(&text.alignment);
                 text.emit_accessibility(renderer, Some(ctx), &styled, env);
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
                 let (state, scene) = renderer.state_and_scene_mut();
                 HydrolysisRenderer::render_styled_text_limited(
                     state,
@@ -55,8 +53,7 @@ impl RenderNode {
                 );
             }
             RenderNode::Container(container) => {
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&container.accessibility_identity);
+                renderer.push_render_owner(&container.accessibility_identity);
                 #[cfg(feature = "accessibility")]
                 let container_scope = container.accessibility_child_env.as_ref().map(|_| {
                     renderer.begin_accessibility_container(
@@ -68,8 +65,7 @@ impl RenderNode {
                 let child_env = container.accessibility_child_env.as_ref().unwrap_or(env);
                 #[cfg(not(feature = "accessibility"))]
                 let child_env = env;
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
                 for (child, rect) in container.children.iter().zip(container.placed.iter()) {
                     let child_ctx = ctx.child(
                         vello::kurbo::Affine::translate((f64::from(rect.x()), f64::from(rect.y()))),
@@ -154,8 +150,7 @@ impl RenderNode {
                 node.child.flush(renderer, ctx, &node.env);
             }
             RenderNode::Wrapper(node) => {
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&node.accessibility_identity);
+                renderer.push_render_owner(&node.accessibility_identity);
                 // Each effect re-applies through the shared `apply_*` helper, with
                 // a closure that flushes the child node under the wrapper's scoped
                 // environment — so reactive descendants reach their own nodes and
@@ -276,8 +271,7 @@ impl RenderNode {
                         }
                     }
                 }
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
             }
             RenderNode::SceneView(node) => {
                 // The drawing's own name and content, read every flush: content
@@ -290,8 +284,7 @@ impl RenderNode {
                         content.wants_input_events(),
                     )
                 };
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&node.accessibility_identity);
+                renderer.push_render_owner(&node.accessibility_identity);
                 let _focus_node = emit_graphics_image_accessibility(
                     renderer,
                     Some(ctx),
@@ -300,8 +293,7 @@ impl RenderNode {
                     content_value,
                     wants_input,
                 );
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
                 let mut scene = vello::Scene::new();
                 // Scope `scene2d` so its `&mut scene` borrow ends before `&scene` is
                 // appended below. `CheckedScene2D` validates every image brush at
@@ -351,8 +343,7 @@ impl RenderNode {
                         runtime.wants_input_events(),
                     )
                 };
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&node.accessibility_identity);
+                renderer.push_render_owner(&node.accessibility_identity);
                 let _focus_node = emit_graphics_image_accessibility(
                     renderer,
                     Some(ctx),
@@ -361,8 +352,7 @@ impl RenderNode {
                     content_value,
                     wants_input,
                 );
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
                 node.flush(
                     renderer,
                     ctx,
@@ -461,15 +451,13 @@ impl RenderNode {
             RenderNode::LazyStack(node) => node.flush(renderer, ctx, env),
             RenderNode::Collection(node) => node.flush(renderer, ctx),
             RenderNode::Widget(node) => {
-                #[cfg(feature = "accessibility")]
-                renderer.push_accessibility_owner(&node.accessibility_identity);
+                renderer.push_render_owner(&node.accessibility_identity);
                 // Re-render the leaf widget from its retained config so its handler
                 // re-reads live signals and re-emits interaction targets + a11y at the
                 // current bounds. A leaf render starts a fresh recursion depth.
                 renderer.render_depth = 0;
                 Rc::clone(&node.behavior).render(renderer, ctx, &node.env);
-                #[cfg(feature = "accessibility")]
-                renderer.pop_accessibility_owner();
+                renderer.pop_render_owner();
             }
         }
     }

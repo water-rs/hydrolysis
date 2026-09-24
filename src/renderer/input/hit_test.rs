@@ -53,12 +53,36 @@ pub(crate) struct ActiveDrag {
 }
 
 #[derive(Clone)]
+/// A gesture hit region registered this frame, mirrored from the gesture
+/// engine's target list: the press path weighs a press candidate against the
+/// gesture regions that outrank it, and the engine does not hand its bounds
+/// back out.
+pub(crate) struct GestureRegion {
+    /// Hit-test rectangle in window coordinates.
+    pub(crate) bounds: vello::kurbo::Rect,
+    /// The shared hit-test order taken at registration — comparable to a
+    /// pointer target's `order`, so a gesture region registered after a press
+    /// outranks it.
+    pub(crate) order: usize,
+    /// The owner chain the registration ran under — the retained nodes whose
+    /// subtrees were flushing, innermost last. The ancestry the press path
+    /// reads to tell a gesture registered inside a view from one attached to
+    /// the view itself.
+    pub(crate) owners: Vec<RetainedIdentity>,
+}
+
+#[derive(Clone)]
 pub(crate) struct PointerTarget {
     pub(crate) bounds: vello::kurbo::Rect,
     pub(crate) captures_drag: bool,
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) press_slot: Option<PressSlot>,
+    /// The retained node of the view the press belongs to. A gesture
+    /// registered inside a strict descendant of it claims the press; one
+    /// attached to this same view coexists. `None` — a press registered
+    /// outside any retained node — is never claimed.
+    pub(crate) claim_owner: Option<RetainedIdentity>,
     /// Replayable state-layer handles for the widget owning this target, so
     /// press feedback animates without a structural rebuild.
     pub(crate) interaction: Option<Rc<InteractionLayerHandles>>,
@@ -255,6 +279,10 @@ pub(crate) struct HitTestState {
     /// pointer targets read it at commit time because pointer events carry
     /// no modifier state of their own (toggle and Shift range selection).
     pub(crate) modifiers: Modifiers,
+    /// Gesture regions live this frame, parallel to `pointer_targets` — the
+    /// gesture engine owns the recognizers but not a bounds query the press
+    /// path needs.
+    pub(crate) gesture_regions: Vec<GestureRegion>,
 }
 
 impl HitTestState {
@@ -262,6 +290,7 @@ impl HitTestState {
         self.embedded_input_targets.clear();
         self.native_view_occlusions.clear();
         self.pointer_targets.clear();
+        self.gesture_regions.clear();
         self.cursor_targets.clear();
         self.hover_targets.clear();
         self.drop_targets.clear();
@@ -900,6 +929,30 @@ impl HydrolysisRenderer {
 
         for index in pointer_indices {
             let target = self.hit_test.pointer_targets[index].clone();
+            if target.press_slot.is_some()
+                && self
+                    .hit_test
+                    .gesture_regions
+                    .iter()
+                    .filter(|region| region.order > target.order && region.bounds.contains(point))
+                    .max_by_key(|region| region.order)
+                    .is_some_and(|region| Self::gesture_claims_press(region, &target))
+            {
+                // A gesture region nested inside this press's bounds claims
+                // the sequence: the innermost interactive target under the
+                // pointer wins. The recognizers were already activated above;
+                // skip the press so it neither focuses nor commits.
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    x,
+                    y,
+                    pointer_index = index,
+                    bounds = ?target.bounds,
+                    order = target.order,
+                    "nested gesture target claims press"
+                );
+                return refresh_requested || visual_changed;
+            }
             let keyboard_key = target.press_slot.as_ref().map(|slot| slot.key.clone());
             self.set_keyboard_focus(keyboard_key, false);
             refresh_requested |= self.set_focused_text_input(None);
@@ -994,6 +1047,18 @@ impl HydrolysisRenderer {
         }
         self.set_keyboard_focus(None, false);
         refresh_requested || visual_changed
+    }
+
+    /// `region` claims `press` when the press's owning view is a strict
+    /// ancestor of the region's owner — a gesture or tap registered by a
+    /// descendant of the view the press belongs to takes the sequence
+    /// (water-rs/hydrolysis#175). A handler attached to the press's own view
+    /// lands on the region's own owner — the same node, not a descendant — so
+    /// the press commits alongside it, as it does today.
+    fn gesture_claims_press(region: &GestureRegion, press: &PointerTarget) -> bool {
+        press.claim_owner.as_ref().is_some_and(|owner| {
+            region.owners.last() != Some(owner) && region.owners.contains(owner)
+        })
     }
 
     pub fn handle_pointer_up(
@@ -2233,6 +2298,7 @@ impl SemanticCore {
             depth,
             order,
             press_slot,
+            claim_owner: self.owner_stack.last().cloned(),
             interaction,
             action,
             keyboard_step: None,
@@ -2261,6 +2327,7 @@ impl SemanticCore {
             depth: self.render_depth,
             order,
             press_slot: None,
+            claim_owner: self.owner_stack.last().cloned(),
             interaction: None,
             action: Rc::new(RefCell::new(action)),
             keyboard_step: None,
@@ -2515,6 +2582,7 @@ impl SemanticCore {
             depth: self.render_depth,
             order,
             press_slot: Some(press_slot),
+            claim_owner: self.owner_stack.last().cloned(),
             interaction,
             action: Rc::new(RefCell::new(action)),
             keyboard_step: None,
@@ -2545,6 +2613,7 @@ impl SemanticCore {
             depth: self.render_depth,
             order,
             press_slot: Some(press_slot),
+            claim_owner: self.owner_stack.last().cloned(),
             interaction,
             action: Rc::new(RefCell::new(action)),
             keyboard_step: Some(Rc::new(RefCell::new(keyboard_step))),
