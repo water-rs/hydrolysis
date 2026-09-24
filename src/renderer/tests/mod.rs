@@ -13,6 +13,7 @@ mod gpu_surface_idle;
 mod gpu_surface_input;
 mod ime;
 mod layout_contract;
+mod lazy_cross;
 mod perf_full_rebuild;
 mod perf_scroll;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
