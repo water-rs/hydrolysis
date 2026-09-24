@@ -328,7 +328,10 @@ pub(crate) fn render_color_picker_parts(
             swatch_rect,
             RoundedRectRadii::from_single_radius(COLOR_SWATCH_RADIUS),
             &Brush::from(resolved_color_to_peniko(
-                Color::srgb(0, 0, 0).with_opacity(0.16).resolve(env).snapshot(),
+                Color::srgb(0, 0, 0)
+                    .with_opacity(0.16)
+                    .resolve(env)
+                    .snapshot(),
             )),
             1.0,
         );

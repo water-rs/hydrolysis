@@ -1,7 +1,7 @@
-use nami::Signal;
 use super::*;
 use core::ops::RangeInclusive;
 use core::time::Duration;
+use nami::Signal;
 use waterui::form::Calendar;
 use waterui::shape::{FixedRoundedRectangle, RoundedRectangle, ShapeExt as _};
 use waterui::theme::color::Surface;
@@ -813,7 +813,11 @@ fn date_picker_window_base(
                             apply_date.snapshot(),
                             apply_hour.snapshot(),
                             apply_minute.snapshot(),
-                            if uses_second { apply_second.snapshot() } else { 0 },
+                            if uses_second {
+                                apply_second.snapshot()
+                            } else {
+                                0
+                            },
                         );
                         apply_group.close_all();
                     }),

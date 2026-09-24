@@ -349,8 +349,9 @@ impl SemanticRuntime {
             .iter()
             .any(|popup| popup.window.state.snapshot() == waterui::window::WindowState::Closed)
         {
-            self.popup_windows
-                .retain(|popup| popup.window.state.snapshot() != waterui::window::WindowState::Closed);
+            self.popup_windows.retain(|popup| {
+                popup.window.state.snapshot() != waterui::window::WindowState::Closed
+            });
             self.window.refresh_requested = true;
         }
         let rebuilt = pump_semantic_window(&mut self.window, &self.env);
