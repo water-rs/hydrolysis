@@ -1671,7 +1671,8 @@ fn when_subtree_and_shared_signal_text_present_one_frame_state() {
     let classify = |snapshot: &crate::HeadlessSnapshot| -> (usize, usize) {
         let mut pill = 0usize;
         let mut ink = 0usize;
-        for px in snapshot.rgba8.chunks_exact(4) {
+        let (pixels, _) = snapshot.rgba8.as_chunks::<4>();
+        for px in pixels {
             let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
             if a > 0 && b > 170 && r < 100 && g < 100 {
                 pill += 1;
