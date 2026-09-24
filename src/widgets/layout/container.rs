@@ -1,7 +1,7 @@
 use crate::renderer::lazy::{LazyStackAxisConfig, lazy_stack_axis_config};
 use crate::renderer::{
     HydroNativeView, HydroState, estimate_layout_intrinsic, measure_layout_dimensions,
-    measure_transient_view_intrinsic, normalize_layout_view,
+    measure_transient_view_with_proposal, normalize_layout_view,
 };
 use nami::Signal;
 use std::rc::Rc;
@@ -49,6 +49,57 @@ impl HydroNativeView for Native<FixedContainer> {
     }
 }
 
+/// Sizes a virtualized lazy stack from the measurement its first item gives
+/// under the offered cross-axis extent — the same sample the retained
+/// [`LazyStackNode`](crate::renderer::tree::LazyStackNode) reads in
+/// `measure_item`. `cross` is the axis-negotiated extent on the stack's cross
+/// axis (`None` when the caller left it open); the item is measured with the
+/// main axis unspecified either way, since a virtualized stack lays items out
+/// at their intrinsic main extent.
+fn lazy_stack_sample_size(
+    state: &mut HydroState,
+    view: &Native<LazyContainer>,
+    env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
+    cross: Option<f32>,
+) -> LayoutSize {
+    let (layout, children) = view.as_inner().as_parts();
+    let child_count = children.len().get();
+    if child_count == 0 {
+        return LayoutSize::zero();
+    }
+    let Some(axis) = lazy_stack_axis_config(layout, view.as_inner().direction()) else {
+        // Non-virtualized collection (AbsoluteLayout/ZStackLayout overlay):
+        // measure like a FixedContainer over its whole materialized membership.
+        let views = materialize_all(children, env);
+        return estimate_layout_intrinsic(layout, views.iter(), state, env, theme);
+    };
+    let item_proposal = match &axis {
+        LazyStackAxisConfig::Vertical { .. } => ProposalSize::new(cross, None),
+        LazyStackAxisConfig::Horizontal { .. } => ProposalSize::new(None, cross),
+    };
+    let sample = children
+        .get_view(0)
+        .map(|view| normalize_layout_view(view, env))
+        .map(|view| measure_transient_view_with_proposal(&view, item_proposal, state, env, theme))
+        .unwrap_or_else(|| panic!("LazyContainer failed to materialize child at index 0"));
+    let count = child_count as f64;
+    match axis {
+        LazyStackAxisConfig::Vertical { spacing, .. } => {
+            let width = f64::from(sample.width);
+            let height = f64::from(sample.height) * count
+                + f64::from(spacing.get()) * (count - 1.0).max(0.0);
+            LayoutSize::new(width as f32, height as f32)
+        }
+        LazyStackAxisConfig::Horizontal { spacing, .. } => {
+            let width =
+                f64::from(sample.width) * count + f64::from(spacing.get()) * (count - 1.0).max(0.0);
+            let height = f64::from(sample.height);
+            LayoutSize::new(width as f32, height as f32)
+        }
+    }
+}
+
 impl HydroNativeView for Native<LazyContainer> {
     fn intrinsic(
         state: &mut HydroState,
@@ -56,37 +107,7 @@ impl HydroNativeView for Native<LazyContainer> {
         env: &Environment,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        let (layout, children) = view.as_inner().as_parts();
-        let child_count = children.len().get();
-        if child_count == 0 {
-            return LayoutSize::zero();
-        }
-        let Some(axis) = lazy_stack_axis_config(layout, view.as_inner().direction()) else {
-            // Non-virtualized collection (AbsoluteLayout/ZStackLayout overlay):
-            // measure like a FixedContainer over its whole materialized membership.
-            let views = materialize_all(children, env);
-            return estimate_layout_intrinsic(layout, views.iter(), state, env, theme);
-        };
-        let sample = children
-            .get_view(0)
-            .map(|view| normalize_layout_view(view, env))
-            .map(|view| measure_transient_view_intrinsic(&view, state, env, theme))
-            .unwrap_or_else(|| panic!("LazyContainer failed to materialize child at index 0"));
-        let count = child_count as f64;
-        match axis {
-            LazyStackAxisConfig::Vertical { spacing, .. } => {
-                let width = f64::from(sample.width);
-                let height = f64::from(sample.height) * count
-                    + f64::from(spacing.get()) * (count - 1.0).max(0.0);
-                LayoutSize::new(width as f32, height as f32)
-            }
-            LazyStackAxisConfig::Horizontal { spacing, .. } => {
-                let width = f64::from(sample.width) * count
-                    + f64::from(spacing.get()) * (count - 1.0).max(0.0);
-                let height = f64::from(sample.height);
-                LayoutSize::new(width as f32, height as f32)
-            }
-        }
+        lazy_stack_sample_size(state, view, env, theme, None)
     }
 
     fn dimensions(
@@ -97,16 +118,36 @@ impl HydroNativeView for Native<LazyContainer> {
         proposal: ProposalSize,
     ) -> waterui_core::layout::ViewDimensions {
         let (layout, children) = view.as_inner().as_parts();
-        if lazy_stack_axis_config(layout, view.as_inner().direction()).is_some() {
-            // Virtualized stacks size from the intrinsic estimate (proposal is
-            // applied per-row at render time, not to the whole stack here).
-            return waterui_core::layout::ViewDimensions::new(Self::intrinsic(
-                state, view, env, theme,
-            ));
+        match lazy_stack_axis_config(layout, view.as_inner().direction()) {
+            Some(LazyStackAxisConfig::Vertical { .. }) => {
+                // The cross answer is what the first row measures under the
+                // offered width — an intrinsic measure would report the row's
+                // unwrapped natural width, which exceeds the proposal whenever
+                // the content is wider than it.
+                waterui_core::layout::ViewDimensions::new(lazy_stack_sample_size(
+                    state,
+                    view,
+                    env,
+                    theme,
+                    proposal.width,
+                ))
+            }
+            Some(LazyStackAxisConfig::Horizontal { .. }) => {
+                waterui_core::layout::ViewDimensions::new(lazy_stack_sample_size(
+                    state,
+                    view,
+                    env,
+                    theme,
+                    proposal.height,
+                ))
+            }
+            // Non-virtualized collection: proposal-aware sizing via the layout,
+            // so a stretch-both overlay (AbsoluteLayout) reports the offered
+            // window size.
+            None => {
+                let views = materialize_all(children, env);
+                measure_layout_dimensions(layout, views.iter(), proposal, state, env, theme)
+            }
         }
-        // Non-virtualized collection: proposal-aware sizing via the layout, so a
-        // stretch-both overlay (AbsoluteLayout) reports the offered window size.
-        let views = materialize_all(children, env);
-        measure_layout_dimensions(layout, views.iter(), proposal, state, env, theme)
     }
 }
