@@ -86,9 +86,7 @@ fn expanded_panel_survives_on_offscreen_mount() {
     let mut app = ui()
         .viewport(300, 300)
         .theme(Material3::defaults())
-        .mount_offscreen(move || {
-            stateful_panel(AccessibilityState::new().expanded(Some(true)))
-        });
+        .mount_offscreen(move || stateful_panel(AccessibilityState::new().expanded(Some(true))));
     app.settle();
     expanded_panel_survives(app.tree());
 }
@@ -116,9 +114,7 @@ fn selected_panel_survives_on_offscreen_mount() {
 fn toggled_panel_survives_on_semantic_mount() {
     let mut app = ui()
         .viewport(300, 300)
-        .mount(move || {
-            stateful_panel(AccessibilityState::new().checked(Some(true)))
-        });
+        .mount(move || stateful_panel(AccessibilityState::new().checked(Some(true))));
     app.settle();
     toggled_panel_survives(app.tree());
 }
@@ -128,9 +124,7 @@ fn toggled_panel_survives_on_offscreen_mount() {
     let mut app = ui()
         .viewport(300, 300)
         .theme(Material3::defaults())
-        .mount_offscreen(move || {
-            stateful_panel(AccessibilityState::new().checked(Some(true)))
-        });
+        .mount_offscreen(move || stateful_panel(AccessibilityState::new().checked(Some(true))));
     app.settle();
     toggled_panel_survives(app.tree());
 }
