@@ -29,9 +29,35 @@ impl PopupWindowManager {
         Self(Rc::new(show))
     }
 
-    pub(crate) fn show(&self, window: Window) {
-        (self.0)(window);
+    /// Mounts `window` re-rooted in `env` — the environment of the view that
+    /// opened the popup (water-rs/hydrolysis#140), so its `.state(&value)`
+    /// and `.with(...)` overlays reach the item actions' extractors exactly
+    /// as they do for inline views.
+    pub(crate) fn show(&self, window: Window, env: &Environment) {
+        (self.0)(window_in_opening_environment(window, env));
     }
+}
+
+/// Rebuilds `window`'s content inside `env` wholesale: the retained tree the
+/// runner captures for the popup then inherits the opening view's
+/// environment — `.state(&value)`, themes, `.with(...)` values — instead of
+/// the runtime's bare root. `Metadata<Environment>` replaces the environment
+/// for the subtree it wraps, so values the popup itself pushes (`.with(...)`,
+/// `.state(&...)` inside its own content) still layer on top. The popup's
+/// frame origin becomes the subtree's `HydrolysisWindowOrigin`, the same
+/// value the input dispatcher installs for a root window, so a nested popup
+/// opened from this window anchors to it.
+pub(crate) fn window_in_opening_environment(mut window: Window, env: &Environment) -> Window {
+    let frame = window.frame.get();
+    let content_env = env.extending(HydrolysisWindowOrigin {
+        x: frame.x(),
+        y: frame.y(),
+    });
+    let content = window.content;
+    window.content = AnyViewBuilder::new(move || {
+        AnyView::new(Metadata::new(content.build(), content_env.clone()))
+    });
+    window
 }
 
 #[derive(Clone)]
@@ -40,6 +66,9 @@ pub(crate) struct ContextMenuTarget {
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) items: nami::Computed<Vec<ResolvedMenuItem>>,
+    /// The environment of the view that declared the menu — its popup opens
+    /// inside it, so `.state(&value)` overlays reach the item actions.
+    pub(crate) env: Environment,
 }
 
 #[derive(Clone)]
@@ -244,7 +273,7 @@ pub(crate) fn popup_menu_window(
                                 .expect(
                                     "hydrolysis popup menus require PopupWindowManager in environment",
                                 )
-                                .show(window);
+                                .show(window, &env);
                         },
                     );
                     rows.push(AnyView::new(button));
@@ -332,7 +361,7 @@ pub(crate) fn semantic_popup_menu_window(
                                 .expect(
                                     "hydrolysis popup menus require PopupWindowManager in environment",
                                 )
-                                .show(window);
+                                .show(window, &env);
                         },
                     );
                     rows.push(AnyView::new(button));
@@ -959,7 +988,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis popup menus require PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         true
     }
@@ -984,7 +1013,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis popup menus require PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         self.request_refresh();
         true
@@ -1011,7 +1040,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis picker menus require PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         self.request_refresh();
         true
@@ -1044,7 +1073,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis picker menus require PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         self.request_refresh();
         true
@@ -1072,7 +1101,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis color picker requires PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         true
     }
@@ -1093,7 +1122,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis date picker requires PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         true
     }
@@ -1116,7 +1145,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis color picker requires PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         self.request_refresh();
         true
@@ -1138,7 +1167,7 @@ impl SemanticCore {
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis date picker requires PopupWindowManager in environment")
-            .show(window);
+            .show(window, env);
         self.popup_menu.active_popup_menu_group = Some(group);
         self.request_refresh();
         true
@@ -1148,8 +1177,9 @@ impl SemanticCore {
         &mut self,
         bounds: vello::kurbo::Rect,
         items: nami::Computed<Vec<ResolvedMenuItem>>,
+        env: &Environment,
     ) {
-        self.register_context_menu_target_data(bounds, items, self.render_depth);
+        self.register_context_menu_target_data(bounds, items, self.render_depth, env);
     }
 
     pub(crate) fn register_context_menu_target_data(
@@ -1157,6 +1187,7 @@ impl SemanticCore {
         bounds: vello::kurbo::Rect,
         items: nami::Computed<Vec<ResolvedMenuItem>>,
         depth: usize,
+        env: &Environment,
     ) {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1167,6 +1198,7 @@ impl SemanticCore {
             depth,
             order,
             items,
+            env: env.clone(),
         });
     }
 }
