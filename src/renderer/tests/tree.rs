@@ -1574,3 +1574,177 @@ fn segmented_picker_draws_its_label_above_the_segment_row() {
         "the labelled segment row must keep exactly the unlabelled row's height"
     );
 }
+
+/// A signal whose `get()` writes `label` — so the write lands inside the
+/// frame's leaf reads (measure/flush), after that frame's `tree.patch`, while
+/// its `when` structural patch still sits in `pending`. `watch` never invokes
+/// `get()`, so nothing fires early inside `set()` the way a `Map`'s `f` does.
+#[derive(Clone)]
+struct MidFlushWrite {
+    armed: Rc<Cell<u8>>,
+    label: nami::Binding<Option<waterui_core::Str>>,
+}
+
+impl nami::Signal for MidFlushWrite {
+    type Output = waterui_core::Str;
+    type Guard = ();
+
+    fn get(&self) -> Self::Output {
+        // Fire the write once per arming: a `get()` that re-set `label` on
+        // every read would keep rewriting `pending` every frame — the mount
+        // would never land while the churn continued.
+        let armed = self.armed.replace(0);
+        match armed {
+            1 => self.label.set(None),
+            2 => self.label.set(Some(waterui_core::Str::from("HELLO"))),
+            _ => {}
+        }
+        waterui_core::Str::from_static("probe")
+    }
+
+    fn watch(&self, _watcher: impl Fn(nami::watcher::Context<Self::Output>) + 'static) {}
+}
+
+/// Issue #155 (`water-rs/hydrolysis`): `when` + `text` over one signal tear —
+/// a `set()` flips the leaf's signal inside the same turn, while the `when`
+/// structural patch (`Dynamic` pending view) lands later. Any frame presented
+/// between the two points shows a mounted-but-empty subtree. Every presented
+/// frame must be internally consistent: the subtree is either absent or shows
+/// the leaf's current content.
+#[test]
+fn when_subtree_and_shared_signal_text_present_one_frame_state() {
+    use core::time::Duration;
+    use std::time::Instant;
+    use waterui::graphics::color::Srgb;
+    use waterui::reactive::binding;
+    use waterui::widget::condition::when;
+    use waterui_core::Str;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_text::text;
+
+    // The issue's pair: `when` mounts the subtree on `is_some`; the leaf inside
+    // it reads `unwrap_or_default` — both derive from the same `Binding`.
+    let label = binding(Some(Str::from("HELLO")));
+    // `armed` flags the write `MidFlushWrite::get` performs inside the flush;
+    // `drive` only raises `patch_requested` so the pump runs a refresh frame.
+    let armed = Rc::new(Cell::new(0u8));
+    let drive = binding::<u32>(0u32);
+    let builder = {
+        let label = label.clone();
+        let armed = Rc::clone(&armed);
+        let drive = drive.clone();
+        AnyViewBuilder::<AnyView>::new(move || {
+            let leaf = label.clone();
+            let label2 = label.clone();
+            let label3 = label.clone();
+            // Read into the view so `drive.set` schedules a refresh pump; the
+            // mapped text is always empty so it adds no glyph ink to counts.
+            let drive_text = drive.clone();
+            AnyView::new(vstack((
+                // Read first in flush order: its `get()` writes `label` while
+                // this frame's `tree.patch` is already past.
+                text(
+                    MidFlushWrite {
+                        armed: Rc::clone(&armed),
+                        label: label3,
+                    }
+                    .computed(),
+                ),
+                when(label2.is_some(), move || {
+                    text(leaf.map(|v| v.unwrap_or_default()).computed())
+                        .padding()
+                        .background(Srgb::new_u8(0x22, 0x22, 0xEE))
+                }),
+                text(drive_text.map(|_| Str::from_static("")).computed()),
+            )))
+        })
+    };
+    let env = test_environment();
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 320, 160, MinimalTestTheme::default());
+
+    // Pill ink = saturated blue background fill; glyph ink = dark default
+    // foreground. A mounted subtree paints pill pixels; a mounted subtree
+    // showing the current text paints pill AND glyph pixels at the "HELLO"
+    // level; a mounted-but-empty subtree paints pill pixels with only the
+    // probe's glyph pixels.
+    let classify = |snapshot: &crate::HeadlessSnapshot| -> (usize, usize) {
+        let mut pill = 0usize;
+        let mut ink = 0usize;
+        let (pixels, _) = snapshot.rgba8.as_chunks::<4>();
+        for px in pixels {
+            let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+            if a > 0 && b > 170 && r < 100 && g < 100 {
+                pill += 1;
+            } else if a > 0 && r < 90 && g < 90 && b < 100 {
+                ink += 1;
+            }
+        }
+        (pill, ink)
+    };
+
+    let start = Instant::now();
+    // Let the initial build settle; the first presented frame mounts the
+    // subtree with "HELLO".
+    let baseline = rt.pump_at(true, start);
+    let (pill, ink) = classify(&baseline.snapshot.expect("baseline frame"));
+    eprintln!("baseline: pill={pill} ink={ink}");
+    assert!(pill > 0 && ink > 0, "baseline must show subtree + HELLO");
+
+    let mut frames = Vec::new();
+    // Some -> None through an ordinary between-pump `set()`.
+    label.set(None);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(16 * (i as u64 + 1)));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("plain None frame {i}: pill={pill} ink={ink}");
+            frames.push(("plain", false, i, pill, ink));
+        }
+    }
+    // Remount, then arm the mid-flush write — `MidFlushWrite::get` runs
+    // `label.set(None)` inside `tree.flush`, after this frame's `tree.patch`.
+    label.set(Some(Str::from("HELLO")));
+    let _ = rt.pump_at(true, start + Duration::from_millis(64));
+    armed.set(1);
+    drive.set(1u32);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(80 + 16 * i as u64));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("midflush None frame {i}: pill={pill} ink={ink}");
+            frames.push(("midflush", false, i, pill, ink));
+        }
+    }
+    armed.set(2);
+    drive.set(2u32);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(128 + 16 * i as u64));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("midflush Some frame {i}: pill={pill} ink={ink}");
+            frames.push(("midflush", true, i, pill, ink));
+        }
+    }
+
+    for (edge, label_is_some, i, pill, ink) in &frames {
+        if *label_is_some {
+            // `label` is Some: the subtree may be absent (its mount not yet
+            // applied) but a mounted subtree must show HELLO — pill ink with
+            // only the probe's glyph pixels is a mounted-but-empty tear.
+            assert!(
+                *pill == 0 || *ink >= 150,
+                "issue #155 torn frame on {edge}->Some (frame {i}): mounted subtree \
+                 (pill={pill}) presented without the current text (ink={ink})"
+            );
+        } else {
+            // `label` is None: any mounted subtree at all is the tear — an
+            // unmount delivered mid-flush must not still present the subtree.
+            assert_eq!(
+                *pill, 0,
+                "issue #155 torn frame on {edge}->None (frame {i}): subtree still \
+                 mounted (pill={pill}, ink={ink}) after its content left"
+            );
+        }
+    }
+}

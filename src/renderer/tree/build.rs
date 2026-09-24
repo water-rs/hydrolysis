@@ -954,7 +954,7 @@ impl RenderNode {
             source,
             pending,
             env: env.clone(),
-            child,
+            child: RefCell::new(child),
         }))
     }
 }
