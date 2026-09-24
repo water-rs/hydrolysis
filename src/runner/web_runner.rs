@@ -16,6 +16,7 @@ use executor_core::{
     try_init_local_executor,
 };
 use js_sys::Uint8Array;
+use nami::Signal;
 use parley::fontique::{Blob, FontInfoOverride};
 use serde::Deserialize;
 use wasm_bindgen::{JsCast, closure::Closure};
@@ -203,7 +204,7 @@ impl BrowserRunner {
             }
         }
         let should_close = handle_input_events(&mut self.runtime, &self.env);
-        if should_close || self.runtime.window.state.get() == WindowState::Closed {
+        if should_close || self.runtime.window.state.snapshot() == WindowState::Closed {
             return false;
         }
         let _ = advance_runtime(&mut self.runtime, &self.env, Instant::now());
