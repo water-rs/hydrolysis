@@ -950,11 +950,18 @@ impl RenderNode {
             Some(content) => RenderNode::build(content, env, renderer),
             None => RenderNode::build(AnyView::new(()), env, renderer),
         };
+        let child = Rc::new(RefCell::new(child));
+        // The dispatch measure (`measure_dynamic`) reaches this child through
+        // the identity registry once the `Dynamic` has connected.
+        renderer
+            .state
+            .measurement
+            .register_dynamic_node(identity, &child);
         RenderNode::Dynamic(Box::new(DynamicHostNode {
             source,
             pending,
             env: env.clone(),
-            child: RefCell::new(child),
+            child,
         }))
     }
 }
