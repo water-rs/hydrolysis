@@ -1262,9 +1262,12 @@ impl SemanticCore {
     /// resolved from it where the widget linked one, so a focusable node
     /// needs no pointer target to take keyboard focus.
     ///
-    /// The caret follows the move: landing on a text input focuses it for
-    /// editing, and landing on a non-text node (or none) ends editing
-    /// exactly as a pointer press on one does.
+    /// The caret follows the semantic focus only onto a text input:
+    /// landing on a text node focuses it for editing, while landing on a
+    /// non-text node (or none) leaves the caret where it is — UI focus is
+    /// independent of the tree's focus. Moves that carry keyboard focus —
+    /// traversal and pointer presses — end editing on a non-text target
+    /// through their own `set_focused_text_input` call (#95).
     #[cfg(feature = "accessibility")]
     pub(crate) fn set_keyboard_focus_node(
         &mut self,
@@ -1281,7 +1284,9 @@ impl SemanticCore {
         let embedded = node.and_then(|node| self.embedded_index_for_node(node));
         let mut changed = self.set_keyboard_focus_impl(key, node, visible);
         changed |= self.hit_test.set_embedded_focus_index(embedded);
-        changed |= self.set_focused_text_input(text_input);
+        if let Some(index) = text_input {
+            changed |= self.set_focused_text_input(Some(index));
+        }
         changed
     }
 
@@ -1361,7 +1366,21 @@ impl SemanticCore {
         }
         let leaving = self.focused_candidate_order();
         if self.hit_test.keyboard_focus != focus || node_changed {
-            if let Some(binding) = self.hit_test.keyboard_focus_binding.take() {
+            // A `.focused` lens on the field still holding the caret is owned
+            // by the text machinery: semantic focus moving to a non-text node
+            // leaves UI focus — and the binding — on the field. Only a
+            // transition that actually moves the caret (a new text target) or
+            // ends text focus lets this write stand.
+            let caret_keeps_binding = self.hit_test.keyboard_focus.is_some()
+                && self.hit_test.keyboard_focus == self.text_editing.focused_key()
+                && !self
+                    .text_editing
+                    .text_input_targets
+                    .iter()
+                    .any(|target| Some(&target.interaction_key) == focus.as_ref());
+            if let Some(binding) = self.hit_test.keyboard_focus_binding.take()
+                && !caret_keeps_binding
+            {
                 binding.set(false);
             }
             self.hit_test.keyboard_focus = focus;
