@@ -11,7 +11,7 @@ use accesskit::{
 use std::rc::Rc;
 use waterui_core::Environment;
 use waterui_core::Native;
-use waterui_core::layout::Size as LayoutSize;
+use waterui_core::layout::{ProposalSize, Size as LayoutSize};
 use waterui_layout::scroll::{Axis as ScrollAxis, ScrollView};
 
 /// Width of the grabbable scrollbar gutter along the viewport edge, in logical
@@ -33,6 +33,24 @@ impl HydroNativeView for Native<ScrollView> {
     ) -> LayoutSize {
         let (_axis, content, _controller) = view.as_inner().as_parts();
         measure_view_intrinsic(content, state, env, theme)
+    }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> waterui_core::layout::ViewDimensions {
+        // A scroll fills the offered extent on bounded axes — answering the
+        // content's intrinsic would report through the view path a width the
+        // viewport clips anyway (and can exceed the proposal when the content
+        // is wider, as in water-rs/waterui#1232).
+        let intrinsic = Self::intrinsic(state, view, env, theme);
+        waterui_core::layout::ViewDimensions::new(LayoutSize::new(
+            proposal.width.unwrap_or(intrinsic.width),
+            proposal.height.unwrap_or(intrinsic.height),
+        ))
     }
 }
 
