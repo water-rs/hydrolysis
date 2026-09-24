@@ -92,8 +92,8 @@ fn lazy_stack_sample_size(
             LayoutSize::new(width as f32, height as f32)
         }
         LazyStackAxisConfig::Horizontal { spacing, .. } => {
-            let width =
-                f64::from(sample.width) * count + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
+            let width = f64::from(sample.width) * count
+                + f64::from(spacing.snapshot()) * (count - 1.0).max(0.0);
             let height = f64::from(sample.height);
             LayoutSize::new(width as f32, height as f32)
         }

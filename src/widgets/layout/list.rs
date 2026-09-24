@@ -161,7 +161,7 @@ impl ListRowSelection {
     /// indices, so a range write resolves the anchor's position the same way
     /// the row loop does.
     fn index_of(&self, id: ListItemId) -> Option<usize> {
-        (0..nami::Signal::get(&self.contents.len()))
+        (0..nami::Signal::snapshot(&self.contents.len()))
             .find(|index| self.contents.get_id(*index) == Some(id))
     }
 
@@ -194,11 +194,11 @@ impl ListRowSelection {
             }
             ListSelection::Multiple(selection) => {
                 if modifiers.control || modifiers.super_key {
-                    let mut selected = selection.get();
-                    if !selected.insert(id) {
-                        selected.remove(&id);
-                    }
-                    selection.set(selected);
+                    selection.with_mut(|selected| {
+                        if !selected.insert(id) {
+                            selected.remove(&id);
+                        }
+                    });
                 } else {
                     selection.set(std::collections::BTreeSet::from([id]));
                 }
