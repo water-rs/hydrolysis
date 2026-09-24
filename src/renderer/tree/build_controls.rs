@@ -187,7 +187,7 @@ impl RenderNode {
         let stretch = <ResolvedMenu as waterui_core::NativeView>::stretch_axis(&menu);
         // The label sub-view (created by `from_resolved`) is painted with the
         // theme and built by the layout-time prepare pass before first measure.
-        let state = Rc::new(RefCell::new(MenuRenderState::from_resolved(menu)));
+        let state = Rc::new(RefCell::new(MenuRenderState::from_resolved(menu, env)));
         Self::build_widget(state, stretch, env)
     }
 
