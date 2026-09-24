@@ -264,41 +264,42 @@ hydrolysis = { path = "." }
 
 # The framework revision that lets `SceneContent` receive input
 # (water-rs/waterui#1189), takes the executor's refresh rate from the host
-# (water-rs/waterui#1201), and carries `SubView::is_empty` — the §4.4
-# membership answer this backend implements (water-rs/waterui#1209). Every
-# framework crate in the graph comes from the same revision so the graph
-# holds one copy of each; drop these entries once a waterui release carries
-# those changes.
-waterui = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-assets-core = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-assets-macros = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-assets-planner = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-backend-core = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-controls = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-core = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-dylib = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-form = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-graphics = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-icon = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-inspector-protocol = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-internal = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-layout = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-locale = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-macros = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-map = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-mcp = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-mcp-protocol = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-media = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-navigation = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-preview-protocol = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-shape = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-testing = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-text = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-url = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-video = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-watcher-set = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
-waterui-webview = { git = "https://github.com/water-rs/waterui", rev = "58849042e4848c409266d1b950a0775b9c9ef3ab" }
+# (water-rs/waterui#1201), carries `SubView::is_empty` — the §4.4
+# membership answer this backend implements (water-rs/waterui#1209) — and
+# defines the framework-owned `ListSelection` this backend renders
+# (water-rs/waterui#1226). Every framework crate in the graph comes from
+# the same revision so the graph holds one copy of each; drop these
+# entries once a waterui release carries those changes.
+waterui = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-assets-core = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-assets-macros = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-assets-planner = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-backend-core = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-controls = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-core = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-dylib = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-form = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-graphics = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-icon = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-inspector-protocol = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-internal = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-layout = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-locale = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-macros = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-map = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-mcp = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-mcp-protocol = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-media = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-navigation = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-preview-protocol = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-shape = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-testing = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-text = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-url = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-video = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-watcher-set = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
+waterui-webview = { git = "https://github.com/water-rs/waterui", rev = "4e4dbddf5a8139673ed5ac362e28e5ba5b182c78" }
 
 # The Material 3 theme must implement the five-argument
 # `WidgetTheme::draw_button_chrome` contract added for

@@ -21,28 +21,29 @@ use accesskit::{
 };
 #[cfg(feature = "accessibility")]
 use waterui::accessibility::{AccessibilityHidden, AccessibilityStateSignal};
-use waterui::component::list::{ListConfig, Move};
+use waterui::component::list::{ListConfig, ListItem, ListSelection, Move};
 use waterui::gesture::{DragEvent, DragGesture, Gesture, GesturePhase};
 use waterui_core::handler::{BoxedAction, boxed_action};
 use waterui_core::id::{Id as RawId, SelfId};
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
-use waterui_core::views::Views;
+use waterui_core::views::{SharedAnyViews, Views};
 use waterui_core::{Environment, Native};
 use waterui_layout::scroll::Axis as ScrollAxis;
 use waterui_text::Text;
 
+use crate::platform::Modifiers;
 use crate::renderer::lazy::VirtualExtentIndex;
 use crate::renderer::resolved_color_to_peniko;
 use crate::widgets::draw_scroll_indicators;
-use nami::SignalExt as _;
 use nami::watcher::BoxWatcherGuard;
+use nami::{Computed, SignalExt as _};
 use waterui::theme::color;
 use waterui_backend_core::widget::{Brush, DrawContext as _};
 use waterui_core::resolve::Resolvable as _;
 
 /// The stable per-row id used to key the retained content sub-view cache, matching
 /// the id `ListConfig::contents` (a `SharedAnyViews<ListItem>`) yields per index.
-type ListItemId = SelfId<RawId>;
+pub(crate) type ListItemId = SelfId<RawId>;
 
 #[derive(Clone, Copy)]
 struct ListViewportAnchor {
@@ -104,6 +105,107 @@ impl RowBinding {
         height: 0.0,
         total_rows: 0,
     };
+}
+
+/// The list's row-selection state, shared by every input path — pointer,
+/// keyboard and accessibility — so all of them write the same erased
+/// `ListSelection` binding under the same rules: a plain click selects, the
+/// toggle modifier toggles the clicked row in multi mode, and Shift extends a
+/// range from the anchor the last non-Shift write set (water-rs/waterui#1226).
+pub(crate) struct ListRowSelection {
+    /// The erased selection `ListConfig` carries — keyed by the same row ids
+    /// `contents.get_id` reports.
+    selection: ListSelection<ListItemId>,
+    /// Row ids by index, resolved for Shift-range writes.
+    contents: SharedAnyViews<ListItem>,
+    /// The row a Shift range extends from — the last row written without
+    /// Shift, or the list's first row when nothing has been written yet.
+    anchor: Cell<Option<ListItemId>>,
+}
+
+impl ListRowSelection {
+    /// Shares the config's selection when the list is selectable; `None` on
+    /// `ListSelection::None`, so a non-selectable list keeps its old input
+    /// behaviour — no row press target, no selected state.
+    fn new(
+        selection: &ListSelection<ListItemId>,
+        contents: SharedAnyViews<ListItem>,
+    ) -> Option<Rc<Self>> {
+        match selection {
+            ListSelection::None => None,
+            _ => Some(Rc::new(Self {
+                selection: selection.clone(),
+                contents,
+                anchor: Cell::new(None),
+            })),
+        }
+    }
+
+    /// Whether the row is selected, as a signal the flush reads like any other
+    /// row state — a binding write repaints the row's chrome.
+    pub(crate) fn is_selected(&self, id: ListItemId) -> Computed<bool> {
+        match &self.selection {
+            ListSelection::None => nami::constant(false).computed(),
+            ListSelection::Single(selection) => selection
+                .clone()
+                .map(move |current| current == Some(id))
+                .computed(),
+            ListSelection::Multiple(selection) => selection
+                .clone()
+                .map(move |current| current.contains(&id))
+                .computed(),
+        }
+    }
+
+    /// The index `id` currently occupies — Shift ranges are measured in
+    /// indices, so a range write resolves the anchor's position the same way
+    /// the row loop does.
+    fn index_of(&self, id: ListItemId) -> Option<usize> {
+        (0..nami::Signal::get(&self.contents.len()))
+            .find(|index| self.contents.get_id(*index) == Some(id))
+    }
+
+    /// Writes a row interaction into the selection binding: plain selects the
+    /// row (and anchors the next range), the toggle modifier toggles the row
+    /// in multi mode (also anchoring), and Shift writes the whole range
+    /// between the anchor and this row without moving the anchor.
+    pub(crate) fn write(&self, index: usize, id: ListItemId, modifiers: Modifiers) {
+        match &self.selection {
+            ListSelection::None => {}
+            ListSelection::Single(selection) => {
+                selection.set(Some(id));
+            }
+            ListSelection::Multiple(selection) if modifiers.shift => {
+                let anchor = self
+                    .anchor
+                    .get()
+                    .and_then(|anchor| self.index_of(anchor))
+                    .unwrap_or(0);
+                let (start, end) = if anchor <= index {
+                    (anchor, index)
+                } else {
+                    (index, anchor)
+                };
+                selection.set(
+                    (start..=end)
+                        .filter_map(|row| self.contents.get_id(row))
+                        .collect(),
+                );
+            }
+            ListSelection::Multiple(selection) => {
+                if modifiers.control || modifiers.super_key {
+                    let mut selected = selection.get();
+                    if !selected.insert(id) {
+                        selected.remove(&id);
+                    }
+                    selection.set(selected);
+                } else {
+                    selection.set(std::collections::BTreeSet::from([id]));
+                }
+                self.anchor.set(Some(id));
+            }
+        }
+    }
 }
 
 /// A row being swiped horizontally, or springing back after release.
@@ -187,6 +289,9 @@ pub(crate) struct ListRenderState {
     /// Row count the resolved chrome was built for, so a list that renders
     /// before its rows exist re-resolves once they do.
     sections_resolved_for: Cell<Option<usize>>,
+    /// The list's row-selection state shared by pointer, keyboard and
+    /// accessibility input; `None` when the list is not selectable.
+    row_selection: Option<Rc<ListRowSelection>>,
     /// Collection membership watcher.
     _guard: BoxWatcherGuard,
 }
@@ -253,8 +358,10 @@ impl ListRenderState {
             rows_dirty_for_watch.set(true);
             signals.request_refresh();
         });
+        let row_selection = ListRowSelection::new(&config.selection, config.contents.clone());
         Self {
             config,
+            row_selection,
             extent_index: Rc::new(RefCell::new(VirtualExtentIndex::default())),
             scroll: RefCell::new(None),
             item_cache: RefCell::new(VisibleSubviewCache::new()),
@@ -792,7 +899,11 @@ pub(crate) fn list_accessibility(
                 row_node.set_label(label);
             }
             row_node.add_action(AccessibilityAction::Focus);
-            row_node.set_selected(renderer.read_signal(&item.selected));
+            // The selected state belongs to the list's selection, not the
+            // item: a row exposes it only when the list is selectable.
+            if let Some(selection) = state.row_selection.as_ref() {
+                row_node.set_selected(renderer.read_signal(&selection.is_selected(row_id)));
+            }
             let row_node_id = if row_hidden {
                 None
             } else {
@@ -806,6 +917,8 @@ pub(crate) fn list_accessibility(
                     index,
                     handle: handle.clone(),
                     extents: Rc::clone(&state.extent_index),
+                    id: row_id,
+                    selection: state.row_selection.clone(),
                 });
                 match ctx {
                     Some(ctx) => renderer.register_accessibility_child_node_with_key(
@@ -826,10 +939,16 @@ pub(crate) fn list_accessibility(
             if let Some(row_node_id) = row_node_id {
                 list_node.push_child(row_node_id);
                 let row_interaction_base = (i32::from(*row_id) as u32 as usize)
-                    .checked_mul(3)
+                    .checked_mul(4)
                     .expect("hydrolysis List interaction identity overflow");
                 renderer.register_accessibility_focus_link(
                     &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base),
+                    row_node_id,
+                );
+                // The row's own press slot — the selection target the draw
+                // pass registers — resolves focus to the same node.
+                renderer.register_accessibility_focus_link(
+                    &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base + 3),
                     row_node_id,
                 );
                 if ctx.is_none() {
@@ -1076,7 +1195,7 @@ pub(crate) fn render_list_parts(
         #[cfg(not(feature = "accessibility"))]
         let subtree_env = row_env.clone();
         let row_interaction_base = (i32::from(*row_id) as u32 as usize)
-            .checked_mul(3)
+            .checked_mul(4)
             .expect("hydrolysis List interaction identity overflow");
         let chrome = state.borrow().section_chrome(index);
         let reorder_dy = state.borrow().reorder_offset_for(index, row_id, row_height);
@@ -1122,7 +1241,15 @@ pub(crate) fn render_list_parts(
         // rides the swipe displacement; only the revealed dismiss background
         // stays anchored to the slot.
         let row_rect = row_slot + vello::kurbo::Vec2::new(swipe_dx, 0.0);
-        let selected = ctx.renderer_mut().read_signal(&item.selected);
+        let selected = state
+            .borrow()
+            .row_selection
+            .as_ref()
+            .map(|selection| {
+                ctx.renderer_mut()
+                    .read_signal(&selection.is_selected(row_id))
+            })
+            .unwrap_or(false);
         // The fill is the theme's own `SelectionContainer` token rather than a
         // `WidgetTheme` entry: the row's content already flips to
         // `SelectionForeground` against it (see `selection_themed` in the list
@@ -1182,6 +1309,26 @@ pub(crate) fn render_list_parts(
                 total_rows,
             },
         );
+
+        // A selectable row owns the whole row rect as a press target: a
+        // plain click selects it, the toggle modifier toggles it and Shift
+        // extends the anchored range — while the controls and the content
+        // flushed after it still take their own presses first.
+        if let Some(selection) = state.borrow().row_selection.clone() {
+            let hit_bounds = transformed_rect(ctx.hit_transform, row_rect);
+            let key = crate::renderer::InteractionKey::for_rc(state, row_interaction_base + 3);
+            let (_, press_slot, _) = ctx
+                .renderer_mut()
+                .bind_interaction_target(key, hit_bounds, &row_env);
+            ctx.renderer_mut().register_interactive_pointer_target(
+                hit_bounds,
+                press_slot,
+                move |renderer: &mut crate::renderer::SemanticCore, _point, _env| {
+                    selection.write(index, row_id, renderer.modifiers());
+                    true
+                },
+            );
+        }
 
         // Swipe-to-dismiss covers the whole row and is available whenever the
         // list can delete, matching Material's `SwipeToDismissBox` rather than
