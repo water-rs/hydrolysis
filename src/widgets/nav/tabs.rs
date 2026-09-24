@@ -5,8 +5,8 @@ use std::rc::Rc;
 #[cfg(feature = "accessibility")]
 use crate::renderer::{AccessibilityActionTarget, RenderContext};
 use crate::renderer::{
-    HydroNativeView, HydroState, RetainedSubview, WidgetRenderContext, measure_tabs_intrinsic,
-    tabs_bar_and_content_rect, tabs_button_rect,
+    HydroNativeView, HydroState, RetainedSubview, WidgetRenderContext, measure_tabs_layout,
+    tabs_bar_and_content_rect, tabs_button_rect, tabs_content_proposal,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -94,7 +94,29 @@ impl HydroNativeView for Native<TabsLayout> {
         env: &Environment,
         theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_tabs_intrinsic(view.as_inner(), state, env, theme)
+        measure_tabs_layout(
+            view.as_inner(),
+            ProposalSize::UNSPECIFIED,
+            state,
+            env,
+            theme,
+        )
+    }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
+        ViewDimensions::new(measure_tabs_layout(
+            view.as_inner(),
+            proposal,
+            state,
+            env,
+            theme,
+        ))
     }
 }
 
@@ -180,16 +202,19 @@ pub(crate) fn tabs_accessibility(
     }
 }
 
-/// Measures a retained tabs leaf from its [`TabsRenderState`] (intrinsic-sized,
-/// mirroring `measure_tabs_intrinsic`).
+/// Measures a retained tabs leaf from its [`TabsRenderState`]: each tab's
+/// retained content answers the proposal its rendered content rect hands it —
+/// the pane minus the tab bar (see [`tabs_content_proposal`]) — mirroring
+/// `measure_tabs_layout`.
 pub(crate) fn measure_tabs_node(
     state: &TabsRenderState,
-    _proposal: ProposalSize,
+    proposal: ProposalSize,
     hydro: &mut HydroState,
     env: &Environment,
     theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let metrics = theme.tabs_metrics();
+    let content_proposal = tabs_content_proposal(proposal, state.style, metrics.bar_height);
     let mut max_content_width: f64 = 0.0;
     let mut max_content_height: f64 = 0.0;
     let mut bar_width = 0.0;
@@ -198,7 +223,9 @@ pub(crate) fn measure_tabs_node(
         bar_width += (f64::from(label_size.width) + metrics.button_horizontal_inset * 2.0)
             .max(metrics.button_min_width);
 
-        let content_size = tab.content.measure_built(hydro, env, theme);
+        let content_size =
+            tab.content
+                .measure_built_with_proposal(hydro, env, theme, content_proposal);
         max_content_width = max_content_width.max(f64::from(content_size.width));
         max_content_height = max_content_height.max(f64::from(content_size.height));
     }
@@ -212,7 +239,10 @@ pub(crate) fn measure_tabs_node(
             max_content_height.max(metrics.button_min_width * state.tabs.len() as f64),
         ),
     };
-    ViewDimensions::new(LayoutSize::new(width as f32, height as f32))
+    ViewDimensions::new(LayoutSize::new(
+        proposal.width.unwrap_or(width as f32),
+        proposal.height.unwrap_or(height as f32),
+    ))
 }
 
 /// Renders a retained tabs leaf every flush: emits the tab-list a11y (unless
