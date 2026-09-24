@@ -16,14 +16,17 @@ use std::rc::Rc;
 
 use waterui::{AnyView, Color, View, ViewExt as _};
 use waterui_core::Environment;
+use waterui_core::id::SelfId;
 use waterui_core::layout::{StretchAxis, ViewDimensions};
+use waterui_core::views::ForEach;
 use waterui_graphics::input::SurfaceInputEvent;
 use waterui_graphics::{
     GpuContext, GpuFrame, GpuSurface, GpuView, Scene2D, SceneContent, SceneInvalidator, SceneView,
     SceneViewMergeToParent,
 };
+use waterui_layout::LazyContainer;
 use waterui_layout::stack::hstack;
-use waterui_layout::{ProposalSize, Rect, Size, SubView};
+use waterui_layout::{Divider, ProposalSize, Rect, Size, SubView};
 
 use super::{test_environment, test_renderer};
 use crate::engine::WidgetTheme;
@@ -33,6 +36,7 @@ use crate::renderer::tree::RenderNode;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const HANDLE_WIDTH: f32 = 20.0;
+const DIVIDER_WIDTH: f32 = 7.0;
 
 /// The issue's pane: a GPU surface that accepts its own input events, so the
 /// leaf is the same kind a terminal or embedded engine installs.
@@ -456,5 +460,203 @@ fn scene_view_panes_take_their_offered_share() {
         "the three children must share the 800-point row: the issue saw \
          [400, 20, 400] = 820 because a leaf answered its ideal instead of \
          its offer"
+    );
+}
+
+/// #162 reopened — the residual: `hstack((pane, divider.width(7), pane))` in
+/// an 800-point window, each pane a lazy horizontal stack of input-receiving
+/// `SceneView`s — the shape a custom pager or split row takes when it builds
+/// on `LazyContainer` directly (the `Lazy::hstack` helper wraps a
+/// `ScrollView`, which answers proposals itself and hides this path).
+///
+/// The row mapped at 807 because `LazyStackNode::measure` answered the
+/// extent index's cached intrinsic total (`total_extent()`) to every probe —
+/// including the negotiation's `with_main(0)` minimum probe — so the pane's
+/// measured minimum was its ideal 400, `total_minima` (807) exceeded the
+/// 800 budget, and `negotiate`'s `minima_overflow` arm offered each pane its
+/// own minimum (waterui `distribute.rs`): an intrinsic cached as a minimum.
+/// A lazy stack virtualizes along its main axis — it can report any extent
+/// up to its content's — so a finite offer caps the answer while an open
+/// axis still reads the full extent (spec §5, §6 ScrollView).
+#[test]
+fn lazy_stack_panes_split_the_divider_width() {
+    use crate::renderer::{measure_view_dimensions_with_proposal, normalize_layout_view};
+    use waterui_layout::stack::HStackLayout;
+
+    let env = test_environment().extending(SceneViewMergeToParent);
+    let mut renderer = test_renderer();
+    let lazy_pane = || {
+        LazyContainer::new(
+            HStackLayout::default(),
+            ForEach::new(vec![SelfId::new(0_usize)], |_| {
+                SceneView::new(IntrinsicScenePane)
+            }),
+        )
+    };
+    let tree = hstack((lazy_pane(), Divider.width(DIVIDER_WIDTH), lazy_pane())).spacing(0.0);
+    let node = RenderNode::build(AnyView::new(tree), &env, &mut renderer);
+    let theme = renderer.theme();
+    let container = node
+        .transparent_container()
+        .expect("an hstack must build a container node");
+    assert_eq!(container.children.len(), 3, "pane, divider, pane");
+
+    // The leaf-level evidence: each child's answer to its min, ideal and max
+    // probes, and to every offer the negotiation computes for it.
+    let labels = ["pane (leading)", "divider", "pane (trailing)"];
+    let log: MeasureLog = Rc::new(RefCell::new(Vec::new()));
+    let cell = RefCell::new(&mut renderer.state);
+    let subs: Vec<OfferProbe<'_>> = container
+        .children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| OfferProbe {
+            label: labels[index],
+            node: child,
+            state: &cell,
+            env: env.clone(),
+            theme: Rc::clone(&theme),
+            stretch: child.stretch_for_test(),
+            log: Rc::clone(&log),
+        })
+        .collect();
+    let refs: Vec<&dyn SubView> = subs.iter().map(|sub| sub as &dyn SubView).collect();
+
+    let proposal = ProposalSize::new(Some(WINDOW_WIDTH), Some(WINDOW_HEIGHT));
+    let size = container.layout.size_that_fits(proposal, &refs);
+    let placements = container
+        .layout
+        .place(Rect::from_size(size), proposal, &refs);
+    dump_probe_log(&log, &placements);
+    eprintln!("size_that_fits = ({:.1}, {:.1})", size.width, size.height);
+
+    assert_no_answer_beats_its_offer(&log);
+    assert_eq!(
+        size.width, WINDOW_WIDTH,
+        "the hstack must fit the 800-point window: a lazy pane must answer \
+         its offered share, not the intrinsic cached in its extent index \
+         (the issue saw 807 = 400 + 7 + 400)"
+    );
+    let widths: Vec<f32> = placements
+        .iter()
+        .map(|placement| placement.frame.width())
+        .collect();
+    assert_eq!(
+        widths,
+        vec![396.5, DIVIDER_WIDTH, 396.5],
+        "the three children must share the 800-point row"
+    );
+
+    // The dispatch path (`Native<LazyContainer>::dimensions`, used whenever a
+    // lazy stack is measured transiently — a `FixedContainer` intrinsic
+    // estimate, a scroll sample, a button's content) answers by the same
+    // rule: an open main axis reads the membership's intrinsic extent, a
+    // finite offer caps it, a zero probe reports zero.
+    let leaf = normalize_layout_view(AnyView::new(lazy_pane()), &env);
+    for (probe, probe_proposal, expected) in [
+        ("ideal", ProposalSize::new(None, Some(WINDOW_HEIGHT)), 400.0),
+        (
+            "min",
+            ProposalSize::new(Some(0.0), Some(WINDOW_HEIGHT)),
+            0.0,
+        ),
+        (
+            "max",
+            ProposalSize::new(Some(f32::INFINITY), Some(WINDOW_HEIGHT)),
+            400.0,
+        ),
+        (
+            "offer",
+            ProposalSize::new(Some(396.5), Some(WINDOW_HEIGHT)),
+            396.5,
+        ),
+    ] {
+        let dims = measure_view_dimensions_with_proposal(
+            &leaf,
+            probe_proposal,
+            &mut renderer.state,
+            &env,
+            &theme,
+        );
+        eprintln!(
+            "  lazy pane probe={probe:<6} proposal=({:?}, {:?})  answer=({:.1}, {:.1})",
+            probe_proposal.width, probe_proposal.height, dims.size.width, dims.size.height,
+        );
+        assert_eq!(
+            dims.size.width, expected,
+            "a lazy hstack measured through the dispatch path must answer \
+             {expected} to its {probe} probe"
+        );
+    }
+}
+
+/// #162 reopened: `hstack((pane, divider.width(7), pane))` in an 800-point
+/// window, both panes input-receiving `SceneView`s — the shape a terminal
+/// split takes. The row mapped at 807: each pane answered its intrinsic 400
+/// against an offer of `(800 - 7) / 2 = 396.5`.
+///
+/// Same probe discipline as the original repro: the retained children are
+/// driven through the real `HStackLayout` negotiation while an `OfferProbe`
+/// per child logs every min/ideal/max probe answer and every negotiated
+/// offer — the leaf-level evidence of which answer beat its offer.
+#[test]
+fn input_scene_view_panes_split_the_divider_width() {
+    let env = test_environment().extending(SceneViewMergeToParent);
+    let mut renderer = test_renderer();
+    let tree = hstack((
+        SceneView::new(IntrinsicScenePane),
+        Divider.width(DIVIDER_WIDTH),
+        SceneView::new(IntrinsicScenePane),
+    ))
+    .spacing(0.0);
+    let node = RenderNode::build(AnyView::new(tree), &env, &mut renderer);
+    let theme = renderer.theme();
+    let container = node
+        .transparent_container()
+        .expect("an hstack must build a container node");
+    assert_eq!(container.children.len(), 3, "pane, divider, pane");
+
+    let labels = ["pane (leading)", "divider", "pane (trailing)"];
+    let log: MeasureLog = Rc::new(RefCell::new(Vec::new()));
+    let cell = RefCell::new(&mut renderer.state);
+    let subs: Vec<OfferProbe<'_>> = container
+        .children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| OfferProbe {
+            label: labels[index],
+            node: child,
+            state: &cell,
+            env: env.clone(),
+            theme: Rc::clone(&theme),
+            stretch: child.stretch_for_test(),
+            log: Rc::clone(&log),
+        })
+        .collect();
+    let refs: Vec<&dyn SubView> = subs.iter().map(|sub| sub as &dyn SubView).collect();
+
+    let proposal = ProposalSize::new(Some(WINDOW_WIDTH), Some(WINDOW_HEIGHT));
+    let size = container.layout.size_that_fits(proposal, &refs);
+    let placements = container
+        .layout
+        .place(Rect::from_size(size), proposal, &refs);
+    dump_probe_log(&log, &placements);
+    eprintln!("size_that_fits = ({:.1}, {:.1})", size.width, size.height);
+
+    assert_no_answer_beats_its_offer(&log);
+    assert_eq!(
+        size.width, WINDOW_WIDTH,
+        "the hstack must fit the 800-point window: an input-receiving pane \
+         must answer its offered share, not its intrinsic size (the issue \
+         saw 807 = 400 + 7 + 400)"
+    );
+    let widths: Vec<f32> = placements
+        .iter()
+        .map(|placement| placement.frame.width())
+        .collect();
+    assert_eq!(
+        widths,
+        vec![396.5, DIVIDER_WIDTH, 396.5],
+        "the three children must share the 800-point row"
     );
 }
