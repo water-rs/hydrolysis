@@ -154,7 +154,6 @@ pub(crate) struct CollectionNode {
     pub(super) env: Environment,
     /// Stable identity owning this collection's own accessibility node id, so the
     /// id survives membership changes shifting the sibling ordinals.
-    #[cfg(feature = "accessibility")]
     pub(super) accessibility_identity: Rc<()>,
     /// The unshielded environment when this collection carries accessibility
     /// naming metadata: `Some` means it emits the node naming itself.
@@ -195,7 +194,6 @@ pub(crate) struct LazyStackNode {
     pub(super) env: Environment,
     /// Stable identity owning this stack's own accessibility node id, so the id
     /// survives the visible window shifting the sibling ordinals.
-    #[cfg(feature = "accessibility")]
     pub(super) accessibility_identity: Rc<()>,
     /// The unshielded environment when this stack carries accessibility naming
     /// metadata: `Some` means it emits the node naming itself.

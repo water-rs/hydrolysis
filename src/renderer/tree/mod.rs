@@ -91,6 +91,7 @@ use core::cell::Cell;
 use core::ops::Range;
 use nami::Computed;
 use nami::watcher::BoxWatcherGuard;
+use std::rc::Rc;
 use waterui_core::MainThreadBound;
 use waterui_core::id::{Id as RawId, SelfId};
 use waterui_core::layout::{LayoutPriority, Point, Rect, Size};
@@ -180,4 +181,36 @@ pub(crate) enum RenderNode {
     /// expansion and no structural rebuild, so the leaf never has to be captured
     /// and replayed to stay affordable.
     Widget(WidgetNode),
+}
+
+impl RenderNode {
+    /// The retained identity marking where this node's view begins, looked
+    /// through the transparent single-child wrappers (env scopes, animation
+    /// layers, retained guards, dynamic hosts) to the first node that carries
+    /// one. Input ancestry reads it to tell a gesture registered inside the
+    /// view from one attached to the view itself; leaves with no children and
+    /// no identity have no descendants to tell apart, so they report none.
+    pub(crate) fn accessibility_identity(&self) -> Option<Rc<()>> {
+        match self {
+            Self::Wrapper(node) => Some(node.accessibility_identity.clone()),
+            Self::Widget(node) => Some(node.accessibility_identity.clone()),
+            Self::Text(node) => Some(node.accessibility_identity.clone()),
+            Self::Container(node) => Some(node.accessibility_identity.clone()),
+            Self::Scroll(node) => Some(node.accessibility_identity.clone()),
+            Self::SceneView(node) => Some(node.accessibility_identity.clone()),
+            Self::GpuSurface(node) => Some(node.accessibility_identity.clone()),
+            Self::Collection(node) => Some(node.accessibility_identity.clone()),
+            Self::LazyStack(node) => Some(node.accessibility_identity.clone()),
+            Self::Retain(node) => node.child.accessibility_identity(),
+            Self::Env(node) => node.child.accessibility_identity(),
+            Self::Opacity(node) => node.child.accessibility_identity(),
+            Self::Scale(node) => node.child.accessibility_identity(),
+            Self::Rotation(node) => node.child.accessibility_identity(),
+            Self::Offset(node) => node.child.accessibility_identity(),
+            Self::AppliedFilter(node) => node.child.accessibility_identity(),
+            Self::ViewEffect(node) => node.child.borrow().accessibility_identity(),
+            Self::Dynamic(node) => node.child.borrow().accessibility_identity(),
+            Self::Color(_) => None,
+        }
+    }
 }
