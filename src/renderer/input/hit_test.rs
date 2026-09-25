@@ -1,6 +1,7 @@
 use super::*;
 use nami::{Computed, Signal as _};
 use waterui::drag_drop::DragData;
+use waterui_backend_core::gesture::LONG_PRESS_SLOP;
 use waterui_backend_core::widget::{
     InteractionFocusBinding, ModalInteraction, WidgetInteractionState,
 };
@@ -109,6 +110,27 @@ pub(crate) struct PendingPointerPress {
     pub(crate) starts_at: Instant,
     pub(crate) chrome_state_dependent: bool,
 }
+
+/// An armed press-and-hold on a `.context_menu` region — the context-menu
+/// gesture the platforms reserve for pointers that carry no secondary
+/// button. A touch or pen primary press that stays within
+/// [`LONG_PRESS_SLOP`] for [`CONTEXT_MENU_HOLD_DURATION`] opens the
+/// region's menu at the press point and consumes the press, so no tap fires
+/// on release. The timing shares `LongPressDetector`'s semantics in
+/// waterui-backend-core's gesture engine (gesture.rs) — the engine's own
+/// slop constant, and the same start-instant-plus-duration deadline; the
+/// detector itself is private to that crate.
+#[derive(Clone, Copy)]
+pub(crate) struct PendingContextMenuHold {
+    /// The press origin in window hit-test space — the menu anchors there.
+    pub(crate) point: vello::kurbo::Point,
+    /// The press's start instant in frame time.
+    pub(crate) started_at: Instant,
+}
+
+/// How long a touch or pen press must hold to earn the gesture — the
+/// hold threshold Android, iOS, GTK and Windows all share.
+pub(crate) const CONTEXT_MENU_HOLD_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub(crate) struct CursorTarget {
@@ -231,6 +253,11 @@ pub(crate) struct HitTestState {
     pub(crate) active_pointer_target: Option<PointerTarget>,
     pub(crate) active_pointer: Option<(u64, PointerKind)>,
     pub(crate) pending_pointer_press: Option<PendingPointerPress>,
+    /// A touch/pen press-and-hold running toward the context-menu
+    /// threshold, armed where a secondary press would resolve a menu.
+    /// Kept across frames; its deadline joins
+    /// [`SemanticCore::next_gesture_deadline`].
+    pub(crate) pending_context_menu_hold: Option<PendingContextMenuHold>,
     pub(crate) keyboard_focus: Option<InteractionKey>,
     pub(crate) keyboard_focus_binding: Option<Binding<bool>>,
     pub(crate) keyboard_focus_visible: bool,
@@ -712,6 +739,7 @@ impl HydrolysisRenderer {
         self.clear_scrollbar_drag();
         self.hit_test.active_pointer_target = None;
         self.hit_test.pending_pointer_press = None;
+        self.hit_test.pending_context_menu_hold = None;
         self.hit_test.active_press_bounds = None;
         self.hit_test.active_press_origin = None;
         self.hit_test.pointer_press_origin = None;
@@ -777,6 +805,34 @@ impl HydrolysisRenderer {
             let target = &self.text_editing.text_input_targets[index];
             SemanticCore::target_hit_priority(target.depth, target.order, index)
         });
+        // A touch or pen primary press on a `.context_menu` region is a
+        // pending press-and-hold, armed exactly where a secondary press
+        // would resolve a menu: an embedded surface yields only to a menu
+        // enclosing its window rect, anything else to the topmost region
+        // containing the point. A held primary *mouse* button never arms —
+        // the platforms bind the gesture to touch and pen only.
+        if button == PointerButton::Primary
+            && matches!(pointer_kind, PointerKind::Touch | PointerKind::Pen)
+        {
+            let menu_present = if let Some((_, surface, _)) =
+                self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
+            {
+                let surface_bounds = surface.to_window_rect(vello::kurbo::Rect::from_origin_size(
+                    vello::kurbo::Point::ORIGIN,
+                    surface.local_bounds.size(),
+                ));
+                self.topmost_context_menu_target_enclosing(point, surface_bounds)
+                    .is_some()
+            } else {
+                self.topmost_context_menu_target_at_point(point).is_some()
+            };
+            if menu_present {
+                self.hit_test.pending_context_menu_hold = Some(PendingContextMenuHold {
+                    point,
+                    started_at: at,
+                });
+            }
+        }
         if let Some((_index, target, local_position)) =
             self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
         {
@@ -1130,6 +1186,7 @@ impl HydrolysisRenderer {
         self.hit_test.active_pointer_drag_signature = None;
         self.clear_scrollbar_drag();
         self.hit_test.active_pointer_target = None;
+        self.hit_test.pending_context_menu_hold = None;
         self.hit_test.active_press_bounds = None;
         self.hit_test.active_press_origin = None;
         self.hit_test.pointer_press_origin = None;
@@ -1193,6 +1250,13 @@ impl HydrolysisRenderer {
         let point = vello::kurbo::Point::new(f64::from(x), f64::from(y));
         self.hit_test.pointer_position = Some(point);
         let at = self.frame_instant();
+        // The hold dies when the press leaves the recognizer's slop — the
+        // same move check `LongPressDetector` applies.
+        if let Some(hold) = self.hit_test.pending_context_menu_hold
+            && (point.x - hold.point.x).hypot(point.y - hold.point.y) > LONG_PRESS_SLOP
+        {
+            self.hit_test.pending_context_menu_hold = None;
+        }
         // Same first look the press path gives: an active recognizer
         // receives the move before any embedded surface can claim it, so a
         // gesture in flight is not starved by whatever sits under the pointer.
@@ -2102,6 +2166,100 @@ impl SemanticCore {
 }
 
 impl HydrolysisRenderer {
+    /// The rendered-runtime gesture tick: advances the engine's recognizers,
+    /// then fires an armed context-menu hold whose deadline elapsed. The
+    /// deadline rides [`SemanticCore::next_gesture_deadline`], so the runner
+    /// wakes for it — never a timer of its own. A hold that survives to the
+    /// threshold opens the press point's menu through the same mount a
+    /// secondary press takes, and consumes the press: pending recognizers
+    /// fail as on a cancel, the captured pointer target drops, and a tap no
+    /// longer fires on release.
+    pub fn handle_gesture_tick(&mut self, at: Instant, env: &Environment) -> bool {
+        let gesture_changed = self.core.handle_gesture_tick(at, env);
+        let Some(hold) = self.hit_test.pending_context_menu_hold else {
+            return gesture_changed;
+        };
+        if at.duration_since(hold.started_at) < CONTEXT_MENU_HOLD_DURATION {
+            return gesture_changed;
+        }
+        self.hit_test.pending_context_menu_hold = None;
+        if !self.open_context_menu_at(hold.point, env) {
+            return gesture_changed;
+        }
+        self.hit_test.pending_pointer_press = None;
+        self.hit_test.active_pointer_target = None;
+        self.hit_test.active_pointer_drag_target = None;
+        self.hit_test.active_pointer_drag_signature = None;
+        self.clear_scrollbar_drag();
+        self.text_editing.active_text_selection_drag = None;
+        self.hit_test.active_press_bounds = None;
+        self.hit_test.active_press_origin = None;
+        let press_clear = self.hit_test.interaction.clear_all_presses(at);
+        if press_clear.chrome_changed {
+            self.request_refresh();
+        } else if press_clear.visual_changed {
+            self.request_redraw();
+        }
+        let _ = self.gesture_engine.handle_pointer_cancel(at, env);
+        true
+    }
+
+    /// What a secondary press at `point` mounts: the menu of the
+    /// `.context_menu` region claiming the spot — for an embedded surface,
+    /// the topmost region enclosing its window rect; for anything else, the
+    /// topmost region containing the point — shown through
+    /// [`SemanticCore::show_popup_menu_nodes`] anchored at the press point.
+    /// A touch or pen press-and-hold resolves here once it earns the
+    /// gesture, so it lands the same menu a secondary click would. Returns
+    /// whether a menu opened.
+    fn open_context_menu_at(&mut self, point: vello::kurbo::Point, env: &Environment) -> bool {
+        let pointer_priority = self
+            .hit_test
+            .pointer_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| target.bounds.contains(point))
+            .map(|(index, target)| {
+                SemanticCore::target_hit_priority(target.depth, target.order, index)
+            })
+            .max();
+        let text_priority = self.topmost_text_input_index_at_point(point).map(|index| {
+            let target = &self.text_editing.text_input_targets[index];
+            SemanticCore::target_hit_priority(target.depth, target.order, index)
+        });
+        let menu_target = if let Some((_, surface, _)) =
+            self.embedded_target_wins_at(point, pointer_priority, text_priority)
+        {
+            let surface_bounds = surface.to_window_rect(vello::kurbo::Rect::from_origin_size(
+                vello::kurbo::Point::ORIGIN,
+                surface.local_bounds.size(),
+            ));
+            self.topmost_context_menu_target_enclosing(point, surface_bounds)
+        } else {
+            self.topmost_context_menu_target_at_point(point)
+        };
+        let mut items = menu_target
+            .as_ref()
+            .map(|target| popup_menu_nodes(&target.items.snapshot()))
+            .unwrap_or_default();
+        self.append_inspect_element_item(&mut items, point);
+        if items.is_empty() {
+            return false;
+        }
+        // Same inheritance the secondary-press arms apply: the declaring
+        // view's environment layers over this dispatch's.
+        let menu_env = menu_target
+            .as_ref()
+            .map_or_else(|| env.clone(), |target| target.env.layered_on(env));
+        let metrics = self.theme().text_context_menu_metrics();
+        self.show_popup_menu_nodes(
+            items,
+            LayoutPoint::new(point.x as f32, point.y as f32),
+            metrics,
+            &menu_env,
+        )
+    }
+
     pub fn handle_pointer_cancel(&mut self, env: &Environment) -> bool {
         let Some((pointer_id, pointer_kind)) = self.hit_test.active_pointer else {
             return false;
@@ -2128,6 +2286,7 @@ impl HydrolysisRenderer {
         self.hit_test.active_embedded_target = None;
         self.hit_test.active_pointer = None;
         self.hit_test.pending_pointer_press = None;
+        self.hit_test.pending_context_menu_hold = None;
         self.hit_test.active_press_bounds = None;
         self.hit_test.active_press_origin = None;
         self.hit_test.pointer_press_origin = None;

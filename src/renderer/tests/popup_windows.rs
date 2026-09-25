@@ -6,7 +6,7 @@
 //! secondary click mounts as a popup window whose nodes used to stay in
 //! the popup core's own pending update, unreachable by label.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId, TreeUpdate};
 use nami::Binding;
@@ -26,6 +26,11 @@ use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, PointerButton, PointerKind};
 
 const WINDOW_SIZE: f32 = 160.0;
+
+/// The platform hold threshold `CONTEXT_MENU_HOLD_DURATION` implements
+/// (hit_test.rs): 500ms on every platform. Kept local so the test compiles
+/// on the pre-fix tree for the fail-before run.
+const HOLD: Duration = Duration::from_millis(500);
 
 /// The node labelled `label` with `role`, if present.
 pub(super) fn find_by_label<'a>(
@@ -433,5 +438,254 @@ fn a_clean_pump_publishes_no_tree_update() {
     assert!(
         runtime.pump_at(false, Instant::now()).tree_update.is_none(),
         "a settled pump with an open popup must publish nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// water-rs/hydrolysis#191: press-and-hold opens `.context_menu` on touch/pen.
+// The hold is armed by a primary `PointerDown` whose `PointerKind` is `Touch`
+// or `Pen` on a region a secondary press would resolve, runs on the frame
+// clock (`pump_at` drives `set_frame_instant` + `handle_gesture_tick`), and
+// fires at [`HOLD`] so long as the press stays within the recognizer's slop.
+// A held primary *mouse* button never arms.
+// ---------------------------------------------------------------------------
+
+/// A `button("host")` filling the window with `.context_menu` — the same
+/// shape `secondary_click_...` mounts — with an activation counter so "the
+/// press is consumed" (no tap fires on release) is assertable.
+fn menu_host_view(activations: &Binding<u32>) -> AnyViewBuilder<AnyView> {
+    let activations = activations.clone();
+    AnyViewBuilder::<AnyView>::new(move || {
+        let activations = activations.clone();
+        AnyView::new(
+            Frame::new(button("host").action(move || {
+                activations.set(activations.snapshot() + 1);
+            }))
+            .width(WINDOW_SIZE)
+            .height(WINDOW_SIZE)
+            .context_menu(vec!["Copy".action(|| {})]),
+        )
+    })
+}
+
+const PRESS: (f32, f32) = (80.0, 80.0);
+
+fn primary_press(kind: PointerKind) -> InputEvent {
+    InputEvent::PointerDown {
+        id: 3,
+        kind,
+        x: PRESS.0,
+        y: PRESS.1,
+        button: PointerButton::Primary,
+    }
+}
+
+fn primary_release(kind: PointerKind, x: f32, y: f32) -> InputEvent {
+    InputEvent::PointerUp {
+        id: 3,
+        kind,
+        x,
+        y,
+        button: PointerButton::Primary,
+    }
+}
+
+fn primary_move(kind: PointerKind, x: f32, y: f32) -> InputEvent {
+    InputEvent::PointerMove { id: 3, kind, x, y }
+}
+
+fn menu_runtime(activations: &Binding<u32>) -> HeadlessRuntime {
+    HeadlessRuntime::new_for_tests(
+        test_environment(),
+        menu_host_view(activations),
+        WINDOW_SIZE as u32,
+        WINDOW_SIZE as u32,
+        MinimalTestTheme::default(),
+    )
+}
+
+/// A touch press held past the threshold mounts the region's menu as a popup
+/// anchored at the press point — the same mount a secondary click takes —
+/// and consumes the press, so releasing it never fires the tap.
+#[test]
+fn a_touch_hold_past_the_threshold_mounts_the_menu_at_the_press_point() {
+    let activations = Binding::container(0_u32);
+    let mut runtime = menu_runtime(&activations);
+    let start = Instant::now();
+
+    let update = runtime
+        .pump_at(false, start)
+        .tree_update
+        .expect("the first frame must publish an accessibility tree");
+    assert!(
+        find_by_label(&update, Role::Button, "Copy").is_none(),
+        "menu items must not emit before the menu opens"
+    );
+
+    runtime.push_input_event(primary_press(PointerKind::Touch));
+    let _ = runtime.pump_at(false, start);
+
+    // Just before the threshold nothing opens.
+    let update = runtime
+        .pump_at(false, start + HOLD - Duration::from_millis(1))
+        .tree_update;
+    if let Some(update) = update {
+        assert!(
+            find_by_label(&update, Role::Button, "Copy").is_none(),
+            "the hold must not open the menu before its threshold"
+        );
+    }
+
+    // At the threshold the hold fires: the menu mounts as a popup window
+    // anchored at the press point, and its items merge into the tree.
+    let update = runtime
+        .pump_at(false, start + HOLD)
+        .tree_update
+        .expect("the hold frame must publish the merged tree");
+    assert!(
+        find_by_label(&update, Role::Button, "Copy").is_some(),
+        "a held touch press must mount the context menu at the press point"
+    );
+    let frames = runtime.popup_frames();
+    assert_eq!(frames.len(), 1, "exactly one popup window mounts");
+    let frame = frames[0];
+    assert!(
+        (f64::from(frame.x()) - f64::from(PRESS.0)).abs() < 1.0
+            && (f64::from(frame.y()) - f64::from(PRESS.1)).abs() < 1.0,
+        "the popup anchors at the press point, got {frame:?}"
+    );
+
+    // The press is consumed: releasing it fires no tap.
+    runtime.push_input_event(primary_release(PointerKind::Touch, PRESS.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + HOLD);
+    assert_eq!(
+        activations.snapshot(),
+        0,
+        "the press the menu claimed must not commit a tap on release"
+    );
+}
+
+/// Releasing a touch before the threshold fails the hold: the press resolves
+/// as a tap and no menu opens — the deadline never fires for a hold that no
+/// longer exists.
+#[test]
+fn a_touch_released_early_fires_the_tap_and_no_menu() {
+    let activations = Binding::container(0_u32);
+    let mut runtime = menu_runtime(&activations);
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    runtime.push_input_event(primary_press(PointerKind::Touch));
+    let _ = runtime.pump_at(false, start);
+    runtime.push_input_event(primary_release(PointerKind::Touch, PRESS.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(200));
+    assert_eq!(
+        activations.snapshot(),
+        1,
+        "an early release resolves as a tap"
+    );
+
+    // Past the threshold nothing mounts — the hold was disarmed by the up.
+    let update = runtime.pump_at(false, start + HOLD).tree_update;
+    if let Some(update) = update {
+        assert!(
+            find_by_label(&update, Role::Button, "Copy").is_none(),
+            "no menu opens once the press released before the threshold"
+        );
+    }
+    assert!(
+        runtime.popup_frames().is_empty(),
+        "no popup mounts once the press released early"
+    );
+}
+
+/// A press that leaves the recognizer's slop fails the hold — the same move
+/// check `LongPressDetector` applies — so the threshold tick opens nothing.
+#[test]
+fn a_touch_that_moves_past_slop_opens_nothing() {
+    let activations = Binding::container(0_u32);
+    let mut runtime = menu_runtime(&activations);
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    runtime.push_input_event(primary_press(PointerKind::Touch));
+    let _ = runtime.pump_at(false, start);
+    // `LONG_PRESS_SLOP` is 10 points; this move leaves it.
+    runtime.push_input_event(primary_move(PointerKind::Touch, PRESS.0 + 16.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + Duration::from_millis(100));
+    let _ = runtime.pump_at(false, start + HOLD);
+    assert!(
+        runtime.popup_frames().is_empty(),
+        "a press that leaves the slop never opens the menu"
+    );
+
+    // The move already cancelled the tap (touch presses can't drift), so the
+    // release commits nothing either — but the point of the test is the menu.
+    runtime.push_input_event(primary_release(PointerKind::Touch, PRESS.0 + 16.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + HOLD);
+    assert_eq!(activations.snapshot(), 0);
+}
+
+/// A held primary *mouse* button never earns the gesture — the platforms
+/// bind press-and-hold to touch and pen only.
+#[test]
+fn a_held_primary_mouse_button_opens_nothing() {
+    let activations = Binding::container(0_u32);
+    let mut runtime = menu_runtime(&activations);
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    runtime.push_input_event(primary_press(PointerKind::Mouse));
+    let _ = runtime.pump_at(false, start);
+    let update = runtime.pump_at(false, start + HOLD).tree_update;
+    if let Some(update) = update {
+        assert!(
+            find_by_label(&update, Role::Button, "Copy").is_none(),
+            "a held primary mouse button must not open the menu"
+        );
+    }
+    assert!(
+        runtime.popup_frames().is_empty(),
+        "a held primary mouse button mounts no popup"
+    );
+
+    // The press behaves like an ordinary click: releasing it taps.
+    runtime.push_input_event(primary_release(PointerKind::Mouse, PRESS.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + HOLD);
+    assert_eq!(
+        activations.snapshot(),
+        1,
+        "a released mouse click still taps"
+    );
+}
+
+/// Pen input earns the same hold: the gesture resolves by pointer kind, not
+/// by which channel delivered the press.
+#[test]
+fn a_pen_hold_behaves_like_a_touch_hold() {
+    let activations = Binding::container(0_u32);
+    let mut runtime = menu_runtime(&activations);
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    runtime.push_input_event(primary_press(PointerKind::Pen));
+    let _ = runtime.pump_at(false, start);
+    let update = runtime
+        .pump_at(false, start + HOLD)
+        .tree_update
+        .expect("the hold frame must publish the merged tree");
+    assert!(
+        find_by_label(&update, Role::Button, "Copy").is_some(),
+        "a held pen press must mount the context menu at the press point"
+    );
+    let frames = runtime.popup_frames();
+    assert_eq!(frames.len(), 1, "exactly one popup window mounts");
+
+    runtime.push_input_event(primary_release(PointerKind::Pen, PRESS.0, PRESS.1));
+    let _ = runtime.pump_at(false, start + HOLD);
+    assert_eq!(
+        activations.snapshot(),
+        0,
+        "the press the menu claimed must not commit a tap on release"
     );
 }
