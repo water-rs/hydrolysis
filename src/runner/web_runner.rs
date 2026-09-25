@@ -313,8 +313,7 @@ pub fn run(app: App, style: impl crate::Style) {
         let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
         super::install_native_component_hooks(&mut env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
-        crate::theme::install_default_tokens(&mut env);
-        style.install_tokens(&mut env);
+        crate::theme::install_theme_tokens(&mut env, Some(&style));
         let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
             crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),

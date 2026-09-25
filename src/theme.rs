@@ -1,15 +1,15 @@
-//! Framework default theme tokens.
+//! Theme-token assembly for the runtime environment.
 //!
-//! [`install_default_tokens`] installs the colour and font tokens every
-//! Hydrolysis runtime needs before a [`Style`](crate::Style) applies its own
-//! tokens on top. It is installed by both runtimes — the rendered runtime
-//! before `style.install_tokens(&mut env)`, and the semantic runtime as its
-//! only token source — so widgets resolve the same framework defaults whether
-//! or not a style package is present.
+//! [`install_theme_tokens`] installs the runtime's theme tokens in precedence
+//! order: framework defaults < [`Style::install_tokens`](crate::Style) < the
+//! application's own environment. Every runner calls it — the rendered
+//! runners with their style, the semantic runtime with `None` — so the same
+//! precedence holds whether or not a style package is present.
 //!
-//! These tokens are *not* a theme: they carry no widget theme and no
-//! presentation decisions beyond the framework's baseline palette and type
-//! scale. A `Style` may overwrite any of them.
+//! The framework defaults are *not* a theme: they carry no widget theme and
+//! no presentation decisions beyond the framework's baseline palette and
+//! type scale. A `Style` may overwrite any of them, and the application
+//! overwrites both.
 
 use waterui::{
     Environment, Plugin,
@@ -21,11 +21,18 @@ fn color(rgb: u32) -> ResolvedColor {
     ResolvedColor::from_srgb(Srgb::from_u32(rgb))
 }
 
-/// Installs the framework default colour and font tokens into `env`.
+/// Assembles the runtime environment's theme tokens in precedence order:
+/// framework defaults < `Style::install_tokens` < the application's own
+/// environment (water-rs/hydrolysis#203).
 ///
-/// Call order matters: install these before `Style::install_tokens` so a
-/// style's tokens win over the framework defaults.
-pub fn install_default_tokens(env: &mut Environment) {
+/// The style installs into an environment that already carries the
+/// application's entries layered over the framework defaults, so a style
+/// that reads the environment while installing — e.g. Material3's dynamic
+/// colours binding `installed_color_scheme` — sees the application's
+/// installed values. The application's entries are then layered back on top,
+/// so a `Theme` it installed is never replaced.
+pub(crate) fn install_theme_tokens(env: &mut Environment, style: Option<&dyn crate::Style>) {
+    let mut defaults = Environment::new();
     Theme::new()
         .color_scheme(ColorScheme::Light)
         .colors(
@@ -47,5 +54,18 @@ pub fn install_default_tokens(env: &mut Environment) {
                 .error_foreground(color(0xFF_FF_FF)),
         )
         .fonts(FontSettings::default_scale())
-        .install(env);
+        .install(&mut defaults);
+    let mut styled = env.layered_on(&defaults);
+    if let Some(style) = style {
+        style.install_tokens(&mut styled);
+    }
+    *env = env.layered_on(&styled);
+}
+
+/// Installs the framework default tokens underneath whatever `env` already
+/// carries — the `None`-style arm of [`install_theme_tokens`]. External test
+/// harnesses (`waterui-testing`) call this; the runners go through
+/// [`install_theme_tokens`].
+pub fn install_default_tokens(env: &mut Environment) {
+    install_theme_tokens(env, None);
 }

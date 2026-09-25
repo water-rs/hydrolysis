@@ -26,9 +26,9 @@ use waterui_core::Environment;
 /// A presentation style for the rendered Hydrolysis runtime.
 ///
 /// A `Style` is the runtime's widget theme plus the package's token set:
-/// the runtime installs the framework default colour and font tokens
-/// ([`crate::theme::install_default_tokens`]), then calls
-/// [`Self::install_tokens`] so the package's tokens win, and finally owns the
+/// the runtime assembles the environment's theme tokens with framework
+/// defaults beneath [`Self::install_tokens`] beneath the application's own
+/// environment (`crate::theme::install_theme_tokens`), and finally owns the
 /// style itself and hands `&dyn WidgetTheme` to the layout and encode
 /// contexts.
 ///
@@ -38,8 +38,10 @@ use waterui_core::Environment;
 /// construction — build and patch contexts cannot reach a theme.
 pub trait Style: WidgetTheme + 'static {
     /// Installs the style package's colour, font and other environment
-    /// tokens. Called after [`crate::theme::install_default_tokens`], so
-    /// tokens installed here replace the framework defaults.
+    /// tokens. The environment already carries the application's entries
+    /// layered over the framework defaults, so an installed value can be
+    /// read here (e.g. the application's colour scheme), and the
+    /// application's own entries still win in the assembled environment.
     fn install_tokens(&self, env: &mut Environment);
 }
 pub use gpu_view::{HydrolysisExt, HydrolysisGpuView};
