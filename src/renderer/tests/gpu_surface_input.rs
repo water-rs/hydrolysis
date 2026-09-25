@@ -1219,6 +1219,61 @@ fn context_menu_claims_the_secondary_button_over_an_input_surface() {
     );
 }
 
+/// An empty `.context_menu` must behave the same in every build: nothing
+/// mounts and the secondary press keeps going to the surface. A debug build
+/// used to append "Inspect element" to the empty item list, growing a
+/// one-item popup that swallowed the press — water-rs/hydrolysis#188.
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+#[test]
+fn an_empty_context_menu_mounts_no_popup_and_keeps_the_secondary_press() {
+    use accesskit::Role;
+
+    let log = ProbeLog::default();
+    let mut runtime = runtime_with(
+        SceneView::new(SceneProbe {
+            log: log.clone(),
+            builds: Rc::new(RefCell::new(0)),
+            invalidator: None,
+        })
+        .context_menu(()),
+    );
+    let start = Instant::now();
+    settled(&mut runtime, start);
+
+    let (x, y) = window_point(12.0, 34.0);
+    runtime.push_input_event(InputEvent::PointerDown {
+        id: POINTER_ID,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Secondary,
+    });
+    let update = runtime
+        .pump_at(false, start + Duration::from_millis(100))
+        .tree_update
+        .expect("the click frame must publish an accessibility tree");
+    assert!(
+        super::popup_windows::find_by_label(&update, Role::Button, "Inspect element").is_none(),
+        "an empty menu must not grow an Inspect element popup in a debug build"
+    );
+    assert_eq!(
+        log.drain(),
+        vec![
+            SurfaceInputEvent::Focus(true),
+            SurfaceInputEvent::PointerMove {
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+            SurfaceInputEvent::PointerButton {
+                pressed: true,
+                button: SurfacePointerButton::Secondary,
+                position: vello::kurbo::Point::new(12.0, 34.0),
+            },
+        ],
+        "with no menu to open the secondary button must reach the surface, \
+         exactly as it does in a release build"
+    );
+}
+
 /// Without an enclosing context menu the surface keeps the secondary button.
 #[test]
 fn secondary_button_reaches_an_input_surface_without_a_context_menu() {

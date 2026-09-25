@@ -802,8 +802,11 @@ impl HydrolysisRenderer {
                     self.topmost_context_menu_target_enclosing(point, surface_bounds)
                 {
                     let mut items = popup_menu_nodes(&menu_target.items.snapshot());
-                    self.append_inspect_element_item(&mut items, point);
                     if !items.is_empty() {
+                        // The debug inspect entry extends a menu, it does not
+                        // create one — an empty `.context_menu` must behave
+                        // the same in every build (water-rs/hydrolysis#188).
+                        self.append_inspect_element_item(&mut items, point);
                         // The menu opens in the declaring view's environment
                         // layered over this dispatch's, so `.state(&value)`
                         // overlays reach the item actions.
@@ -900,8 +903,11 @@ impl HydrolysisRenderer {
                     .as_ref()
                     .map(|target| popup_menu_nodes(&target.items.snapshot()))
                     .unwrap_or_default();
-                self.append_inspect_element_item(&mut items, point);
                 if !items.is_empty() {
+                    // The debug inspect entry extends a menu, it does not
+                    // create one — an empty `.context_menu` must behave the
+                    // same in every build (water-rs/hydrolysis#188).
+                    self.append_inspect_element_item(&mut items, point);
                     if self.set_focused_text_input(focused) {
                         refresh_requested = true;
                     }

@@ -880,10 +880,10 @@ impl SemanticCore {
 
     /// Appends the debug build's "inspect this element" entry.
     ///
-    /// A debug build offers it on every secondary click, the way a browser
-    /// does, so an application does not have to opt in to being inspectable.
-    /// A release build appends nothing, and a secondary click on something with
-    /// no menu of its own goes on doing nothing.
+    /// A debug build offers it on a menu that already has items of its own,
+    /// the way a browser's entry joins its own menus: it extends a menu, it
+    /// never creates one — an empty `.context_menu` behaves the same in every
+    /// build. A release build appends nothing.
     #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
     pub(crate) fn append_inspect_element_item(
         &self,
