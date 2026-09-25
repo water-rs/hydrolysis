@@ -1869,7 +1869,7 @@ pub(crate) struct MinimalTestTheme {
 
 impl crate::Style for MinimalTestTheme {
     /// The minimal theme installs no tokens of its own — the runtime's
-    /// framework defaults (`install_default_tokens`) are all a test needs.
+    /// framework defaults (`install_theme_tokens`) are all a test needs.
     fn install_tokens(&self, _env: &mut Environment) {}
 }
 

@@ -250,8 +250,7 @@ pub fn run(
             let _ = event_proxy.send_event(RunnerEvent::MountPendingWindows);
         }
     }));
-    crate::theme::install_default_tokens(&mut env);
-    style.install_tokens(&mut env);
+    crate::theme::install_theme_tokens(&mut env, Some(&style));
     let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
     env.insert(waterui_core::ViewRenderer::new(
         crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),

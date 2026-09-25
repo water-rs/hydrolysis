@@ -163,7 +163,7 @@ impl SemanticRuntime {
         // Framework tokens only: the semantic runtime has no `Style`, so no
         // style-package tokens ever install — widget structure, roles, labels
         // and actions do not depend on one.
-        crate::theme::install_default_tokens(&mut env);
+        crate::theme::install_theme_tokens(&mut env, None);
         let fonts = FontCollection::new(build_fonts());
         fonts.clone().install(&mut env);
 
