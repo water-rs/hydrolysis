@@ -1,6 +1,8 @@
 //! Pump-based headless runtime for tests, snapshots and offscreen rendering.
 
 use super::*;
+#[cfg(feature = "frame-profile")]
+use crate::platform::SurfaceProvider as _;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -113,6 +115,10 @@ impl HeadlessPlatformWindow {
 pub struct HeadlessPumpResult {
     pub rebuilt: bool,
     pub profile: FrameProfile,
+    /// The frame's CPU/GPU stage split under `frame-profile`: GPU stages stay
+    /// `None` on a device without `TIMESTAMP_QUERY`.
+    #[cfg(feature = "frame-profile")]
+    pub stages: crate::renderer::FrameStageTimes,
     #[cfg(feature = "accessibility")]
     pub tree_update: Option<AccessibilityTreeUpdate>,
     pub snapshot: Option<HeadlessSnapshot>,
@@ -452,6 +458,20 @@ impl HeadlessRuntime {
         self.runtime.platform.request_redraw();
     }
 
+    /// The adapter and device this runtime renders on — attribution for a
+    /// `frame-profile` report, including whether the device was opened with
+    /// `TIMESTAMP_QUERY`.
+    #[cfg(feature = "frame-profile")]
+    #[must_use]
+    pub fn gpu_identity(&self) -> crate::GpuIdentity {
+        let surface = self.runtime.platform.inner.surface_ref();
+        crate::GpuIdentity {
+            adapter: surface.adapter().get_info(),
+            adapter_features: surface.adapter().features(),
+            device_features: surface.device().features(),
+        }
+    }
+
     /// Performs an accessibility action against the merged tree.
     ///
     /// Popup-window node ids are shifted into their own stride in the merged
@@ -679,6 +699,12 @@ impl HeadlessRuntime {
                 || drained_before
                 || drained_after,
             profile: profile.with_total(frame_started_at.elapsed()),
+            #[cfg(feature = "frame-profile")]
+            stages: render_result
+                .as_ref()
+                .map_or_else(crate::renderer::FrameStageTimes::default, |result| {
+                    result.stages
+                }),
             #[cfg(feature = "accessibility")]
             tree_update: self.runtime.renderer.take_merged_accessibility_tree_update(
                 self.popup_windows

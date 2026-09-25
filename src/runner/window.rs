@@ -221,6 +221,9 @@ pub(super) struct RenderWindowResult {
     pub(super) rebuilt: bool,
     pub(super) snapshot: Option<HeadlessSnapshot>,
     pub(super) profile: FrameProfile,
+    /// The frame's CPU/GPU stage split under `frame-profile`.
+    #[cfg(feature = "frame-profile")]
+    pub(super) stages: crate::renderer::FrameStageTimes,
 }
 
 /// Phase timing for one Hydrolysis frame.
@@ -670,18 +673,35 @@ fn render_to_surface(
         },
         premultiply_alpha,
     );
+    let render = render_started_at.elapsed();
+    #[cfg(feature = "frame-profile")]
+    {
+        // The timestamp resolve blocks until the frame's submits finish — the
+        // headless frame's "present wait", kept separate from the CPU submit
+        // time `render` measures.
+        renderer.finish_gpu_frame_profile(surface.device(), surface.queue());
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
-        width,
-        height,
-        rgba8: readback_texture_rgba8(
-            surface.device(),
-            surface.queue(),
-            frame.texture(),
+    let snapshot = {
+        #[cfg(feature = "frame-profile")]
+        let readback_started_at = Instant::now();
+        let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
             width,
             height,
-        ),
-    });
+            rgba8: readback_texture_rgba8(
+                surface.device(),
+                surface.queue(),
+                frame.texture(),
+                width,
+                height,
+            ),
+        });
+        #[cfg(feature = "frame-profile")]
+        {
+            renderer.frame_stage_times.readback += readback_started_at.elapsed();
+        }
+        snapshot
+    };
     #[cfg(target_arch = "wasm32")]
     let snapshot = {
         assert!(
@@ -690,7 +710,6 @@ fn render_to_surface(
         );
         None
     };
-    let render = render_started_at.elapsed();
     let present_started_at = Instant::now();
     surface.present(frame);
     let present = present_started_at.elapsed();
@@ -718,6 +737,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     let mut snapshot = None;
     let mut rebuilt = false;
     let profile;
+    #[cfg(feature = "frame-profile")]
+    let stages: crate::renderer::FrameStageTimes;
     // What the inspector is told about this frame, captured before the pump:
     // the scheduled mode is cleared while the scene is pumped, and the elapsed
     // total has to start before any of it runs. A browser page hosts no
@@ -864,6 +885,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 return RenderWindowResult {
                     rebuilt,
                     snapshot,
+                    #[cfg(feature = "frame-profile")]
+                    stages: runtime.renderer.take_frame_stage_times(),
                     profile: FrameProfile {
                         phases: FramePhases {
                             rebuild: rebuild_phases.rebuild,
@@ -900,6 +923,10 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         let render_duration = rendered.render;
         let present_duration = rendered.present;
         snapshot = rendered.snapshot;
+        #[cfg(feature = "frame-profile")]
+        {
+            stages = runtime.renderer.take_frame_stage_times();
+        }
         runtime.renderer.clear_frame_resources();
         let (measurement_cache_hits, measurement_cache_misses) =
             runtime.renderer.measurement_cache_stats();
@@ -990,6 +1017,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     RenderWindowResult {
         rebuilt,
         snapshot,
+        #[cfg(feature = "frame-profile")]
+        stages,
         profile,
     }
 }

@@ -300,6 +300,7 @@ impl HydrolysisRenderer {
         transform: vello::kurbo::Affine,
         hit_transform: vello::kurbo::Affine,
     ) {
+        let _flush_span = tracing::debug_span!("hydrolysis_capture_window_tree").entered();
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
         let proposal = ProposalSize::new(Some(size.width), Some(size.height));
         // The viewport is recorded here rather than by each caller: every host
@@ -307,6 +308,8 @@ impl HydrolysisRenderer {
         // embedding one in someone else's surface — has to agree on where the
         // window lands in device pixels, and forgetting to say so left the
         // embedded host reading a stale one.
+        #[cfg(feature = "frame-profile")]
+        let update_started_at = Instant::now();
         self.set_window_viewport(bounds, transform);
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         // The tree is built once and persists. A later "rebuild" request reuses
@@ -316,19 +319,51 @@ impl HydrolysisRenderer {
         // frame, so scene/layer flushing is handled by the caller.
         if let Some(mut tree) = self.render_tree.take() {
             tree.patch(self);
+            #[cfg(feature = "frame-profile")]
+            {
+                self.frame_stage_times.update += update_started_at.elapsed();
+            }
+            #[cfg(feature = "frame-profile")]
+            let layout_started_at = Instant::now();
             tree.prepare_for_measure(self);
             tree.layout(self, env, proposal, size);
+            #[cfg(feature = "frame-profile")]
+            {
+                self.frame_stage_times.layout += layout_started_at.elapsed();
+            }
+            #[cfg(feature = "frame-profile")]
+            let encode_started_at = Instant::now();
             tree.flush(self, ctx, env);
             self.flush_subtree_captures(0);
+            #[cfg(feature = "frame-profile")]
+            {
+                self.frame_stage_times.encode += encode_started_at.elapsed();
+            }
             self.render_tree = Some(tree);
             return;
         }
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.update += update_started_at.elapsed();
+        }
         self.render_depth = 0;
         let mut node = RenderNode::build(content, env, self);
+        #[cfg(feature = "frame-profile")]
+        let layout_started_at = Instant::now();
         node.prepare_for_measure(self);
         node.layout(self, env, proposal, size);
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.layout += layout_started_at.elapsed();
+        }
+        #[cfg(feature = "frame-profile")]
+        let encode_started_at = Instant::now();
         node.flush(self, ctx, env);
         self.flush_subtree_captures(0);
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.encode += encode_started_at.elapsed();
+        }
         self.render_tree = Some(node);
     }
 
@@ -346,8 +381,12 @@ impl HydrolysisRenderer {
         let Some(mut tree) = self.render_tree.take() else {
             return false;
         };
+        let _flush_span = tracing::debug_span!("hydrolysis_flush_window_tree").entered();
         // Track the live window viewport every frame: text-context-menu clamping,
         // effect-rect checks and the direct-to-target test read it.
+        #[cfg(feature = "frame-profile")]
+        let update_started_at = Instant::now();
+        let _update_span = tracing::debug_span!("hydrolysis_frame_update").entered();
         self.set_window_viewport(bounds, transform);
         // Roll over this frame's Retain watcher guards exactly like the build path:
         // every re-encode re-reads and re-subscribes reactive visual inputs.
@@ -364,6 +403,14 @@ impl HydrolysisRenderer {
         if structural_change {
             self.animation_controller.begin_rebuild_frame();
         }
+        drop(_update_span);
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.update += update_started_at.elapsed();
+        }
+        let _layout_span = tracing::debug_span!("hydrolysis_frame_layout").entered();
+        #[cfg(feature = "frame-profile")]
+        let layout_started_at = Instant::now();
         self.reset_scene();
         self.begin_redraw_frame();
         // Layout runs every frame: geometry can never go stale against the
@@ -372,6 +419,14 @@ impl HydrolysisRenderer {
         let proposal = ProposalSize::new(Some(size.width), Some(size.height));
         tree.prepare_for_measure(self);
         tree.layout(self, env, proposal, size);
+        drop(_layout_span);
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.layout += layout_started_at.elapsed();
+        }
+        let _encode_span = tracing::debug_span!("hydrolysis_scene_encode").entered();
+        #[cfg(feature = "frame-profile")]
+        let encode_started_at = Instant::now();
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         tree.flush(self, ctx, env);
         // Every filtered subtree captured during the flush is rendered and
@@ -382,6 +437,11 @@ impl HydrolysisRenderer {
         // for a single frame.
         self.render_active_text_context_menu_overlay(env, transform);
         self.flush_vello_scene_layer();
+        drop(_encode_span);
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.encode += encode_started_at.elapsed();
+        }
         self.core
             .hit_test
             .finish_rebuild_frame(&self.core.text_editing.text_input_targets);

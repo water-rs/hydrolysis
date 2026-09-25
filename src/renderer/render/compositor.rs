@@ -1682,7 +1682,10 @@ impl HydrolysisRenderer {
             target.format
         );
 
+        let _render_span = tracing::debug_span!("hydrolysis_render_scene").entered();
         self.flush_vello_scene_layer();
+        #[cfg(feature = "frame-profile")]
+        self.gpu_profile_mark(target.device, target.queue, 0);
         self.frame_direct_gpu_surfaces = 0;
         // The scene the compositor samples is always sRGB. Whether it should be
         // decoded depends on what the attachment does next, which is the
@@ -1702,6 +1705,8 @@ impl HydrolysisRenderer {
                 0
             };
         if render_layers.is_empty() {
+            #[cfg(feature = "frame-profile")]
+            self.gpu_profile_mark(target.device, target.queue, 1);
             self.clear_target_surface(
                 target.device,
                 target.queue,
@@ -1710,6 +1715,8 @@ impl HydrolysisRenderer {
                 encoding,
                 premultiply_alpha,
             );
+            #[cfg(feature = "frame-profile")]
+            self.gpu_profile_mark(target.device, target.queue, 2);
             return;
         }
         // The last condition is the one the layer could not answer for itself:
@@ -1738,6 +1745,8 @@ impl HydrolysisRenderer {
                 target.width,
                 target.height
             );
+            #[cfg(feature = "frame-profile")]
+            self.gpu_profile_mark(target.device, target.queue, 1);
             let direct_target = DirectGpuSurfaceTarget {
                 device: target.device,
                 queue: target.queue,
@@ -1775,11 +1784,15 @@ impl HydrolysisRenderer {
                     encoding,
                     premultiply_alpha,
                 );
+                #[cfg(feature = "frame-profile")]
+                self.gpu_profile_mark(target.device, target.queue, 2);
                 self.compositor.render_layers = render_layers;
                 return;
             }
             self.frame_direct_gpu_surfaces = 1;
             let needs_redraw = runtime.borrow_mut().render_direct_to_target(direct_target);
+            #[cfg(feature = "frame-profile")]
+            self.gpu_profile_mark(target.device, target.queue, 2);
             self.compositor.render_layers = render_layers;
             if needs_redraw {
                 self.request_redraw();
@@ -1962,6 +1975,9 @@ impl HydrolysisRenderer {
             }
         }
 
+        #[cfg(feature = "frame-profile")]
+        self.gpu_profile_mark(target.device, target.queue, 1);
+
         // Phase 2 — one render pass, one submit, painter's order.
         if ready.is_empty() {
             self.clear_target_surface(
@@ -1975,6 +1991,8 @@ impl HydrolysisRenderer {
         } else {
             self.composite_ready_layers(&target, &ready, premultiply_alpha);
         }
+        #[cfg(feature = "frame-profile")]
+        self.gpu_profile_mark(target.device, target.queue, 2);
         for layer in ready {
             if let Some(leased) = layer.layer_texture {
                 self.compositor.release_layer_texture(leased);
