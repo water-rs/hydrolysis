@@ -9,6 +9,7 @@ use executor_core::async_task::{self, AsyncTask, Runnable};
 
 mod gesture_capture;
 mod gesture_env;
+mod gesture_long_press;
 mod gesture_retention;
 mod gesture_surface;
 mod gpu_surface_direct;

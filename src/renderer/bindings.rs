@@ -229,6 +229,7 @@ impl SemanticCore {
         gesture: Gesture,
         action: BoxedAction<()>,
     ) -> Option<crate::gesture::GestureTarget> {
+        ensure_gesture_is_recognizable(&gesture);
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return None;
         }
@@ -331,5 +332,35 @@ impl SemanticCore {
             #[cfg(feature = "accessibility")]
             accessibility_node_id: data.accessibility_node_id,
         });
+    }
+}
+
+/// `Gesture` is `#[non_exhaustive]` upstream: a variant with no recognizer in
+/// the shared engine must fail loudly at attach time, naming the gesture,
+/// instead of the attached handler simply never firing. Composition variants
+/// are recursed into so an unsupported leaf inside `.then` /
+/// `.simultaneously_with` / `.exclusively_before` is named too.
+fn ensure_gesture_is_recognizable(gesture: &Gesture) {
+    match gesture {
+        Gesture::Then(pair) => {
+            ensure_gesture_is_recognizable(pair.first());
+            ensure_gesture_is_recognizable(pair.then());
+        }
+        Gesture::Simultaneous(pair) => {
+            ensure_gesture_is_recognizable(pair.first());
+            ensure_gesture_is_recognizable(pair.second());
+        }
+        Gesture::Exclusive(pair) => {
+            ensure_gesture_is_recognizable(pair.first());
+            ensure_gesture_is_recognizable(pair.second());
+        }
+        Gesture::Tap(_)
+        | Gesture::LongPress(_)
+        | Gesture::Drag(_)
+        | Gesture::Magnification(_)
+        | Gesture::Rotation(_) => {}
+        _ => panic!(
+            "hydrolysis cannot recognize attached gesture {gesture:?}: no recognizer is implemented for it"
+        ),
     }
 }
