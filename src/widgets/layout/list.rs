@@ -36,7 +36,7 @@ use crate::renderer::lazy::VirtualExtentIndex;
 use crate::renderer::resolved_color_to_peniko;
 use crate::widgets::draw_scroll_indicators;
 use nami::watcher::BoxWatcherGuard;
-use nami::{Computed, SignalExt as _};
+use nami::{Computed, Signal, SignalExt as _};
 use waterui::theme::color;
 use waterui_backend_core::widget::{Brush, DrawContext as _};
 use waterui_core::resolve::Resolvable as _;
@@ -754,7 +754,15 @@ pub(crate) fn list_accessibility(
     let row_count = renderer.read_signal(&row_count_signal);
     let list_metrics = theme.map(|theme| theme.list_metrics());
     if let Some(list_metrics) = list_metrics {
-        state.prepare_rows(row_count, list_metrics.one_line_row_height);
+        // `min_row_height` is the floor every row is estimated and measured
+        // against; unset, the theme's one-line height keeps the same values.
+        let row_floor = list
+            .min_row_height
+            .map_or(list_metrics.one_line_row_height, f64::from);
+        // A 0 floor still needs a positive seed estimate — measured extents
+        // replace it row by row anyway.
+        let row_estimate = row_floor.max(1.0);
+        state.prepare_rows(row_count, row_estimate);
         // The chrome decides how tall each row's slot is, so it has to be
         // resolved before extents are measured here — exactly as the draw pass
         // does.
@@ -762,7 +770,7 @@ pub(crate) fn list_accessibility(
             state
                 .extent_index
                 .borrow_mut()
-                .reset(row_count, list_metrics.one_line_row_height, 0.0);
+                .reset(row_count, row_estimate, 0.0);
         }
     } else {
         // The semantic path keeps section chrome current but measures rows in
@@ -839,9 +847,12 @@ pub(crate) fn list_accessibility(
                         &row_env,
                         theme,
                     );
-                    let extent =
-                        list_row_height_for_content(f64::from(content_size.height), list_metrics)
-                            + chrome.total_height(&list_metrics);
+                    let extent = list_row_height_for_content(
+                        f64::from(content_size.height),
+                        item.insets.as_ref(),
+                        list.min_row_height,
+                        list_metrics,
+                    ) + chrome.total_height(&list_metrics);
                     state.extent_index.borrow_mut().set_measured(index, extent);
                     extent
                 }
@@ -1087,17 +1098,25 @@ pub(crate) fn render_list_parts(
     let editing = ctx.renderer_mut().read_signal(&editing);
     let row_count = ctx.renderer_mut().read_signal(&row_count_signal);
     let list_metrics = ctx.theme().list_metrics();
-    state
+    // `min_row_height` is the floor every row is estimated and measured
+    // against; unset, the theme's one-line height keeps the same values.
+    let row_floor = state
         .borrow()
-        .prepare_rows(row_count, list_metrics.one_line_row_height);
+        .config
+        .min_row_height
+        .map_or(list_metrics.one_line_row_height, f64::from);
+    // A 0 floor still needs a positive seed estimate — measured extents
+    // replace it row by row anyway.
+    let row_estimate = row_floor.max(1.0);
+    state.borrow().prepare_rows(row_count, row_estimate);
     if state.borrow().resolve_sections(row_count, env) {
         // Row extents measured before the chrome was known are short by its
         // height, so drop them rather than drawing rows into a stale slot.
-        state.borrow().extent_index.borrow_mut().reset(
-            row_count,
-            list_metrics.one_line_row_height,
-            0.0,
-        );
+        state
+            .borrow()
+            .extent_index
+            .borrow_mut()
+            .reset(row_count, row_estimate, 0.0);
     }
 
     let viewport = ctx.bounds;
@@ -1156,6 +1175,7 @@ pub(crate) fn render_list_parts(
     // rows outside the window are never touched (water-rs/hydrolysis#199).
     let mut extents_changed = false;
     let theme = ctx.theme();
+    let min_row_height = state.borrow().config.min_row_height;
     let mut index = window.start;
     let mut end = window.end;
     loop {
@@ -1175,9 +1195,12 @@ pub(crate) fn render_list_parts(
             // hit testing, and the visible window all account for it.
             let content_size =
                 measure_transient_view_intrinsic(&item.content, ctx.state_mut(), &row_env, &theme);
-            let row_height =
-                list_row_height_for_content(f64::from(content_size.height), list_metrics)
-                    + chrome.total_height(&list_metrics);
+            let row_height = list_row_height_for_content(
+                f64::from(content_size.height),
+                item.insets.as_ref(),
+                min_row_height,
+                list_metrics,
+            ) + chrome.total_height(&list_metrics);
             {
                 let state_ref = state.borrow();
                 let mut extent_index = state_ref.extent_index.borrow_mut();
@@ -1340,7 +1363,13 @@ pub(crate) fn render_list_parts(
         let deletable = ctx.renderer_mut().read_signal(&item.deletable);
         // The content's measured size was resolved in the resting-geometry pass
         // above — the same measure that wrote the row's extent this frame.
-        let mut content_rect = list_content_rect(row_rect, list_metrics, content_size);
+        let mut content_rect = list_content_rect(
+            row_rect,
+            list_metrics,
+            item.insets.as_ref(),
+            content_size,
+            &row_env,
+        );
         let mut trailing_x = row_rect.x1 - 8.0;
 
         // Refreshed before either recognizer runs this frame, so an in-flight
@@ -1980,15 +2009,36 @@ fn section_chrome_text(label: Text, is_header: bool) -> Text {
 fn list_content_rect(
     row_rect: vello::kurbo::Rect,
     metrics: waterui_backend_core::widget::ListMetrics,
+    insets: Option<&waterui_layout::padding::EdgeInsets>,
     content_size: waterui_core::layout::Size,
+    env: &Environment,
 ) -> vello::kurbo::Rect {
     // Rows propose their full inset width to the content; horizontal
     // alignment belongs to the content itself (composite items cannot be
     // statically classified as stretching, and interactive rows must keep a
-    // full-width hit target).
-    let x0 = row_rect.x0 + metrics.horizontal_inset;
-    let x1 = row_rect.x1 - metrics.horizontal_inset;
-    let available_height = (row_rect.height() - metrics.vertical_inset * 2.0).max(0.0);
+    // full-width hit target). The row's `insets` replace the theme's row
+    // insets edge for edge; unset, the theme's symmetric inset keeps the
+    // same rect.
+    let (leading_inset, trailing_inset) = insets.map_or(
+        (metrics.horizontal_inset, metrics.horizontal_inset),
+        |insets| (f64::from(insets.leading()), f64::from(insets.trailing())),
+    );
+    let vertical_insets = insets.map_or(metrics.vertical_inset * 2.0, |insets| {
+        f64::from(insets.top() + insets.bottom())
+    });
+    // `EdgeInsets` is logical: leading opens the content on the side the
+    // layout direction starts from.
+    let (left_inset, right_inset) = if waterui_core::layout::layout_direction(env)
+        .snapshot()
+        .is_right_to_left()
+    {
+        (trailing_inset, leading_inset)
+    } else {
+        (leading_inset, trailing_inset)
+    };
+    let x0 = row_rect.x0 + left_inset;
+    let x1 = row_rect.x1 - right_inset;
+    let available_height = (row_rect.height() - vertical_insets).max(0.0);
     let height = f64::from(content_size.height).min(available_height);
     let y0 = row_rect.y0 + (row_rect.height() - height) * 0.5;
     vello::kurbo::Rect::new(x0, y0, x1, y0 + height)
