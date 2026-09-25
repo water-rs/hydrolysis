@@ -1,6 +1,8 @@
 use core::{any::Any, cmp::Ordering, fmt};
 use std::rc::Rc;
 
+use super::HydrolysisRenderer;
+
 /// Strong identity lease for one retained semantic object.
 ///
 /// The erased owner keeps its allocation alive while the identity is present in
@@ -69,5 +71,42 @@ impl PartialOrd for RetainedIdentity {
 impl Ord for RetainedIdentity {
     fn cmp(&self, other: &Self) -> Ordering {
         self.address.cmp(&other.address)
+    }
+}
+
+impl HydrolysisRenderer {
+    /// Pushes the retained node whose subtree is about to flush onto the
+    /// render owner chain — the ancestry input registration reads. The
+    /// accessibility builder gets the same push for its semantic-key owner.
+    ///
+    /// Unlike [`Self::push_input_owner`], every `emit_accessibility` owner
+    /// push pairs with this on the flush path, so both stacks stay balanced.
+    pub(crate) fn push_render_owner(&mut self, owner: &Rc<()>) {
+        self.owner_stack.push(RetainedIdentity::for_rc(owner));
+        #[cfg(feature = "accessibility")]
+        self.accessibility.push_owner(owner);
+    }
+
+    /// Pops the owner [`Self::push_render_owner`] pushed.
+    pub(crate) fn pop_render_owner(&mut self) {
+        self.owner_stack
+            .pop()
+            .expect("hydrolysis render owner stack underflow");
+        #[cfg(feature = "accessibility")]
+        self.accessibility.pop_owner();
+    }
+
+    /// Pushes an owner only input ancestry sees: marks where a view begins —
+    /// a retained sub-view's root, the view a row's press belongs to —
+    /// without joining the accessibility owner chain.
+    pub(crate) fn push_input_owner(&mut self, owner: &Rc<()>) {
+        self.owner_stack.push(RetainedIdentity::for_rc(owner));
+    }
+
+    /// Pops the owner [`Self::push_input_owner`] pushed.
+    pub(crate) fn pop_input_owner(&mut self) {
+        self.owner_stack
+            .pop()
+            .expect("hydrolysis input owner stack underflow");
     }
 }
