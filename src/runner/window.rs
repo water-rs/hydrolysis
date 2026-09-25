@@ -353,7 +353,7 @@ pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vel
 }
 
 #[cfg(feature = "winit")]
-pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
+pub(crate) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
     match &window.background {
         WindowBackground::Opaque => false,
         WindowBackground::Color(color) => color.resolve(env).snapshot().opacity < 1.0,

@@ -1250,7 +1250,6 @@ mod winit_impl {
     #[cfg(hydrolysis_macos_system_webview)]
     use objc2_web_kit::WKWebView;
     use waterui::window::WindowState;
-    #[cfg(hydrolysis_macos_system_webview)]
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::{
         dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
@@ -1340,17 +1339,83 @@ mod winit_impl {
             );
         }
 
+        /// The X11 presentation defect a transparent window hits on an old
+        /// Mesa software rasterizer: the WSI's `x11_present_to_x11_sw` sent
+        /// its `xcb_put_image` at a hardcoded depth of 24, which the X
+        /// server rejects with BadMatch for a depth-32 window — and the
+        /// driver discards the reply, so `present` reports success while
+        /// the window never updates. Fixed by Mesa commit 1e849b12
+        /// ("vk/wsi/x11/sw: use swapchain depth for putimage"), released in
+        /// Mesa 24.1. Returns the failure message naming the cause when
+        /// `adapter_info` is that stack; `None` otherwise.
+        ///
+        /// The gate is the version alone: only a software rasterizer
+        /// (`DeviceType::Cpu`, which is how Vulkan reports llvmpipe and
+        /// lavapipe) presents through the software X11 WSI path at all, and
+        /// it takes it on every X11 server it drives — with DRI3 it would
+        /// take the shared-pixmap path instead, but a hardware Mesa driver
+        /// already answers `DeviceType` differently, so a version check on
+        /// the software adapter cannot misfire against hardware.
+        fn mesa_x11_transparency_blocker(adapter_info: &wgpu::AdapterInfo) -> Option<String> {
+            if adapter_info.device_type != wgpu::DeviceType::Cpu {
+                return None;
+            }
+            let (major, minor, patch) = Self::mesa_driver_version(&adapter_info.driver_info)?;
+            ((major, minor) < (24, 1)).then(|| {
+                format!(
+                    "Mesa {major}.{minor}.{patch} software WSI presents \
+                     depth-32 X11 windows at depth 24 and the server rejects \
+                     every frame (fixed in Mesa 24.1, commit 1e849b12); \
+                     upgrade Mesa"
+                )
+            })
+        }
+
+        /// The Mesa version `driver_info` announces, e.g. "Mesa
+        /// 23.2.1-1ubuntu2". `None` for a non-Mesa driver or an
+        /// unrecognizable string — an unversioned Mesa build is not proven
+        /// broken, so it is not blocked.
+        fn mesa_driver_version(driver_info: &str) -> Option<(u32, u32, u32)> {
+            let version = &driver_info[driver_info.find("Mesa ")? + "Mesa ".len()..];
+            let mut parts = version
+                .split(|c: char| c != '.' && !c.is_ascii_digit())
+                .next()?
+                .split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next().map_or(0, |p| p.parse().unwrap_or(0));
+            let patch = parts.next().map_or(0, |p| p.parse().unwrap_or(0));
+            Some((major, minor, patch))
+        }
+
+        /// Whether the realized winit window lives on an X11 connection —
+        /// the only display path the Mesa software-WSI defect can hit. A
+        /// window whose handle is not `Xcb`/`Xlib` (Wayland, AppKit,
+        /// Windows, an unrecognized or missing handle) is not blocked.
+        fn window_is_x11(window: &NativeWindow) -> bool {
+            matches!(
+                window.window_handle().map(|handle| handle.as_raw()),
+                Ok(RawWindowHandle::Xcb(_) | RawWindowHandle::Xlib(_))
+            )
+        }
+
         fn from_surface(
             surface: wgpu::Surface<'static>,
             gpu: WinitGpuContext,
             width: u32,
             height: u32,
             requires_transparency: bool,
+            on_x11: bool,
         ) -> Self {
             let caps = surface.get_capabilities(&gpu.adapter);
             let format = super::select_hydrolysis_surface_format(&caps);
-            let alpha_mode =
-                Self::select_alpha_mode(&caps, requires_transparency, &gpu.adapter.get_info());
+            let adapter_info = gpu.adapter.get_info();
+            if requires_transparency
+                && on_x11
+                && let Some(cause) = Self::mesa_x11_transparency_blocker(&adapter_info)
+            {
+                panic!("hydrolysis winit surface: {cause}");
+            }
+            let alpha_mode = Self::select_alpha_mode(&caps, requires_transparency, &adapter_info);
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -1439,6 +1504,7 @@ mod winit_impl {
                     size.width,
                     size.height,
                     requires_transparency,
+                    Self::window_is_x11(&window),
                 ),
                 gpu,
             )
@@ -1462,7 +1528,7 @@ mod winit_impl {
                     .create_surface_unsafe(target)
                     .expect("Hydrolysis failed to create a Metal overlay surface")
             };
-            Self::from_surface(surface, gpu.clone(), width, height, true)
+            Self::from_surface(surface, gpu.clone(), width, height, true, false)
         }
     }
 
@@ -3035,6 +3101,69 @@ mod winit_impl {
                 ),
                 Mode::Opaque
             );
+        }
+
+        /// water-rs/hydrolysis#118: a depth-32 X11 window on a Mesa
+        /// software rasterizer below 24.1 is silently un-presentable — the
+        /// version gate is the only signal presentation never had.
+        #[test]
+        fn a_mesa_software_adapter_below_24_1_is_blocked_for_transparency() {
+            use super::WinitSurface;
+            let adapter = |driver_info: &str, device_type: wgpu::DeviceType| {
+                let mut info = fake_adapter_info();
+                info.name = "llvmpipe (LLVM 15.0.7, 256 bits)".to_string();
+                info.device_type = device_type;
+                info.driver_info = driver_info.to_string();
+                info
+            };
+            let blocked = WinitSurface::mesa_x11_transparency_blocker(&adapter(
+                "Mesa 23.2.1-1ubuntu2",
+                wgpu::DeviceType::Cpu,
+            ));
+            let cause = blocked.expect("Mesa 23.2.1 llvmpipe must be rejected");
+            assert!(
+                cause.contains("23.2.1")
+                    && cause.contains("Mesa 24.1")
+                    && cause.contains("1e849b12")
+                    && cause.contains("upgrade Mesa"),
+                "the failure must name the cause and the fix: {cause}"
+            );
+            for driver_info in [
+                "Mesa 24.1.0",
+                "Mesa 24.1.0-devel (git-c4b20fd)",
+                "Mesa 25.0.7",
+                "Mesa 26.2.3",
+                // Not a Mesa driver — the defect is Mesa-specific.
+                "SwiftShader driver",
+                // No Mesa version to prove the defect against.
+                "",
+            ] {
+                assert!(
+                    WinitSurface::mesa_x11_transparency_blocker(&adapter(
+                        driver_info,
+                        wgpu::DeviceType::Cpu,
+                    ))
+                    .is_none(),
+                    "{driver_info} must pass"
+                );
+            }
+            // A hardware adapter presents through DRI3, never the software
+            // X11 WSI path — even a Mesa one on an old version.
+            for device_type in [
+                wgpu::DeviceType::IntegratedGpu,
+                wgpu::DeviceType::DiscreteGpu,
+                wgpu::DeviceType::VirtualGpu,
+                wgpu::DeviceType::Other,
+            ] {
+                assert!(
+                    WinitSurface::mesa_x11_transparency_blocker(&adapter(
+                        "Mesa 23.2.1",
+                        device_type,
+                    ))
+                    .is_none(),
+                    "{device_type:?} must pass"
+                );
+            }
         }
 
         #[test]

@@ -20,6 +20,8 @@ mod layout_contract;
 mod lazy_cross;
 mod perf_full_rebuild;
 mod perf_scroll;
+#[cfg(not(target_arch = "wasm32"))]
+mod popup_frame;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod popup_windows;
 mod retained_scene;
