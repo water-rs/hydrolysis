@@ -163,6 +163,140 @@ fn horizontal_scroll_rail_keeps_zero_minimum_on_scrolling_axis() {
     );
 }
 
+// Defect reproduction: water-rs/hydrolysis#182 — watergram's folder rail is a
+// `scroll_horizontal` wrapping `Lazy::hstack(ForEach)` caption chips beside a
+// trailing icon button, as `water-rs/watergram` `sidebar_view` built it
+// (src/views.rs at 937ea83). The last chip rendered "Archiv" in a 340 pt
+// sidebar even though the rail had room to scroll to it.
+//
+// Root cause is the same `RenderNode::Scroll::measure` arm one layer deeper:
+// `Lazy::hstack` wraps its stack in a vertical `scroll()`, so the horizontal
+// rail's content measure proposes `(None, Some(height))` to a *scroll* — and
+// the arm answered `proposal.unwrap_or(0)`, i.e. `0`, where §2 asks for the
+// ideal (intrinsic) extent. The outer scroll's `content_size` collapsed to
+// the viewport, so the rail could never scroll and the viewport clip cut the
+// last chip mid-glyph. The arm now measures the content's intrinsic extent on
+// a `None` axis — the same extent the layout pass then measures the content
+// at — while the `0` probe keeps the #179 contract above.
+//
+// The caption chips below are the ones the app draws itself (`text(label)
+// .caption()` over `SurfaceVariant`), not `filter_chip` — watergram does not
+// use the m3 chip for this row.
+
+/// One watergram folder chip: caption text over a rounded `SurfaceVariant`
+/// when active.
+fn folder_chip(name: &'static str, active: bool) -> impl View {
+    use waterui::shape::{RoundedRectangle, ShapeExt as _};
+    use waterui::theme::color::{Accent, SurfaceVariant};
+
+    let label_view: waterui::AnyView = if active {
+        text(name).caption().bold().foreground(Accent).anyview()
+    } else {
+        text(name).caption().muted().anyview()
+    };
+    label_view.padding_with((3.0, 10.0)).background(if active {
+        RoundedRectangle::new(0.5).fill(SurfaceVariant).anyview()
+    } else {
+        waterui::AnyView::default()
+    })
+}
+
+/// The app's trailing icon button (`folder_plus()` in watergram): a plain
+/// icon-only button.
+fn folder_icon_button() -> impl View {
+    waterui_controls::button(label("New folder").icon(text("+")))
+        .label_style(waterui_controls::label::LabelDisplayMode::IconOnly)
+        .plain()
+        .action(|| {})
+}
+
+/// The dogfood row: `hstack((scroll_horizontal(lazy chips), icon_button))`
+/// padded `(4, 8)` — the same nesting the app ships.
+fn folder_rail_row(
+    chips: &[(&'static str, i32)],
+    controller: &waterui_layout::scroll::ScrollController<waterui::layout::Point>,
+) -> impl View {
+    use waterui::component::lazy::Lazy;
+    use waterui::id::SelfId;
+    use waterui::views::ForEach;
+
+    hstack((
+        scroll_horizontal(Lazy::hstack(ForEach::new(
+            chips.iter().copied().map(SelfId::new).collect::<Vec<_>>(),
+            |tab| {
+                let (name, id) = tab.into_inner();
+                folder_chip(name, id == 0).anyview()
+            },
+        )))
+        .scroll_controller(controller)
+        .a11y_label("chip-rail"),
+        folder_icon_button().a11y_label("New folder"),
+    ))
+    .padding_with((4.0, 8.0))
+}
+
+/// A scroll whose content is reached through another scroll must keep a real
+/// content extent: the rail's viewport takes the row's leftover width, the
+/// chips' row stays wider than it, and scrolling brings the last chip's whole
+/// label inside the viewport.
+///
+/// The row is pinned at 292 pt so the leftover rail (292 − 16 padding − 10
+/// spacing − 48 icon = 218) is narrower than the chip content — the geometry
+/// the defect clipped at. Before the fix the inner scroll answered `0` on the
+/// rail's `None` measure, the content collapsed to the viewport, and the last
+/// chip could never be scrolled in.
+#[test]
+fn a_nested_scroll_reports_its_content_extent_and_scrolls_the_last_chip_in() {
+    let controller = waterui_layout::scroll::ScrollController::new(waterui::layout::Point::zero());
+    let chips = vec![("All", 0i32), ("Work", 1), ("Personal", 2), ("Archive", -1)];
+    let mut app = ui()
+        .viewport(340, 640)
+        .theme(hydrolysis_m3::Material3::defaults())
+        .mount_offscreen({
+            let controller = controller.clone();
+            move || {
+                scroll(vstack((
+                    folder_rail_row(&chips, &controller).size(292.0, 56.0),
+                )))
+            }
+        });
+    app.settle();
+
+    let rails = app.query().label("chip-rail").all();
+    assert_eq!(
+        rails.len(),
+        2,
+        "expected outer rail and nested scroll nodes"
+    );
+    let viewport = rails[0].bounds();
+    let content = rails[1].bounds();
+    eprintln!("rail viewport={viewport:?} content={content:?}");
+    assert!(
+        (viewport.width() - 218.0).abs() < 1.0,
+        "the rail's viewport should get the row's leftover width \
+         (292 - 16 padding - 10 spacing - 48 icon = 218): {viewport:?}"
+    );
+    assert!(
+        content.width() > viewport.width() + 1.0,
+        "the horizontal scroll's content must keep the chips' real extent \
+         and overflow its viewport; before the fix the nested scroll answered \
+         `0` on the `None` measure and the content collapsed to the viewport: \
+         viewport={viewport:?} content={content:?}"
+    );
+
+    controller.scroll_to(waterui::layout::Point::new(10_000.0, 0.0));
+    app.settle();
+    let archive = app.query().label("Archive").single().bounds();
+    let viewport = app.query().label("chip-rail").all()[0].bounds();
+    eprintln!("after scroll_to end: archive={archive:?} viewport={viewport:?}");
+    assert!(
+        archive.x() >= viewport.x() - 0.1
+            && archive.x() + archive.width() <= viewport.x() + viewport.width() + 0.1,
+        "the whole Archive label must lie inside the rail's viewport once \
+         scrolled to the end: archive={archive:?} viewport={viewport:?}"
+    );
+}
+
 /// At 600 pt the row fits either way: the rail claims the offer on both
 /// variants, every chip is whole, and the icon sits at the row's right edge.
 #[test]

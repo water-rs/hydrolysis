@@ -220,6 +220,33 @@ impl RenderNode {
                         _ => {}
                     }
                 }
+                // A `None` proposal asks for the ideal (intrinsic) extent
+                // (layout-spec.md §2), and the `min <= ideal <= max` probe
+                // invariant there means it cannot sit below the `0` answer:
+                // on the non-scrolling axis that minimum is already the
+                // content's intrinsic extent, so the ideal is the same
+                // content measure; on the scrolling axis the scroll's
+                // intrinsic extent is its content's. The content is measured
+                // with the proposed extent on the non-scrolling axis and
+                // `None` on the scrolling axis, as §6 prescribes — so a
+                // `(None, _)` answer reports the same extent the layout pass
+                // measures the scroll's content at, and nested scrolls see a
+                // real content size instead of `0`.
+                if proposal.width.is_none() || proposal.height.is_none() {
+                    let content_proposal = match node.axis {
+                        ScrollAxis::Vertical => ProposalSize::new(proposal.width, None),
+                        ScrollAxis::Horizontal => ProposalSize::new(None, proposal.height),
+                        ScrollAxis::All => ProposalSize::UNSPECIFIED,
+                        _ => panic!("hydrolysis render tree: unsupported scroll axis"),
+                    };
+                    let intrinsic = node.child.measure(state, env, theme, content_proposal).size;
+                    if proposal.width.is_none() {
+                        size.width = intrinsic.width;
+                    }
+                    if proposal.height.is_none() {
+                        size.height = intrinsic.height;
+                    }
+                }
                 ViewDimensions::new(size)
             }
             RenderNode::LazyStack(node) => node.measure(state, theme, proposal),
