@@ -62,6 +62,8 @@ mod inspector;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use window::HeadlessSnapshot;
+#[cfg(feature = "winit")]
+pub(crate) use window::window_requires_transparency;
 pub use window::{FrameCounters, FramePhases, FrameProfile};
 
 use crate::env::{parse_bool_env, parse_positive_u64_env};

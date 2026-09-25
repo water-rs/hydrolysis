@@ -607,6 +607,25 @@ impl HeadlessRuntime {
         &self.runtime.renderer
     }
 
+    /// The `Window` the `index`th mounted popup was built from — the value the
+    /// popup machinery emitted — so a test can assert on the window the
+    /// platform layer will realize.
+    #[cfg(test)]
+    pub(crate) fn popup_window(&self, index: usize) -> Option<&Window> {
+        self.popup_windows.get(index).map(|runtime| &runtime.window)
+    }
+
+    /// Captures the `index`th popup's own rendered frame through
+    /// `render_window_with_capture` — the same pump-and-present path the
+    /// winit runner drives per frame — rather than the semantic tree or the
+    /// composited main-window snapshot.
+    #[cfg(test)]
+    pub(crate) fn popup_frame(&mut self, index: usize) -> Option<HeadlessSnapshot> {
+        let popup = self.popup_windows.get_mut(index)?;
+        render_window_with_capture(popup, &self.env, true, &mut || self.local_executor.drain())
+            .snapshot
+    }
+
     /// The mounted popup windows' logical frames — where each transient
     /// window was anchored, in the same coordinate space pointer input is
     /// delivered in — in mount order.
