@@ -10,8 +10,8 @@ use crate::renderer::{
 };
 use crate::renderer::{
     HydroNativeView, HydroState, RenderContext, VisibleSubviewCache, WidgetRenderContext,
-    local_interaction_state, materialize_list_item, measure_list_intrinsic,
-    measure_list_item_row_height, measure_transient_view_intrinsic, transformed_rect,
+    list_row_height_for_content, local_interaction_state, materialize_list_item,
+    measure_list_intrinsic, measure_transient_view_intrinsic, transformed_rect,
 };
 use crate::scroll::ScrollHandle;
 #[cfg(feature = "accessibility")]
@@ -829,15 +829,19 @@ pub(crate) fn list_accessibility(
                 if let Some(extent) = cached_extent {
                     extent
                 } else {
-                    let extent = measure_list_item_row_height(
-                        &item,
+                    let theme =
+                        theme.expect("hydrolysis rendered list measurement requires a theme");
+                    let list_metrics = list_metrics
+                        .expect("hydrolysis rendered list measurement requires list metrics");
+                    let content_size = measure_transient_view_intrinsic(
+                        &item.content,
                         renderer.state_mut(),
                         &row_env,
-                        theme.expect("hydrolysis rendered list measurement requires a theme"),
-                    ) + chrome.total_height(
-                        &list_metrics
-                            .expect("hydrolysis rendered list measurement requires list metrics"),
+                        theme,
                     );
+                    let extent =
+                        list_row_height_for_content(f64::from(content_size.height), list_metrics)
+                            + chrome.total_height(&list_metrics);
                     state.extent_index.borrow_mut().set_measured(index, extent);
                     extent
                 }
@@ -1145,38 +1149,69 @@ pub(crate) fn render_list_parts(
     // cursor advances in.
     let mut rows = Vec::with_capacity(window.end.saturating_sub(window.start));
     let mut y = viewport.y0 - metrics.offset_y + window.leading_offset;
-    for index in window.start..window.end {
-        // A list row is its own chrome: a button inside one is a row, not a
-        // filled container floating on a screen. Buttons that picked a style
-        // explicitly keep it.
-        let mut row_env = env.clone();
-        row_env.insert(waterui_controls::button::ButtonStyle::Plain);
-        row_env.insert(crate::widgets::controls::button::ListRowChrome);
-        let item = materialize_list_item(&contents, index, &row_env);
-        let row_id = contents
-            .get_id(index)
-            .unwrap_or_else(|| panic!("hydrolysis List item {index} has no stable id"));
-        let chrome = state.borrow().section_chrome(index);
-        // A row's extent covers the section chrome it owns, so scroll offsets,
-        // hit testing, and the visible window all account for it.
-        let row_height = {
-            let cached_extent = state.borrow().extent_index.borrow().measured(index);
-            if let Some(extent) = cached_extent {
-                extent
-            } else {
-                let theme = ctx.theme();
-                let extent = measure_list_item_row_height(&item, ctx.state_mut(), &row_env, &theme)
+    // A row's extent is derived from its content's measured size every frame —
+    // the same transient measure `list_content_rect` consumes below — so a row
+    // whose content re-measures differently is re-measured here and only here:
+    // `set_measured` writes the identical extent back for unchanged rows and
+    // rows outside the window are never touched (water-rs/hydrolysis#199).
+    let mut extents_changed = false;
+    let theme = ctx.theme();
+    let mut index = window.start;
+    let mut end = window.end;
+    loop {
+        while index < end {
+            // A list row is its own chrome: a button inside one is a row, not a
+            // filled container floating on a screen. Buttons that picked a style
+            // explicitly keep it.
+            let mut row_env = env.clone();
+            row_env.insert(waterui_controls::button::ButtonStyle::Plain);
+            row_env.insert(crate::widgets::controls::button::ListRowChrome);
+            let item = materialize_list_item(&contents, index, &row_env);
+            let row_id = contents
+                .get_id(index)
+                .unwrap_or_else(|| panic!("hydrolysis List item {index} has no stable id"));
+            let chrome = state.borrow().section_chrome(index);
+            // A row's extent covers the section chrome it owns, so scroll offsets,
+            // hit testing, and the visible window all account for it.
+            let content_size =
+                measure_transient_view_intrinsic(&item.content, ctx.state_mut(), &row_env, &theme);
+            let row_height =
+                list_row_height_for_content(f64::from(content_size.height), list_metrics)
                     + chrome.total_height(&list_metrics);
-                state
-                    .borrow()
-                    .extent_index
-                    .borrow_mut()
-                    .set_measured(index, extent);
-                extent
+            {
+                let state_ref = state.borrow();
+                let mut extent_index = state_ref.extent_index.borrow_mut();
+                extents_changed |= extent_index
+                    .measured(index)
+                    .is_none_or(|old| old.to_bits() != row_height.to_bits());
+                extent_index.set_measured(index, row_height);
             }
-        };
-        rows.push((index, row_id, item, y, row_height));
-        y += row_height;
+            rows.push((index, row_id, item, y, row_height, content_size));
+            y += row_height;
+            index += 1;
+        }
+        // A re-measured row can pull the window's end either way: shrinkage
+        // reveals rows the stale extents hid, and those rows must be resolved
+        // into this frame's stack rather than leaving the viewport's tail
+        // unpainted until the next refresh.
+        let refreshed_end = state
+            .borrow()
+            .extent_index
+            .borrow()
+            .visible_window(metrics.offset_y, metrics.offset_y + viewport.height())
+            .end;
+        if refreshed_end <= end {
+            break;
+        }
+        end = refreshed_end;
+    }
+    if extents_changed {
+        // Everything downstream of this pass that reads extents — the
+        // accessibility emit that ran before it, the scroll domain, the
+        // indicators — was resolved against the stale values, so pull one
+        // more frame rather than leaving them stale until an unrelated
+        // refresh happens to arrive.
+        ctx.renderer_mut().request_refresh();
     }
     let lifted_id = state.borrow().reorder.get().map(|reorder| reorder.id);
     if let Some(lifted_id) = lifted_id
@@ -1187,7 +1222,7 @@ pub(crate) fn render_list_parts(
     }
     let visible_ids: Vec<ListItemId> = rows.iter().map(|(_, id, ..)| *id).collect();
 
-    for (index, row_id, item, resting_y, row_height) in rows {
+    for (index, row_id, item, resting_y, row_height, content_size) in rows {
         let row_env = env.clone();
         // The row's `ListItem` node claims whatever naming scope the content
         // carries — hoist the metadata off the view the same way
@@ -1303,9 +1338,8 @@ pub(crate) fn render_list_parts(
         }
 
         let deletable = ctx.renderer_mut().read_signal(&item.deletable);
-        let theme = ctx.theme();
-        let content_size =
-            measure_transient_view_intrinsic(&item.content, ctx.state_mut(), &row_env, &theme);
+        // The content's measured size was resolved in the resting-geometry pass
+        // above — the same measure that wrote the row's extent this frame.
         let mut content_rect = list_content_rect(row_rect, list_metrics, content_size);
         let mut trailing_x = row_rect.x1 - 8.0;
 

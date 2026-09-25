@@ -877,15 +877,16 @@ pub(crate) fn materialize_list_item(
     item
 }
 
-pub(crate) fn measure_list_item_row_height(
-    item: &ListItem,
-    state: &mut HydroState,
-    env: &Environment,
-    theme: &Rc<dyn WidgetTheme>,
+/// A list row's extent from its content's measured height: the content plus
+/// the row's vertical insets, floored at the theme's one-line minimum. The
+/// caller measures the content (a [`measure_transient_view_intrinsic`] on the
+/// materialized `ListItem`) and the section chrome height is added on top of
+/// what this returns.
+pub(crate) fn list_row_height_for_content(
+    content_height: f64,
+    metrics: waterui_backend_core::widget::ListMetrics,
 ) -> f64 {
-    let intrinsic = measure_transient_view_intrinsic(&item.content, state, env, theme);
-    let metrics = theme.list_metrics();
-    (f64::from(intrinsic.height) + metrics.vertical_inset * 2.0).max(metrics.one_line_row_height)
+    (content_height + metrics.vertical_inset * 2.0).max(metrics.one_line_row_height)
 }
 
 pub(crate) fn measure_progress_intrinsic(
