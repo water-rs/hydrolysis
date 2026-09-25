@@ -33,6 +33,8 @@ impl RenderNode {
             Ok(text) => {
                 let config = (*text).into_inner();
                 return RenderNode::Text(Box::new(TextNode {
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
                     content: config.content,
                     alignment: config.paragraph_alignment,
@@ -70,6 +72,8 @@ impl RenderNode {
                     })
                     .collect();
                 return RenderNode::Container(Box::new(ContainerNode {
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
                     layout,
                     children,
@@ -466,6 +470,8 @@ impl RenderNode {
                 let (axis, content, controller) = (*scroll).into_inner().into_inner();
                 let content = normalize_layout_view(content, env);
                 return RenderNode::Scroll(Box::new(ScrollNode {
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
                     axis,
                     child: RenderNode::build(content, env, renderer),
@@ -773,6 +779,8 @@ impl RenderNode {
             .collect();
         let transition = collection_transition_runtime(env, layout.as_ref());
         RenderNode::Collection(Box::new(CollectionNode {
+            memo_gate: Cell::default(),
+            memo_slots: RefCell::default(),
             layout,
             views,
             env: env.clone(),
@@ -821,6 +829,8 @@ impl RenderNode {
         #[cfg(feature = "accessibility")]
         let env = item_env.as_ref().unwrap_or(env);
         RenderNode::LazyStack(Box::new(LazyStackNode {
+            memo_gate: Cell::default(),
+            memo_slots: RefCell::default(),
             axis,
             views,
             env: env.clone(),

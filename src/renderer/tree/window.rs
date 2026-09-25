@@ -330,6 +330,7 @@ impl HydrolysisRenderer {
             #[cfg(feature = "frame-profile")]
             {
                 self.frame_stage_times.layout += layout_started_at.elapsed();
+                self.last_layout_signature = Some(tree.placed_signature(Rect::from_size(size)));
             }
             #[cfg(feature = "frame-profile")]
             let encode_started_at = Instant::now();
@@ -355,6 +356,7 @@ impl HydrolysisRenderer {
         #[cfg(feature = "frame-profile")]
         {
             self.frame_stage_times.layout += layout_started_at.elapsed();
+            self.last_layout_signature = Some(node.placed_signature(Rect::from_size(size)));
         }
         #[cfg(feature = "frame-profile")]
         let encode_started_at = Instant::now();
@@ -423,6 +425,7 @@ impl HydrolysisRenderer {
         #[cfg(feature = "frame-profile")]
         {
             self.frame_stage_times.layout += layout_started_at.elapsed();
+            self.last_layout_signature = Some(tree.placed_signature(Rect::from_size(size)));
         }
         let _encode_span = tracing::debug_span!("hydrolysis_scene_encode").entered();
         #[cfg(feature = "frame-profile")]

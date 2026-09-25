@@ -152,9 +152,8 @@ impl GpuFrameProfiler {
 
         let mapped = slice.get_mapped_range();
         let mut timestamps = [0u64; QUERY_SLOTS as usize];
-        for (slot, bytes) in mapped.chunks_exact(8).enumerate() {
-            timestamps[slot] =
-                u64::from_le_bytes(bytes.try_into().expect("timestamp slot is 8 bytes"));
+        for (slot, bytes) in mapped.as_chunks::<8>().0.iter().enumerate() {
+            timestamps[slot] = u64::from_le_bytes(*bytes);
         }
         drop(mapped);
         self.staging_buffer.unmap();
@@ -200,5 +199,12 @@ impl HydrolysisRenderer {
     /// resetting for the next frame. Called once per pump by the runner.
     pub fn take_frame_stage_times(&mut self) -> FrameStageTimes {
         core::mem::take(&mut self.frame_stage_times)
+    }
+
+    /// Digest of the last layout pass's placed bounds — a deterministic hash
+    /// of every node's frame, for before/after correctness checks.
+    #[must_use]
+    pub fn layout_signature(&self) -> Option<u64> {
+        self.last_layout_signature
     }
 }

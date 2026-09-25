@@ -86,6 +86,7 @@ use super::*;
 use crate::renderer::lazy::{
     LazyStackAxisConfig, VirtualExtentIndex, lazy_stack_axis_config, place_lazy_stack_item,
 };
+use crate::renderer::render::{MemoGate, NodeMeasureEntry};
 use crate::scroll::ScrollHandle;
 use core::cell::Cell;
 use core::ops::Range;

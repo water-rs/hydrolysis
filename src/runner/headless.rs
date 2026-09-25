@@ -637,6 +637,14 @@ impl HeadlessRuntime {
             .collect()
     }
 
+    /// Digest of the last layout pass's placed bounds — the frame-profile
+    /// example's byte-identical layout check.
+    #[cfg(feature = "frame-profile")]
+    #[must_use]
+    pub fn layout_signature(&self) -> Option<u64> {
+        self.runtime.renderer.layout_signature()
+    }
+
     pub fn pump_at(&mut self, capture_snapshot: bool, at: Instant) -> HeadlessPumpResult {
         let frame_started_at = Instant::now();
         self.runtime.renderer.set_frame_instant(at);
