@@ -24,7 +24,7 @@ use crate::renderer::tree::RenderNode;
 
 /// A layout proposal as a hashable cache-key component.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct ProposalKey {
+pub(crate) struct ProposalKey {
     width_bits: Option<u32>,
     height_bits: Option<u32>,
 }

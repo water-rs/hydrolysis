@@ -467,3 +467,117 @@ impl RenderNode {
         }
     }
 }
+
+/// A deterministic digest of a layout pass's output — FNV-1a over every node's
+/// variant tag and placed frame, walked depth-first. The frame-profile
+/// example compares digests across runs to prove a change left layout
+/// byte-identical.
+#[cfg(feature = "frame-profile")]
+pub(super) struct SignatureHasher(u64);
+
+#[cfg(feature = "frame-profile")]
+impl SignatureHasher {
+    pub(super) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub(super) fn mix(&mut self, bits: u64) {
+        self.0 = (self.0 ^ bits).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+#[cfg(feature = "frame-profile")]
+impl std::hash::Hasher for SignatureHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.mix(u64::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.mix(value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.mix(value as u64);
+    }
+}
+
+/// Hash a [`Size`] into the layout digest.
+#[cfg(feature = "frame-profile")]
+pub(super) fn hash_size(hasher: &mut SignatureHasher, size: Size) {
+    hasher.mix(u64::from(size.width.to_bits()));
+    hasher.mix(u64::from(size.height.to_bits()));
+}
+
+/// Hash a node's placed [`Rect`] into the layout digest.
+#[cfg(feature = "frame-profile")]
+pub(super) fn hash_frame(hasher: &mut SignatureHasher, frame: Rect) {
+    hasher.mix(u64::from(frame.x().to_bits()));
+    hasher.mix(u64::from(frame.y().to_bits()));
+    hash_size(hasher, *frame.size());
+}
+
+#[cfg(feature = "frame-profile")]
+impl RenderNode {
+    /// Digest of what the layout pass computed for this subtree under `frame`:
+    /// every node's variant tag and its placed frame, depth-first, plus the
+    /// geometry nodes cache for the flush pass (a scroll's content size and
+    /// viewport, a lazy stack's retained items). Identical digests on two runs
+    /// mean layout produced identical bounds for every node.
+    pub(crate) fn placed_signature(&self, frame: Rect) -> u64 {
+        let mut hasher = SignatureHasher::new();
+        self.signature_into(frame, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+
+    pub(super) fn signature_into(&self, frame: Rect, hasher: &mut SignatureHasher) {
+        use std::hash::Hash;
+        core::mem::discriminant(self).hash(hasher);
+        hash_frame(hasher, frame);
+        match self {
+            RenderNode::Color(_)
+            | RenderNode::Text(_)
+            | RenderNode::SceneView(_)
+            | RenderNode::GpuSurface(_)
+            | RenderNode::Widget(_) => {}
+            RenderNode::Opacity(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Scale(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Rotation(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Offset(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Retain(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Env(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Wrapper(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Dynamic(node) => node.child.borrow().signature_into(frame, hasher),
+            RenderNode::ViewEffect(node) => node.child.borrow().signature_into(frame, hasher),
+            RenderNode::AppliedFilter(node) => node.child.signature_into(frame, hasher),
+            RenderNode::Container(node) => {
+                node.placed.len().hash(hasher);
+                for (child, rect) in node.children.iter().zip(&node.placed) {
+                    child.signature_into(*rect, hasher);
+                }
+            }
+            RenderNode::Collection(node) => {
+                node.placed.len().hash(hasher);
+                for (entry, rect) in node.entries.iter().zip(&node.placed) {
+                    entry.node.signature_into(*rect, hasher);
+                }
+            }
+            RenderNode::Scroll(node) => {
+                hash_size(hasher, node.content_size);
+                hash_size(hasher, node.viewport);
+                node.child
+                    .signature_into(Rect::from_size(node.content_size), hasher);
+            }
+            RenderNode::LazyStack(node) => node.item_cache.borrow().signature_into(hasher),
+        }
+    }
+}

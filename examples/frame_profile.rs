@@ -96,6 +96,9 @@ struct FrameRecord {
     gpu_wait_ns: u64,
     readback_ns: u64,
     total_ns: u64,
+    /// Digest of the frame's placed-bounds tree — identical across runs iff
+    /// layout produced identical geometry for every node.
+    layout_signature: Option<u64>,
     phases: BTreeMap<&'static str, u64>,
     counters: BTreeMap<&'static str, u64>,
 }
@@ -418,6 +421,7 @@ fn run_scene(spec: &SceneSpec, gpu: &OffscreenGpuContext, warmup: u32, frames: u
             gpu_wait_ns: ns(stages.gpu_wait),
             readback_ns: ns(stages.readback),
             total_ns: ns(result.profile.total),
+            layout_signature: runtime.layout_signature(),
             phases: BTreeMap::from([
                 ("executor_before_ns", ns(phases.executor_before)),
                 ("input_ns", ns(phases.input)),

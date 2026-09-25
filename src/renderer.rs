@@ -343,6 +343,11 @@ pub struct HydrolysisRenderer {
     /// lacks `TIMESTAMP_QUERY` — GPU stages then report absent, never a guess.
     #[cfg(feature = "frame-profile")]
     gpu_profiler: Option<GpuFrameProfiler>,
+    /// Digest of the last layout pass's placed bounds; the frame-profile
+    /// example compares it across runs to prove a change left layout output
+    /// byte-identical.
+    #[cfg(feature = "frame-profile")]
+    last_layout_signature: Option<u64>,
 }
 
 impl core::ops::Deref for HydrolysisRenderer {
@@ -514,6 +519,8 @@ impl HydrolysisRenderer {
             frame_stage_times: FrameStageTimes::default(),
             #[cfg(feature = "frame-profile")]
             gpu_profiler: GpuFrameProfiler::new(device),
+            #[cfg(feature = "frame-profile")]
+            last_layout_signature: None,
         }
     }
 

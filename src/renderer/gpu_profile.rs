@@ -201,4 +201,11 @@ impl HydrolysisRenderer {
     pub fn take_frame_stage_times(&mut self) -> FrameStageTimes {
         core::mem::take(&mut self.frame_stage_times)
     }
+
+    /// Digest of the last layout pass's placed bounds — a deterministic hash
+    /// of every node's frame, for before/after correctness checks.
+    #[must_use]
+    pub fn layout_signature(&self) -> Option<u64> {
+        self.last_layout_signature
+    }
 }

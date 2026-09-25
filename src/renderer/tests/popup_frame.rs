@@ -104,12 +104,18 @@ fn the_context_menu_popup_presents_its_items_through_a_presentable_window() {
         }
     }
 
-    let popup = runtime
-        .popup_window(0)
-        .expect("the secondary press must mount the context-menu popup");
+    assert!(
+        runtime.popup_window(0).is_some(),
+        "the secondary press must mount the context-menu popup"
+    );
     #[cfg(feature = "winit")]
     assert!(
-        crate::runner::window_requires_transparency(popup, &env),
+        crate::runner::window_requires_transparency(
+            runtime
+                .popup_window(0)
+                .expect("the context-menu popup is mounted"),
+            &env
+        ),
         "the context-menu popup must keep requesting the transparent window \
          it needs for its rounded corners — the renderer keeps the true \
          alpha channel everywhere the stack can present it"

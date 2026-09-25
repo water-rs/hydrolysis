@@ -1,6 +1,8 @@
 //! The retained node structs a [`RenderNode`] variant carries, with their
 //! small inherent impls (runtime setup, per-frame effect application).
 
+#[cfg(feature = "frame-profile")]
+use super::layout::{SignatureHasher, hash_size};
 use super::*;
 
 /// A retained sub-view a native widget owns and re-renders every flush — the
@@ -1129,4 +1131,40 @@ pub(super) fn emit_graphics_image_accessibility(
     _default_value: Option<String>,
     _focusable: bool,
 ) {
+}
+
+#[cfg(feature = "frame-profile")]
+impl RetainedSubview {
+    /// Contributes this retained sub-view's last layout answer and its node's
+    /// placed geometry to the frame's layout digest.
+    pub(super) fn signature_into(&self, hasher: &mut SignatureHasher) {
+        use std::hash::Hash;
+        hash_size(hasher, self.laid_out);
+        self.laid_out_proposal.is_some().hash(hasher);
+        if let Some(proposal) = self.laid_out_proposal {
+            proposal.width.map(f32::to_bits).hash(hasher);
+            proposal.height.map(f32::to_bits).hash(hasher);
+        }
+        if let Some(node) = &self.node {
+            node.signature_into(Rect::from_size(self.laid_out), hasher);
+        }
+    }
+}
+
+#[cfg(feature = "frame-profile")]
+impl<K: Eq + core::hash::Hash + Clone> VisibleSubviewCache<K> {
+    /// Order-independent fold of every retained item's signature — the map's
+    /// iteration order is not stable, so per-entry digests combine by sum.
+    pub(super) fn signature_into(&self, hasher: &mut SignatureHasher) {
+        use std::hash::Hash;
+        self.entries.len().hash(hasher);
+        let mut combined = 0u64;
+        for (key, subview) in &self.entries {
+            let mut entry_hasher = SignatureHasher::new();
+            key.hash(&mut entry_hasher);
+            subview.signature_into(&mut entry_hasher);
+            combined = combined.wrapping_add(std::hash::Hasher::finish(&entry_hasher));
+        }
+        hasher.mix(combined);
+    }
 }
