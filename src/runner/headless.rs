@@ -607,6 +607,17 @@ impl HeadlessRuntime {
         &self.runtime.renderer
     }
 
+    /// The mounted popup windows' logical frames — where each transient
+    /// window was anchored, in the same coordinate space pointer input is
+    /// delivered in — in mount order.
+    #[cfg(test)]
+    pub(crate) fn popup_frames(&self) -> Vec<waterui_core::layout::Rect> {
+        self.popup_windows
+            .iter()
+            .map(|popup| crate::platform::validated_window_frame(popup.window.frame.snapshot()))
+            .collect()
+    }
+
     pub fn pump_at(&mut self, capture_snapshot: bool, at: Instant) -> HeadlessPumpResult {
         let frame_started_at = Instant::now();
         self.runtime.renderer.set_frame_instant(at);

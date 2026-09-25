@@ -208,12 +208,16 @@ impl SemanticCore {
             .has_focus()
             .then_some(self.text_editing.text_caret_next_frame_at)
             .flatten();
-        match (gesture_deadline, caret_deadline) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(left), None) => Some(left),
-            (None, Some(right)) => Some(right),
-            (None, None) => None,
-        }
+        // An armed context-menu hold wakes the runner at the same instant
+        // its tick fires it — it shares the gesture deadline channel.
+        let hold_deadline = self
+            .hit_test
+            .pending_context_menu_hold
+            .map(|hold| hold.started_at + CONTEXT_MENU_HOLD_DURATION);
+        [gesture_deadline, caret_deadline, hold_deadline]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub fn sync_active_interactions_after_layout(&mut self, pointer: Option<(f32, f32)>) {

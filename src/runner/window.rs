@@ -1453,7 +1453,11 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     if runtime.renderer.poll_gpu_surface_redraw_handles() {
         runtime.platform.request_redraw();
     }
-    if runtime.renderer.handle_gesture_tick(now, env) {
+    // A gesture tick can mount a popup window — an armed context-menu hold
+    // fires here — and the popup anchors in absolute coordinates through
+    // `HydrolysisWindowOrigin`, the same extension pointer dispatch gets.
+    let gesture_env = env.extending(runtime_window_origin(runtime));
+    if runtime.renderer.handle_gesture_tick(now, &gesture_env) {
         runtime.request_refresh();
     }
     // Smoothed wheel scrolling eases offsets toward their targets per frame;
