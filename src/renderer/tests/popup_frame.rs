@@ -56,7 +56,7 @@ fn secondary_click(x: f32, y: f32) -> [InputEvent; 2] {
 
 fn dominant_rgb(rgba8: &[u8]) -> [u8; 3] {
     let mut counts = std::collections::HashMap::<[u8; 3], u32>::new();
-    for px in rgba8.chunks_exact(4) {
+    for px in rgba8.as_chunks::<4>().0 {
         *counts.entry([px[0], px[1], px[2]]).or_default() += 1;
     }
     counts
@@ -121,8 +121,10 @@ fn the_context_menu_popup_presents_its_items_through_a_presentable_window() {
     let fill = dominant_rgb(&frame.rgba8);
     let item_pixels = frame
         .rgba8
-        .chunks_exact(4)
-        .filter(|px| differs(px, fill, 48))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| differs(&px[..], fill, 48))
         .count();
     assert!(
         item_pixels > 100,
