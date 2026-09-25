@@ -108,7 +108,59 @@ impl RenderNode {
     /// Measure this node under a proposal (recursive). Text shaping runs through
     /// the renderer's [`HydroState`] on the main thread. Visible crate-wide so
     /// the `Dynamic` dispatch measure can re-measure the retained child.
+    ///
+    /// Memoized per frame on the node's own [`NodeMeasureEntry`], for
+    /// container-like nodes only: a layout engine that re-probes a child
+    /// under different proposals (a stack measuring at `None` for an extent,
+    /// then at a concrete width, then the same pair again from `place`)
+    /// would otherwise re-run the whole subtree measure — multiplicatively
+    /// with depth. Every other node's body is a leaf answer or a
+    /// `child.measure` forward (itself gated where it matters), so memoizing
+    /// those buys nothing.
+    ///
+    /// The [`MemoGate`] runs first: a node whose probes never repeat a
+    /// proposal within a frame (the common case — the memo could never hit)
+    /// pays a `Cell` update and skips the `RefCell` borrow, the ring scan,
+    /// and the dimensions store. Only a node observed being re-probed under
+    /// a proposal it already answered keeps memoizing.
     pub(crate) fn measure(
+        &self,
+        state: &mut HydroState,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> ViewDimensions {
+        let (memo_gate, memo_slots) = match self {
+            RenderNode::Container(node) => (&node.memo_gate, &node.memo_slots),
+            RenderNode::Scroll(node) => (&node.memo_gate, &node.memo_slots),
+            RenderNode::Collection(node) => (&node.memo_gate, &node.memo_slots),
+            RenderNode::LazyStack(node) => (&node.memo_gate, &node.memo_slots),
+            RenderNode::Text(node) => (&node.memo_gate, &node.memo_slots),
+            _ => return self.measure_body(state, env, theme, proposal),
+        };
+        let frame = state.measurement.frame();
+        let mut gate = memo_gate.get();
+        if !gate.probe(frame, proposal) {
+            memo_gate.set(gate);
+            return self.measure_body(state, env, theme, proposal);
+        }
+        memo_gate.set(gate);
+        // Only a probe the gate lets through needs the env identity.
+        let env_identity = env.identity();
+        let hit = memo_slots.borrow().dims(env_identity, frame, proposal);
+        if let Some(hit) = hit {
+            return hit;
+        }
+        let dimensions = self.measure_body(state, env, theme, proposal);
+        let mut memo = memo_slots.borrow_mut();
+        memo.ensure_current(frame);
+        memo.push_dims(env_identity, proposal, dimensions.clone());
+        dimensions
+    }
+
+    /// The uncached measure [`Self::measure`] memoizes; the recursive match over
+    /// the node's payload.
+    pub(crate) fn measure_body(
         &self,
         state: &mut HydroState,
         env: &Environment,

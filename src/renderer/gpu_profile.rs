@@ -152,9 +152,8 @@ impl GpuFrameProfiler {
 
         let mapped = slice.get_mapped_range();
         let mut timestamps = [0u64; QUERY_SLOTS as usize];
-        for (slot, bytes) in mapped.chunks_exact(8).enumerate() {
-            timestamps[slot] =
-                u64::from_le_bytes(bytes.try_into().expect("timestamp slot is 8 bytes"));
+        for (slot, bytes) in mapped.as_chunks::<8>().0.iter().enumerate() {
+            timestamps[slot] = u64::from_le_bytes(*bytes);
         }
         drop(mapped);
         self.staging_buffer.unmap();

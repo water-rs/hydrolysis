@@ -633,6 +633,14 @@ pub(crate) struct ColorNode {
 }
 
 pub(crate) struct TextNode {
+    /// Per-frame measure memo gate: records whether this node's body was
+    /// re-probed within a frame, gating `memo_slots` so a node measured
+    /// once per frame pays a `Cell` update instead of a `RefCell` borrow.
+    pub(crate) memo_gate: Cell<MemoGate>,
+    /// The proposal ring `measure` consults once `memo_gate` marks this
+    /// node as re-probed. Owned by the node, so a dropped node never
+    /// leaves a stale answer behind.
+    pub(crate) memo_slots: RefCell<NodeMeasureEntry>,
     pub(crate) accessibility_identity: Rc<()>,
     pub(crate) content: Computed<StyledStr>,
     pub(crate) alignment: Computed<HorizontalAlignment>,
@@ -641,6 +649,14 @@ pub(crate) struct TextNode {
 }
 
 pub(crate) struct ContainerNode {
+    /// Per-frame measure memo gate: records whether this node's body was
+    /// re-probed within a frame, gating `memo_slots` so a node measured
+    /// once per frame pays a `Cell` update instead of a `RefCell` borrow.
+    pub(crate) memo_gate: Cell<MemoGate>,
+    /// The proposal ring `measure` consults once `memo_gate` marks this
+    /// node as re-probed. Owned by the node, so a dropped node never
+    /// leaves a stale answer behind.
+    pub(crate) memo_slots: RefCell<NodeMeasureEntry>,
     pub(crate) accessibility_identity: Rc<()>,
     pub(crate) layout: Box<dyn Layout>,
     pub(crate) children: Vec<RenderNode>,
@@ -684,6 +700,14 @@ pub(crate) struct OffsetNode {
 }
 
 pub(crate) struct ScrollNode {
+    /// Per-frame measure memo gate: records whether this node's body was
+    /// re-probed within a frame, gating `memo_slots` so a node measured
+    /// once per frame pays a `Cell` update instead of a `RefCell` borrow.
+    pub(crate) memo_gate: Cell<MemoGate>,
+    /// The proposal ring `measure` consults once `memo_gate` marks this
+    /// node as re-probed. Owned by the node, so a dropped node never
+    /// leaves a stale answer behind.
+    pub(crate) memo_slots: RefCell<NodeMeasureEntry>,
     pub(super) accessibility_identity: Rc<()>,
     pub(super) axis: ScrollAxis,
     pub(super) child: RenderNode,

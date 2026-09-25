@@ -144,6 +144,14 @@ fn next_live_phase(
 }
 
 pub(crate) struct CollectionNode {
+    /// Per-frame measure memo gate: records whether this node's body was
+    /// re-probed within a frame, gating `memo_slots` so a node measured
+    /// once per frame pays a `Cell` update instead of a `RefCell` borrow.
+    pub(crate) memo_gate: Cell<MemoGate>,
+    /// The proposal ring `measure` consults once `memo_gate` marks this
+    /// node as re-probed. Owned by the node, so a dropped node never
+    /// leaves a stale answer behind.
+    pub(crate) memo_slots: RefCell<NodeMeasureEntry>,
     /// The container layout (e.g. `AbsoluteLayout`, `ZStackLayout`).
     pub(super) layout: Box<dyn Layout>,
     /// The reactive item collection (`len`/`get_view`/`get_id`, watched).
@@ -184,6 +192,14 @@ pub(crate) struct CollectionNode {
 }
 
 pub(crate) struct LazyStackNode {
+    /// Per-frame measure memo gate: records whether this node's body was
+    /// re-probed within a frame, gating `memo_slots` so a node measured
+    /// once per frame pays a `Cell` update instead of a `RefCell` borrow.
+    pub(crate) memo_gate: Cell<MemoGate>,
+    /// The proposal ring `measure` consults once `memo_gate` marks this
+    /// node as re-probed. Owned by the node, so a dropped node never
+    /// leaves a stale answer behind.
+    pub(crate) memo_slots: RefCell<NodeMeasureEntry>,
     /// Stack axis + spacing + cross-axis alignment.
     pub(super) axis: LazyStackAxisConfig,
     /// The reactive item collection (`len`/`get_view`, watched for membership).

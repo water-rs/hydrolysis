@@ -645,7 +645,6 @@ impl HeadlessRuntime {
         self.runtime.renderer.layout_signature()
     }
 
-
     pub fn pump_at(&mut self, capture_snapshot: bool, at: Instant) -> HeadlessPumpResult {
         let frame_started_at = Instant::now();
         self.runtime.renderer.set_frame_instant(at);

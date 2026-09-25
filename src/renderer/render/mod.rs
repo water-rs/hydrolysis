@@ -20,7 +20,7 @@ pub(crate) use compositor::{
     LayerShape, RenderLayer, covers_viewport_directly,
 };
 pub(crate) use measurement::*;
-pub(crate) use measurement_cache::MeasurementCaches;
+pub(crate) use measurement_cache::{MeasurementCaches, MemoGate, NodeMeasureEntry};
 pub use render_context::RenderContext;
 pub(crate) use render_context::{HydrolysisTextContextMenuMode, HydrolysisWindowOrigin};
 pub(crate) use render_context::{WidgetRenderContext, bounded_proposal};
