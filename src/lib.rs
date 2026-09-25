@@ -55,6 +55,8 @@ pub use platform::{
     OffscreenWindow, PlatformWindow, PointerButton, PointerKind, SurfaceError, SurfaceFrame,
     SurfaceProvider, TextInputPurpose, TextInputState, TouchPhase,
 };
+#[cfg(feature = "frame-profile")]
+pub use renderer::{FrameStageTimes, GpuIdentity};
 pub use renderer::{HydroState, HydrolysisRenderTarget, HydrolysisRenderer, RenderContext};
 pub use runner::run;
 pub use runner::{FrameCounters, FramePhases, FrameProfile, SemanticPumpResult, SemanticRuntime};

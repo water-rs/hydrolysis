@@ -23,6 +23,8 @@ mod bindings;
 mod color;
 mod effects;
 mod frame;
+#[cfg(feature = "frame-profile")]
+mod gpu_profile;
 mod identity;
 mod input;
 mod interaction_layers;
@@ -41,6 +43,10 @@ mod views;
 
 pub(crate) use effects::*;
 pub(crate) use frame::*;
+#[cfg(feature = "frame-profile")]
+pub(crate) use gpu_profile::GpuFrameProfiler;
+#[cfg(feature = "frame-profile")]
+pub use gpu_profile::{FrameStageTimes, GpuIdentity};
 pub(crate) use identity::*;
 pub(crate) use native_measure::*;
 pub(crate) use retained::*;
@@ -328,6 +334,15 @@ pub struct HydrolysisRenderer {
     /// The per-frame atlas every filtered subtree is captured through.
     subtree_captures: SubtreeCaptures,
     navigation_captures: Vec<NavigationSceneCapture>,
+    /// CPU stage times accumulated by `flush_window_tree`, plus the GPU spans
+    /// the render pass resolves; drained per pump by `take_frame_stage_times`.
+    /// `pub(crate)` so the runner's readback timing can add its stage in.
+    #[cfg(feature = "frame-profile")]
+    pub(crate) frame_stage_times: FrameStageTimes,
+    /// Timestamp-query state for the frame's GPU spans; `None` when the device
+    /// lacks `TIMESTAMP_QUERY` — GPU stages then report absent, never a guess.
+    #[cfg(feature = "frame-profile")]
+    gpu_profiler: Option<GpuFrameProfiler>,
 }
 
 impl core::ops::Deref for HydrolysisRenderer {
@@ -495,6 +510,10 @@ impl HydrolysisRenderer {
             frame_applied_filter_effect: Duration::ZERO,
             subtree_captures: SubtreeCaptures::default(),
             navigation_captures: Vec::new(),
+            #[cfg(feature = "frame-profile")]
+            frame_stage_times: FrameStageTimes::default(),
+            #[cfg(feature = "frame-profile")]
+            gpu_profiler: GpuFrameProfiler::new(device),
         }
     }
 

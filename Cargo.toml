@@ -200,6 +200,10 @@ tiny_http = "0.12"
 # `complex-scripts` on the parley dep, no warning may be emitted at all.
 icu_provider = { version = "2.3", features = ["logging"] }
 tracing-log = "0.2"
+# The frame-profile example renders a packaged icon set and a chart through
+# the real pipeline.
+waterui-icons-lucide = "0.5.1"
+waterui-chart = "0.3.0"
 
 # `WKWebView` is `MainThreadOnly` and libtest runs tests on worker threads, so
 # the macOS real-engine suite owns its `main` and pumps the main run loop.
@@ -208,10 +212,21 @@ name = "real_engine_macos"
 harness = false
 required-features = ["webview-system", "winit"]
 
+# The headless frame-pipeline profiler: representative scenes rendered
+# offscreen through the real pipeline, one JSON document per scene.
+[[example]]
+name = "frame_profile"
+required-features = ["frame-profile"]
+
 [features]
 default = []
 accessibility = ["dep:accesskit"]
 testing = []
+# Per-frame CPU/GPU stage timing: wgpu timestamp queries around the
+# layer-content and compositor submits plus the CPU stage split the window
+# pump measures. The `testing` adapter selection is what lets the profiler
+# exercise a software adapter for bring-up on a host without a GPU.
+frame-profile = ["testing"]
 inspector-signals = ["waterui/inspector-signals"]
 # The platform's own web engine, bridged as a native subview. Every other engine
 # is a crate the application links and installs; this backend never names one.

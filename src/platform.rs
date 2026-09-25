@@ -525,8 +525,19 @@ impl OffscreenGpuContext {
             "failed to find compute-capable wgpu adapter",
         );
         let required_limits = required_device_limits(&adapter);
+        #[cfg(not(feature = "frame-profile"))]
         let required_features =
             waterui_graphics::shared_context::required_media_features(adapter.features());
+        // The frame profiler timestamps GPU work through timestamp queries
+        // written between submits, which needs both timestamp features;
+        // request them where the adapter has them and report absent where it
+        // does not — the feature never fails a device request over this.
+        #[cfg(feature = "frame-profile")]
+        let required_features =
+            waterui_graphics::shared_context::required_media_features(adapter.features())
+                | (adapter.features()
+                    & (wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS));
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("hydrolysis-offscreen-device"),
