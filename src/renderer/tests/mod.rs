@@ -1760,6 +1760,67 @@ fn keyboard_focus_activates_control_on_key_release() {
     assert!(!handles.pressing(), "key-up releases the affordance");
 }
 
+/// water-rs/hydrolysis#211: winit synthesizes a release for every held key
+/// when the window loses focus. That release aborts the press it belonged
+/// to — the armed target drops without firing and the pressed affordance
+/// comes down — so a real release arriving later finds nothing stale.
+#[test]
+fn synthetic_focus_release_cancels_armed_keyboard_press() {
+    let mut renderer = test_renderer();
+    let env = test_environment();
+    let owner = Rc::new(());
+    let key = InteractionKey::for_rc(&owner, 0);
+    let bounds = Rect::new(0.0, 0.0, 80.0, 80.0);
+    let activations = Rc::new(Cell::new(0));
+    let action_activations = Rc::clone(&activations);
+
+    renderer.begin_rebuild_frame();
+    let (_, press_slot, handles) = renderer.bind_interaction_target(key.clone(), bounds, &env);
+    renderer.register_interactive_pointer_target(bounds, press_slot, move |_, _, _| {
+        action_activations.set(action_activations.get() + 1);
+        true
+    });
+    #[cfg(feature = "accessibility")]
+    emit_focusable_node(&mut renderer, &key, bounds, &env, None);
+
+    assert!(renderer.handle_key_with_env(
+        &KeyCode::Named("Tab".to_owned()),
+        Modifiers::default(),
+        &env,
+    ));
+    assert!(renderer.handle_key_with_env(
+        &KeyCode::Named("Enter".to_owned()),
+        Modifiers::default(),
+        &env,
+    ));
+    assert!(handles.pressing(), "key-down holds the pressed affordance");
+
+    // Focus-out: the synthetic release cancels the press without activating.
+    assert!(renderer.cancel_keyboard_press());
+    assert_eq!(activations.get(), 0, "a cancelled press never activates");
+    assert!(
+        !handles.pressing(),
+        "the cancel releases the pressed affordance"
+    );
+
+    // The real release of the same key then has nothing armed to fire.
+    assert!(
+        !renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,),
+        "no stale target may activate on the real release"
+    );
+    assert_eq!(activations.get(), 0);
+
+    // A fresh press-release pair still activates exactly once.
+    assert!(renderer.handle_key_with_env(
+        &KeyCode::Named("Enter".to_owned()),
+        Modifiers::default(),
+        &env,
+    ));
+    assert!(renderer.handle_key_release_with_env(&KeyCode::Named("Enter".to_owned()), &env,));
+    assert_eq!(activations.get(), 1);
+    assert!(!handles.pressing());
+}
+
 #[test]
 fn interaction_focus_binding_tracks_keyboard_focus() {
     let mut renderer = test_renderer();

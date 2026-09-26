@@ -2163,6 +2163,27 @@ impl SemanticCore {
         }
         true
     }
+
+    /// A synthetic focus-out release — winit resends every held key as
+    /// released when the window loses focus — aborts the press it belonged
+    /// to rather than completing it: the armed activation target drops
+    /// without firing and the pressed affordance comes down, so a real
+    /// release arriving later has nothing stale left to activate.
+    pub(crate) fn cancel_keyboard_press(&mut self) -> bool {
+        if self.hit_test.active_keyboard_target.take().is_none() {
+            return false;
+        }
+        let clear = self
+            .hit_test
+            .interaction
+            .clear_all_presses(self.frame_instant());
+        if clear.chrome_changed {
+            self.request_refresh();
+        } else if clear.visual_changed {
+            self.request_redraw();
+        }
+        true
+    }
 }
 
 impl HydrolysisRenderer {

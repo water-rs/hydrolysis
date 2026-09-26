@@ -1405,6 +1405,16 @@ where
                     };
                 schedule_redraw_or_refresh(runtime, changed);
             }
+            InputEvent::KeyboardCancel => {
+                let changed = runtime.renderer.cancel_keyboard_press();
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    event = "keyboard_cancel",
+                    changed,
+                    "runner dispatched input event"
+                );
+                schedule_redraw_or_refresh(runtime, changed);
+            }
             InputEvent::ModifiersChanged(modifiers) => {
                 runtime.renderer.update_embedded_modifiers(modifiers);
             }
