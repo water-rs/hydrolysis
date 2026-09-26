@@ -1093,6 +1093,118 @@ fn a_naming_scope_keeps_the_elements_own_bounds_when_the_parent_stretched_it() {
     );
 }
 
+/// water-rs/hydrolysis#221: naming metadata on a tap-wrapped leaf names the
+/// *gesture's* node — the wrapped leaf must not repeat the claim as a second
+/// `Button` at the same bounds, or assistive technology announces the same
+/// element twice.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_named_tap_leaf_emits_one_button() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let activations = Rc::new(RefCell::new(0usize));
+    let view = text("Hi")
+        .on_tap({
+            let activations = Rc::clone(&activations);
+            move || *activations.borrow_mut() += 1
+        })
+        .a11y_label("Go")
+        .a11y_role(AccessibilityRole::Button);
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a named tap must publish an accessibility tree");
+    let buttons = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::Button)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        buttons.len(),
+        1,
+        "the named tap must emit exactly one Button node"
+    );
+    let (button_id, button) = buttons[0];
+    assert_eq!(button.label(), Some("Go"));
+    assert!(
+        button.supports_action(AccessibilityAction::Click),
+        "the Button must advertise the tap's Click activation"
+    );
+    renderer.handle_accessibility_action(
+        AccessibilityActionRequest {
+            action: AccessibilityAction::Click,
+            target_node: *button_id,
+            target_tree: AccessibilityTreeId::ROOT,
+            data: None,
+        },
+        &env,
+    );
+    assert_eq!(
+        *activations.borrow(),
+        1,
+        "activating the announced Button must run the tap action"
+    );
+}
+
+/// water-rs/hydrolysis#221: when a container stands between the naming
+/// metadata and a tappable leaf, the container claims the scope — and the
+/// silenced tap's activation must still reach the announced node rather than
+/// dying with the claim.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_naming_container_keeps_the_silenced_taps_activation() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let activations = Rc::new(RefCell::new(0usize));
+    let view = vstack((
+        text("Hi").on_tap({
+            let activations = Rc::clone(&activations);
+            move || *activations.borrow_mut() += 1
+        }),
+        text("there"),
+    ))
+    .a11y_label("Go")
+    .a11y_role(AccessibilityRole::Button);
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a named container must publish an accessibility tree");
+    let buttons = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::Button)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        buttons.len(),
+        1,
+        "the container claim must emit exactly one Button node"
+    );
+    let (button_id, button) = buttons[0];
+    assert_eq!(button.label(), Some("Go"));
+    assert!(
+        button.supports_action(AccessibilityAction::Click),
+        "the claimed Button must stay activatable"
+    );
+    renderer.handle_accessibility_action(
+        AccessibilityActionRequest {
+            action: AccessibilityAction::Click,
+            target_node: *button_id,
+            target_tree: AccessibilityTreeId::ROOT,
+            data: None,
+        },
+        &env,
+    );
+    assert_eq!(
+        *activations.borrow(),
+        1,
+        "Click on the claimed Button must run the delegated tap action"
+    );
+}
+
 /// A view hook wraps whatever it returns in a snapshot of the environment it was
 /// called with, and layout normalization resolves that body before the naming
 /// scope exists — so the snapshot carries no label, and flattening it replaces

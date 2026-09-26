@@ -297,6 +297,25 @@ impl HydrolysisRenderer {
         render_content(renderer);
     }
 
+    /// The `Click` → `Activate` wiring of a tap gesture's accessibility node:
+    /// invoke the gesture's own action with the same layered environment the
+    /// pointer path uses (`captured_env.layered_on(runtime_env)`).
+    #[cfg(feature = "accessibility")]
+    fn tap_accessibility_activation(
+        env: &Environment,
+        action: &Rc<RefCell<BoxedAction<()>>>,
+    ) -> AccessibilityActivation {
+        let captured_env = env.clone();
+        let action = Rc::clone(action);
+        Rc::new(RefCell::new(
+            move |_renderer: &mut crate::renderer::SemanticCore, runtime_env: &Environment| {
+                let action_env = captured_env.layered_on(runtime_env);
+                action.borrow_mut()(&action_env);
+                true
+            },
+        ))
+    }
+
     /// Register the gesture target (and, for a tappable view with a role, its
     /// accessibility node), then render the given content under accessibility
     /// suppression when the role excludes descendants. Shared by the dispatch
@@ -313,7 +332,7 @@ impl HydrolysisRenderer {
         ctx: RenderContext,
         env: &Environment,
         effect: &GestureObserverEffect,
-        render_content: impl FnOnce(&mut HydrolysisRenderer),
+        render_content: impl FnOnce(&mut HydrolysisRenderer, &Environment),
     ) {
         // The action environment contract (water-rs/hydrolysis#177): the
         // handler resolves against `env` as seen here — the observer's
@@ -329,38 +348,60 @@ impl HydrolysisRenderer {
             .get::<waterui_core::interaction::Disabled>()
             .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
         #[cfg(feature = "accessibility")]
-        if matches!(effect.gesture, Gesture::Tap(_)) && env.get::<AccessibilityRole>().is_some() {
-            let mut node = AccessibilityNode::new(
-                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
-            );
-            if let Some(label) =
-                renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+        let mut claimed_naming_node = None;
+        #[cfg(feature = "accessibility")]
+        if matches!(effect.gesture, Gesture::Tap(_)) {
+            if env.get::<AccessibilityRole>().is_some()
+                && !renderer.accessibility_scope_is_claimed(env)
             {
-                node.set_label(label);
+                let mut node = AccessibilityNode::new(
+                    renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+                );
+                if let Some(label) =
+                    renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+                {
+                    node.set_label(label);
+                }
+                node.add_action(AccessibilityAction::Focus);
+                let action_target = if disabled {
+                    node.set_disabled();
+                    None
+                } else {
+                    node.add_action(AccessibilityAction::Click);
+                    // Direct semantic activation: invoke the gesture's own
+                    // action with the same layered environment the pointer
+                    // path uses.
+                    Some(AccessibilityActionTarget::Activate {
+                        action: Self::tap_accessibility_activation(env, &effect.action),
+                    })
+                };
+                claimed_naming_node =
+                    renderer.register_accessibility_node(node, bounds, env, action_target);
+            } else if !disabled
+                && renderer.accessibility_scope_is_claimed(env)
+                && let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
+            {
+                // The scope's claim already names this view — registering would
+                // emit a silenced duplicate — so the tap delegates its
+                // activation to the claiming node, which drains it when its
+                // subtree has been walked.
+                scope.delegate_activation(Self::tap_accessibility_activation(env, &effect.action));
             }
-            node.add_action(AccessibilityAction::Focus);
-            let action_target = if disabled {
-                node.set_disabled();
-                None
-            } else {
-                node.add_action(AccessibilityAction::Click);
-                // Direct semantic activation: invoke the gesture's own action
-                // with the same layered environment the pointer path uses.
-                let captured_env = env.clone();
-                let action = Rc::clone(&effect.action);
-                Some(AccessibilityActionTarget::Activate {
-                    action: Rc::new(RefCell::new(
-                        move |_renderer: &mut crate::renderer::SemanticCore,
-                              runtime_env: &Environment| {
-                            let action_env = captured_env.layered_on(runtime_env);
-                            action.borrow_mut()(&action_env);
-                            true
-                        },
-                    )),
-                })
-            };
-            let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
         }
+        // A gesture node that claimed the naming scope represents the wrapped
+        // view: its content walks under the same shielded environment a naming
+        // container hands its children, so a leaf cannot repeat the claim's
+        // role and label as a second node.
+        #[cfg(feature = "accessibility")]
+        let content_env = if claimed_naming_node.is_some() {
+            accessibility_container_child_environment(env).unwrap_or_else(|| env.clone())
+        } else {
+            env.clone()
+        };
+        #[cfg(feature = "accessibility")]
+        let content_env = &content_env;
+        #[cfg(not(feature = "accessibility"))]
+        let content_env = env;
         let group_id = renderer.gesture_group_id_for_identity(effect.gesture_group_identity);
         let captured_env = env.clone();
         let action = Rc::clone(&effect.action);
@@ -377,7 +418,11 @@ impl HydrolysisRenderer {
             let interaction_key = InteractionKey::for_rc(&effect.action, 0);
             let (interaction, press_slot, _) =
                 renderer.bind_control_interaction_target(interaction_key, bounds, env, disabled);
-            Self::render_gesture_content(renderer, env, render_content);
+            Self::render_gesture_content(renderer, env, content_env, render_content);
+            #[cfg(feature = "accessibility")]
+            if let Some(node_id) = claimed_naming_node {
+                renderer.drain_delegated_activation(node_id, env);
+            }
 
             let color_signal = style.state_layer_color.resolve(env);
             let color = resolved_color_to_peniko(renderer.read_signal(&color_signal));
@@ -417,44 +462,54 @@ impl HydrolysisRenderer {
                 layered_action,
             ));
         }
-        Self::render_gesture_content(renderer, env, render_content);
+        Self::render_gesture_content(renderer, env, content_env, render_content);
+        #[cfg(feature = "accessibility")]
+        if let Some(node_id) = claimed_naming_node {
+            renderer.drain_delegated_activation(node_id, env);
+        }
     }
 
     fn render_gesture_content(
         renderer: &mut HydrolysisRenderer,
         env: &Environment,
-        render_content: impl FnOnce(&mut HydrolysisRenderer),
+        content_env: &Environment,
+        render_content: impl FnOnce(&mut HydrolysisRenderer, &Environment),
     ) {
         #[cfg(not(feature = "accessibility"))]
-        let _ = env;
+        let _ = (env, content_env);
         #[cfg(feature = "accessibility")]
         if env
             .get::<AccessibilityChildren>()
             .is_some_and(AccessibilityChildren::excludes_descendants)
         {
             renderer.push_accessibility_suppression();
-            render_content(renderer);
+            render_content(renderer, content_env);
             renderer.pop_accessibility_suppression();
             return;
         }
-        render_content(renderer);
+        render_content(renderer, content_env);
     }
 
     /// The semantic counterpart of [`Self::apply_gesture_observer`]: the tap's
     /// own accessibility node — role, label, `Click` → [`AccessibilityActionTarget::Activate`],
     /// or `disabled` — with no bounds, no pointer or gesture targets, and no
-    /// interaction state layer. The content walk stays the caller's, wrapped
-    /// in the same descendant-exclusion suppression the rendered path applies.
+    /// interaction state layer. Returns the node when the gesture claimed the
+    /// naming scope; the caller then walks the content under the shielded
+    /// environment and drains delegated activations onto it.
     #[cfg(feature = "accessibility")]
     pub(super) fn emit_gesture_observer_accessibility(
         renderer: &mut SemanticCore,
         env: &Environment,
         effect: &GestureObserverEffect,
-    ) {
+    ) -> Option<AccessibilityNodeId> {
         let disabled = env
             .get::<waterui_core::interaction::Disabled>()
             .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
-        if matches!(effect.gesture, Gesture::Tap(_)) && env.get::<AccessibilityRole>().is_some() {
+        if !matches!(effect.gesture, Gesture::Tap(_)) {
+            return None;
+        }
+        if env.get::<AccessibilityRole>().is_some() && !renderer.accessibility_scope_is_claimed(env)
+        {
             let mut node = AccessibilityNode::new(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
             );
@@ -469,21 +524,19 @@ impl HydrolysisRenderer {
                 None
             } else {
                 node.add_action(AccessibilityAction::Click);
-                let captured_env = env.clone();
-                let action = Rc::clone(&effect.action);
                 Some(AccessibilityActionTarget::Activate {
-                    action: Rc::new(RefCell::new(
-                        move |_renderer: &mut crate::renderer::SemanticCore,
-                              runtime_env: &Environment| {
-                            let action_env = captured_env.layered_on(runtime_env);
-                            action.borrow_mut()(&action_env);
-                            true
-                        },
-                    )),
+                    action: Self::tap_accessibility_activation(env, &effect.action),
                 })
             };
-            let _ = renderer.register_accessibility_node_semantic(node, env, action_target);
+            return renderer.register_accessibility_node_semantic(node, env, action_target);
         }
+        if !disabled
+            && renderer.accessibility_scope_is_claimed(env)
+            && let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
+        {
+            scope.delegate_activation(Self::tap_accessibility_activation(env, &effect.action));
+        }
+        None
     }
 
     /// Register the hover-enter/move/exit target for `handler`, then render the
