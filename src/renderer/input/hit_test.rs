@@ -1003,7 +1003,10 @@ impl HydrolysisRenderer {
                 // A gesture region nested inside this press's bounds claims
                 // the sequence: the innermost interactive target under the
                 // pointer wins. The recognizers were already activated above;
-                // skip the press so it neither focuses nor commits.
+                // skip the commit so the press does not run, but still grant
+                // the focus the press point earns — the claim takes the
+                // activation, not the row the press sits in
+                // (water-rs/hydrolysis#220).
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     x,
@@ -1013,10 +1016,14 @@ impl HydrolysisRenderer {
                     order = target.order,
                     "nested gesture target claims press"
                 );
+                self.set_keyboard_focus_for_press(
+                    target.press_slot.as_ref().map(|slot| slot.key.clone()),
+                    point,
+                );
                 return refresh_requested || visual_changed;
             }
             let keyboard_key = target.press_slot.as_ref().map(|slot| slot.key.clone());
-            self.set_keyboard_focus(keyboard_key, false);
+            self.set_keyboard_focus_for_press(keyboard_key, point);
             refresh_requested |= self.set_focused_text_input(None);
             if let Some(slot) = target.press_slot.as_ref() {
                 let chrome_state_dependent = target
@@ -1375,13 +1382,20 @@ impl SemanticCore {
 
     /// The interaction identity behind `node` — the press slot, text-input
     /// target or embedded surface the widget linked its emitted node to.
+    /// Linked keys that carry no live machinery this frame do not qualify:
+    /// a list row's base identity exists so the subtree can resolve its
+    /// node, while only the row's selection press can hold pointer-focus
+    /// (water-rs/hydrolysis#220). A node linked only by such keys resolves
+    /// to `None` — it still takes semantic focus, it simply has no
+    /// interaction key for the pointer machinery to track.
     #[cfg(feature = "accessibility")]
     fn focus_key_for_node(&self, node: AccessibilityNodeId) -> Option<InteractionKey> {
         self.accessibility
             .interaction_nodes
             .iter()
-            .find(|(_, linked)| **linked == node)
+            .filter(|(_, linked)| **linked == node)
             .map(|(key, _)| key.clone())
+            .find(|key| self.interaction_key_is_live(key))
             .or_else(|| {
                 self.text_editing
                     .text_input_targets
@@ -1396,6 +1410,48 @@ impl SemanticCore {
                     .find(|target| target.accessibility_node_id == Some(node))
                     .map(|target| target.interaction_key.clone())
             })
+    }
+
+    /// Whether the modal shield is up this frame: an active
+    /// `ModalInteraction` scope was emitted, or modal-flagged machinery
+    /// exists. While it is up only modal targets answer input.
+    pub(crate) fn modal_shield_active(&self) -> bool {
+        self.hit_test.modal_interaction.is_some()
+            || self
+                .hit_test
+                .pointer_targets
+                .iter()
+                .any(|target| target.modal)
+            || self
+                .text_editing
+                .text_input_targets
+                .iter()
+                .any(|target| target.modal)
+    }
+
+    /// Whether `key` is backed by input machinery emitted this frame — a
+    /// press slot, a text-input target or an embedded surface — under the
+    /// modal shield's rule: while a modal scope is up only modal targets
+    /// count. The single definition both `focus_key_for_node` and the
+    /// post-flush liveness pass share (water-rs/hydrolysis#220).
+    pub(crate) fn interaction_key_is_live(&self, key: &InteractionKey) -> bool {
+        let modal_active = self.modal_shield_active();
+        self.hit_test.pointer_targets.iter().any(|target| {
+            (!modal_active || target.modal)
+                && target
+                    .press_slot
+                    .as_ref()
+                    .is_some_and(|slot| &slot.key == key)
+        }) || self
+            .text_editing
+            .text_input_targets
+            .iter()
+            .any(|target| (!modal_active || target.modal) && &target.interaction_key == key)
+            || self
+                .hit_test
+                .embedded_input_targets
+                .iter()
+                .any(|target| &target.interaction_key == key)
     }
 
     /// Moves keyboard focus to `node` — the semantic-tree identity every
@@ -1454,6 +1510,46 @@ impl SemanticCore {
     #[cfg(feature = "accessibility")]
     pub(crate) fn use_semantic_walk(&mut self) {
         self.semantic_walk = true;
+    }
+
+    /// Keyboard focus where a pointer press landed: the node the pressed
+    /// target's key is linked to, or — when the key carries no node, as a
+    /// bare `on_tap` press slot does — the innermost node under the press
+    /// point that advertises `Focus`. A tap inside a `List` row then still
+    /// focuses the row's `ListItem` node, so the arrow navigation
+    /// `list_row_context` drives has a row to start from
+    /// (water-rs/hydrolysis#220).
+    pub(crate) fn set_keyboard_focus_for_press(
+        &mut self,
+        key: Option<InteractionKey>,
+        point: vello::kurbo::Point,
+    ) -> bool {
+        #[cfg(feature = "accessibility")]
+        {
+            let node = key
+                .as_ref()
+                .and_then(|key| self.focus_node_for_key(key))
+                .or_else(|| {
+                    // Only a press slot's key earns the point lookup: a
+                    // slot-less utility target keeps clearing focus when it
+                    // lands outside every focusable node, exactly as before.
+                    key.is_some()
+                        .then(|| {
+                            self.accessibility.node_at_point_where(point, |node| {
+                                node.supports_action(AccessibilityAction::Focus)
+                                    && !node.is_hidden()
+                                    && !node.is_disabled()
+                            })
+                        })
+                        .flatten()
+                });
+            self.set_keyboard_focus_node(node, false)
+        }
+        #[cfg(not(feature = "accessibility"))]
+        {
+            let _ = point;
+            self.set_keyboard_focus(key, false)
+        }
     }
 
     pub(crate) fn set_keyboard_focus(
@@ -1635,17 +1731,7 @@ impl SemanticCore {
     /// pointer-target list plays no part in it.
     #[cfg(feature = "accessibility")]
     fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
-        let modal_active = self.hit_test.modal_interaction.is_some()
-            || self
-                .hit_test
-                .pointer_targets
-                .iter()
-                .any(|target| target.modal)
-            || self
-                .text_editing
-                .text_input_targets
-                .iter()
-                .any(|target| target.modal);
+        let modal_active = self.modal_shield_active();
         self.accessibility
             .nodes
             .iter()
@@ -1704,16 +1790,7 @@ impl SemanticCore {
 
     #[cfg(not(feature = "accessibility"))]
     fn keyboard_focus_candidates(&self) -> Vec<KeyboardFocusCandidate> {
-        let modal_active = self
-            .hit_test
-            .pointer_targets
-            .iter()
-            .any(|target| target.modal)
-            || self
-                .text_editing
-                .text_input_targets
-                .iter()
-                .any(|target| target.modal);
+        let modal_active = self.modal_shield_active();
         let mut candidates = Vec::<KeyboardFocusCandidate>::new();
         for target in &self.hit_test.pointer_targets {
             let Some(slot) = target.press_slot.as_ref() else {
@@ -2024,7 +2101,7 @@ impl SemanticCore {
             // A widget may bind a keyboard-step affordance without advertising
             // the matching semantic actions — the pointer-bound fallback
             // covers it.
-            let modal_active = self.hit_test.modal_interaction.is_some();
+            let modal_active = self.modal_shield_active();
             let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
                 return false;
             };
@@ -2099,7 +2176,7 @@ impl SemanticCore {
         let Some(focused) = self.hit_test.keyboard_focus.as_ref() else {
             return false;
         };
-        let modal_active = self.hit_test.modal_interaction.is_some();
+        let modal_active = self.modal_shield_active();
         let Some(target) = self
             .hit_test
             .pointer_targets

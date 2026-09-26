@@ -71,7 +71,7 @@ impl SemanticCore {
     /// field that moved into the old position for the focused one. Shared by both
     /// frame paths.
     pub(crate) fn validate_focused_text_input_after_flush(&mut self) {
-        let modal_active = self.hit_test.modal_interaction.is_some();
+        let modal_active = self.modal_shield_active();
         let focus_is_live = !self.text_editing.has_focus()
             || self
                 .text_editing
@@ -93,41 +93,27 @@ impl SemanticCore {
                 self.set_keyboard_focus_node(None, false);
             }
         }
-        let keyboard_focus_is_live =
-            self.hit_test.keyboard_focus.as_ref().is_none_or(|focused| {
-                self.hit_test.pointer_targets.iter().any(|target| {
-                    (!modal_active || target.modal)
-                        && target
-                            .press_slot
-                            .as_ref()
-                            .is_some_and(|slot| &slot.key == focused)
-                }) || self.text_editing.text_input_targets.iter().any(|target| {
-                    (!modal_active || target.modal) && &target.interaction_key == focused
-                }) || self
-                    .hit_test
-                    .embedded_input_targets
-                    .iter()
-                    .any(|target| &target.interaction_key == focused)
-                    || {
-                        // A key resolved through the semantic focus link stays
-                        // live while its node emits — the semantic walk emits
-                        // no pointer machinery to back a key. In the rendered
-                        // runtime a key backed by no target is dead: its widget
-                        // went non-hittable and the emitted node cannot
-                        // resurrect it.
-                        #[cfg(feature = "accessibility")]
-                        {
-                            self.semantic_walk
-                                && self
-                                    .focus_node_for_key(focused)
-                                    .is_some_and(|node| self.emitted_node_is_live(node))
-                        }
-                        #[cfg(not(feature = "accessibility"))]
-                        {
-                            false
-                        }
-                    }
-            });
+        let keyboard_focus_is_live = self.hit_test.keyboard_focus.as_ref().is_none_or(|focused| {
+            self.interaction_key_is_live(focused) || {
+                // A key resolved through the semantic focus link stays
+                // live while its node emits — the semantic walk emits
+                // no pointer machinery to back a key. In the rendered
+                // runtime a key backed by no target is dead: its widget
+                // went non-hittable and the emitted node cannot
+                // resurrect it.
+                #[cfg(feature = "accessibility")]
+                {
+                    self.semantic_walk
+                        && self
+                            .focus_node_for_key(focused)
+                            .is_some_and(|node| self.emitted_node_is_live(node))
+                }
+                #[cfg(not(feature = "accessibility"))]
+                {
+                    false
+                }
+            }
+        });
         if !keyboard_focus_is_live {
             self.hit_test.focus_dropped_this_frame = true;
             self.set_keyboard_focus(None, false);

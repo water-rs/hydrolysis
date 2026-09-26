@@ -292,16 +292,17 @@ impl AccessibilityBuilder {
         self.reset_scene();
     }
 
-    /// The most specific node covering `point`, in window coordinates.
+    /// The most specific node covering `point` that `include` admits, in
+    /// window coordinates.
     ///
     /// Nodes are registered as the tree is walked, so a child is always pushed
     /// after the parent that contains it and the last match is the innermost
     /// one — the element a user pointing at that spot means.
-    ///
-    /// Only "inspect this element" asks, and a browser page hosts no inspector
-    /// endpoint to reveal the answer in.
-    #[cfg(any(not(target_arch = "wasm32"), test))]
-    pub(crate) fn node_at_point(&self, point: vello::kurbo::Point) -> Option<AccessibilityNodeId> {
+    pub(crate) fn node_at_point_where(
+        &self,
+        point: vello::kurbo::Point,
+        include: impl Fn(&AccessibilityNode) -> bool,
+    ) -> Option<AccessibilityNodeId> {
         self.nodes
             .iter()
             .rev()
@@ -311,9 +312,20 @@ impl AccessibilityBuilder {
                         && point.x < bounds.x1
                         && point.y >= bounds.y0
                         && point.y < bounds.y1
-                })
+                }) && include(node)
             })
             .map(|(id, _)| *id)
+    }
+
+    /// The most specific node covering `point`, in window coordinates.
+    ///
+    /// Only "inspect this element" asks, and a browser page hosts no inspector
+    /// endpoint to reveal the answer in. The press path's focus lookup goes
+    /// through `node_at_point_where` instead, which compiles everywhere the
+    /// accessibility feature does.
+    #[cfg(any(not(target_arch = "wasm32"), test))]
+    pub(crate) fn node_at_point(&self, point: vello::kurbo::Point) -> Option<AccessibilityNodeId> {
+        self.node_at_point_where(point, |_| true)
     }
 
     pub(crate) fn next_node_id(&mut self) -> AccessibilityNodeId {
