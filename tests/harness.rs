@@ -14,6 +14,7 @@ use std::time::Duration;
 use hydrolysis_m3::Material3;
 use waterui::Computed;
 use waterui::Signal as _;
+use waterui::SignalExt as _;
 use waterui::ViewExt as _;
 use waterui::app::App;
 use waterui::color::ResolvedColor;
@@ -126,6 +127,75 @@ fn mount_app_hosts_main_window_with_app_environment() {
     let snapshot = app.snapshot();
     assert_eq!(snapshot.width, 400);
     assert_eq!(snapshot.height, 200);
+}
+
+/// A `max_width` derived from the mounted window's `frame` must measure the
+/// text against the width the mounted viewport produces — the wrap the
+/// window runner gives the same tree (water-rs/hydrolysis#130). Mounting the
+/// window's content inside a synthetic default window left the app's
+/// `Window::frame` binding at its initial value, so the frame-derived cap
+/// resolved stale: on a 320pt viewport the initial 800pt frame produced a
+/// 200pt cap where the window runner's 80pt cap wraps the text to several
+/// lines, and the semantic runtime rendered a single line clipped at the
+/// cap's edge.
+#[test]
+fn max_width_derived_from_the_mounted_window_frame_wraps_text() {
+    use waterui::layout::frame::Frame;
+    use waterui::window::{Window, WindowState};
+
+    const LONG: &str = "the quick brown fox jumps over the lazy dog, again and \
+        again and again, until the sentence refuses to fit on one line";
+
+    let frame = waterui::binding(Rect::new(Point::zero(), Size::new(800.0, 600.0)));
+    let cap = frame.map(|f: Rect| f.size().width / 4.0);
+    let mut window = Window::new("app", waterui::binding(WindowState::Normal), move || {
+        Frame::new(text(LONG).body()).max_width(cap.clone())
+    });
+    window.frame = frame;
+    let app = App::new_with_windows([window], Environment::new());
+    let mut app = ui()
+        .theme(Material3::defaults())
+        .viewport(320, 900)
+        .mount_app(app);
+
+    let bounds = app.query().label(LONG).single().bounds();
+    assert!(
+        bounds.width() < 100.0,
+        "the measured width must honour the frame-derived 80pt cap, not the stale 200pt one: {bounds:?}"
+    );
+    assert!(
+        bounds.height() > 130.0,
+        "the text must wrap to the lines an 80pt cap produces, not render one clipped line: {bounds:?}"
+    );
+}
+
+/// `mount_app` must mount the application's own `Window` — the mount the
+/// window runner performs — so the runtime writes `Window::frame` from the
+/// viewport onto the app's binding at mount. Mounting the window's content
+/// inside a synthetic default window leaves the app's `frame` at whatever
+/// the app seeded regardless of the viewport, orphaning every signal derived
+/// from it (water-rs/hydrolysis#128).
+#[test]
+fn mount_app_drives_the_app_window_frame_from_the_viewport() {
+    use waterui::window::{Window, WindowState};
+
+    let frame = waterui::binding(Rect::new(Point::zero(), Size::new(800.0, 600.0)));
+    let mut window = Window::new("app", waterui::binding(WindowState::Normal), || {
+        text("app content").body()
+    });
+    window.frame = frame.clone();
+    let app = App::new_with_windows([window], Environment::new());
+    let mut app = ui()
+        .theme(Material3::defaults())
+        .viewport(320, 240)
+        .mount_app(app);
+    assert_eq!(
+        frame.snapshot(),
+        Rect::new(Point::zero(), Size::new(320.0, 240.0)),
+        "the app's Window::frame must carry the mounted viewport"
+    );
+    let bounds = app.query().role(Role::LABEL).single().bounds();
+    assert_eq!(bounds.width(), 320.0);
 }
 
 // Origin: waterui `testing/src/tests.rs`.
