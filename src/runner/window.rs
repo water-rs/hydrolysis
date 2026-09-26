@@ -459,6 +459,11 @@ fn build_window_scene<P: PlatformWindow>(
     runtime
         .renderer
         .render_active_text_context_menu_overlay(env, root_transform);
+    // The same for an open `.context_menu` presentation — this one-time build
+    // path is where its sub-views are first built and placed.
+    runtime
+        .renderer
+        .render_context_menu_presentation(root_transform);
     phases.scene_dispatch += scene_dispatch_started_at.elapsed();
     let scene_finish_started_at = Instant::now();
     runtime.renderer.finish_rebuild_frame();

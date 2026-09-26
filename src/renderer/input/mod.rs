@@ -1,11 +1,13 @@
 use super::*;
 
+mod context_menu;
 mod hit_test;
 mod interaction;
 mod popup_menu;
 mod surface;
 pub(crate) mod text_editing;
 
+pub(crate) use context_menu::*;
 pub(crate) use hit_test::*;
 pub(crate) use interaction::*;
 pub(crate) use popup_menu::*;

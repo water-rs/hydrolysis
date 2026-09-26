@@ -1,13 +1,16 @@
 use super::*;
+use crate::widgets::controls::button::ListRowChrome;
 use core::ops::RangeInclusive;
 use core::time::Duration;
 use nami::Signal;
 use waterui::form::Calendar;
 use waterui::shape::{FixedRoundedRectangle, RoundedRectangle, ShapeExt as _};
 use waterui::theme::color::Surface;
-use waterui_backend_core::widget::PickerMetrics;
+use waterui_backend_core::widget::{ButtonMetrics, InteractionStyle, PickerMetrics};
+use waterui_controls::button::ButtonStyle;
 use waterui_controls::label::LabelDisplayMode;
 use waterui_controls::{Stepper, button, stepper::stepper};
+use waterui_core::metadata::{Metadata, MetadataKey};
 use waterui_core::{SignalExt as _, id::Id};
 use waterui_form::picker::date::{Date, DatePickerType, DateTime};
 use waterui_layout::frame::Frame;
@@ -70,6 +73,16 @@ pub(crate) struct ContextMenuTarget {
     /// The environment of the view that declared the menu — its popup opens
     /// inside it, so `.state(&value)` overlays reach the item actions.
     pub(crate) env: Environment,
+    /// The accessory's dismiss-request counter: every change closes the open
+    /// menu (water-rs/hydrolysis#200, water-rs/waterui#1245).
+    pub(crate) dismiss_requests: nami::Computed<i32>,
+    /// The view the owning node lends the open presentation to lift over the
+    /// dimmed backdrop at `bounds`; `None` content means the source view stays
+    /// lit through the backdrop's hole instead.
+    pub(crate) preview: Rc<RefCell<Option<RetainedSubview>>>,
+    /// The interactive accessory the owning node lends the open presentation
+    /// to anchor to the lifted preview. Returned to the slot on close.
+    pub(crate) accessory: Rc<RefCell<Option<RetainedSubview>>>,
 }
 
 #[derive(Clone)]
@@ -79,6 +92,9 @@ pub(crate) enum PopupMenuNode {
         plain_label: String,
         action: SharedAction<()>,
         disabled: bool,
+        /// A secondary line under the label, drawn in the muted supporting
+        /// text style; the row grows to fit it.
+        subtitle: Option<Str>,
     },
     Divider,
     Menu {
@@ -94,6 +110,10 @@ pub(crate) struct PopupMenuStateGroup(pub(crate) Rc<RefCell<Vec<Binding<WindowSt
 #[derive(Default)]
 pub(crate) struct PopupMenuState {
     pub(crate) active_popup_menu_group: Option<PopupMenuStateGroup>,
+    /// The drawn presentation around an open `.context_menu` popup — dimmed
+    /// backdrop, lifted preview and anchored accessory. `None` when the active
+    /// menu was not opened from a context-menu target or carries no preview.
+    pub(crate) context_menu_presentation: Option<ContextMenuPresentation>,
     /// Open/closed handles for the picker menus currently in the render tree, each
     /// owned by its picker node. This is only a registry for "dismiss every menu"
     /// (outside click) — it is Rc-pruned, never flush-order-indexed, so a dropped
@@ -166,7 +186,7 @@ impl PopupMenuStateGroup {
 
 impl_extractor!(PopupMenuStateGroup);
 
-fn popup_window_origin(origin: LayoutPoint, env: &Environment) -> LayoutPoint {
+pub(crate) fn popup_window_origin(origin: LayoutPoint, env: &Environment) -> LayoutPoint {
     let window_origin = env
         .get::<HydrolysisWindowOrigin>()
         .copied()
@@ -189,29 +209,193 @@ fn animated_popup_panel(content: impl View, group: PopupMenuStateGroup) -> impl 
             scale.with(enter_animation),
         )
         .on_appear(move || {
-            opacity.set(0.96);
+            opacity.set(1.0);
             scale.set(1.0);
         })
         .with(group)
 }
 
+/// Marker on the wrapped menu rows: a `PopupWindowManager` menu's panel is
+/// the theme's drawn context-menu surface — container colour, corner shape
+/// and elevation — rather than a view-level fill, so it renders identically
+/// to the drawn `.context_menu` presentation in dark and light
+/// (water-rs/hydrolysis#200). The window leaves `POPUP_MENU_PANEL_MARGIN` of
+/// transparent room on every side for the panel's elevation shadow.
+pub(crate) struct PopupMenuSurface;
+impl MetadataKey for PopupMenuSurface {}
+
+/// Transparent margin a `PopupWindowManager` menu window leaves around its
+/// panel, in logical points — the room the panel's elevation shadow draws
+/// into inside the window's own surface.
+pub(crate) const POPUP_MENU_PANEL_MARGIN: f64 = 14.0;
+
+/// A divider row's height: the theme's separator line
+/// (`md.comp.menu.divider.height`, 1 dp) inside the menu's vertical padding
+/// (`md.comp.menu.container.top-space`/`bottom-space`, 8 dp each side).
+pub(crate) fn popup_menu_divider_height(metrics: TextContextMenuMetrics) -> f64 {
+    metrics.separator_thickness + metrics.vertical_padding * 2.0
+}
+
+/// The text measurements [`popup_menu_size`] consumes: every row's intrinsic
+/// label/supporting-line width (the widest wins), the supporting line's
+/// intrinsic height, and the row's horizontal label inset — the theme's
+/// menu-item inset, which every row's leading edge shares.
+#[derive(Clone, Copy)]
+pub(crate) struct PopupMenuTextMetrics {
+    /// The height a supporting (caption) line adds to a subtitled row.
+    pub(crate) subtitle_height: f64,
+    /// The widest label or supporting line across the menu, measured
+    /// intrinsically — a row never wraps mid-word into a clipped column.
+    pub(crate) max_row_text_width: f64,
+    /// The horizontal inset between a row's edge and its label —
+    /// `md.comp.menu.list-item.leading-space`/`trailing-space` (12 dp in M3).
+    pub(crate) row_inset: f64,
+}
+
 pub(crate) fn popup_menu_size(
     nodes: &[PopupMenuNode],
     metrics: TextContextMenuMetrics,
+    text: &PopupMenuTextMetrics,
 ) -> (f64, f64) {
-    let max_label_chars = nodes
-        .iter()
-        .filter_map(|node| match node {
-            PopupMenuNode::Command { plain_label, .. }
-            | PopupMenuNode::Menu { plain_label, .. } => Some(plain_label.chars().count()),
-            PopupMenuNode::Divider => None,
-        })
-        .max()
-        .unwrap_or(0) as f64;
-    let width = (metrics.horizontal_padding * 2.0 + max_label_chars * metrics.width_per_char)
+    // `md.comp.menu.container.min-width`/`max-width` (112/280 dp).
+    let width = (text.row_inset * 2.0 + text.max_row_text_width)
         .clamp(metrics.min_width, metrics.max_width);
-    let height = (nodes.len() as f64 * metrics.row_height).max(metrics.row_height);
+    // `md.comp.menu.list-item.container.height` (48 dp) per row — a
+    // subtitled row grows by its supporting line — plus the container's
+    // `top-space`/`bottom-space`.
+    let height = nodes
+        .iter()
+        .map(|node| match node {
+            PopupMenuNode::Command {
+                subtitle: Some(_), ..
+            } => metrics.row_height + text.subtitle_height,
+            PopupMenuNode::Divider => popup_menu_divider_height(metrics),
+            _ => metrics.row_height,
+        })
+        .sum::<f64>()
+        .max(metrics.row_height)
+        + metrics.vertical_padding * 2.0;
     (width, height)
+}
+
+/// The menu's row content shared by the popup-window and the drawn
+/// `.context_menu` presentation: one row per node — borderless commands,
+/// dividers and submenu items — padded by the theme's vertical padding. The
+/// chrome around it (the borderless window's rounded `Surface` background,
+/// the drawn presentation's theme panel) is the caller's.
+pub(crate) fn popup_menu_content(
+    nodes: Vec<PopupMenuNode>,
+    depth: usize,
+    metrics: TextContextMenuMetrics,
+    text: PopupMenuTextMetrics,
+    popup_origin_x: f32,
+    popup_origin_y: f32,
+    width: f64,
+) -> AnyView {
+    let mut rows = Vec::with_capacity(nodes.len());
+    let mut row_top = metrics.vertical_padding;
+    for node in nodes {
+        let row_height = match &node {
+            PopupMenuNode::Command {
+                subtitle: Some(_), ..
+            } => metrics.row_height + text.subtitle_height,
+            PopupMenuNode::Divider => popup_menu_divider_height(metrics),
+            _ => metrics.row_height,
+        };
+        match node {
+            PopupMenuNode::Command {
+                label,
+                action,
+                disabled,
+                ..
+            } => {
+                let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                    move |group: PopupMenuStateGroup, env: Environment| {
+                        if disabled {
+                            return;
+                        }
+                        group.close_all();
+                        call_action_discarding_result(&action, &env);
+                    },
+                );
+                // The button sizes to its label: a leading-aligned frame puts
+                // the content-width row at the menu's leading edge, so every
+                // row's label shares one leading x regardless of kind.
+                rows.push(AnyView::new(
+                    Frame::new(button)
+                        .height(row_height as f32)
+                        .max_width(f32::INFINITY)
+                        .alignment(waterui_layout::alignment::Leading),
+                ));
+            }
+            PopupMenuNode::Divider => rows.push(AnyView::new(
+                Frame::new(Divider)
+                    .height(row_height as f32)
+                    .max_width(f32::INFINITY)
+                    .alignment(waterui_layout::alignment::Leading),
+            )),
+            PopupMenuNode::Menu { label, items, .. } => {
+                let next_depth = depth + 1;
+                let child_origin = LayoutPoint::new(
+                    popup_origin_x + width as f32,
+                    popup_origin_y + row_top as f32,
+                );
+                let button = Button::new(label).style(ButtonStyle::Borderless).action(
+                    move |group: PopupMenuStateGroup, env: Environment| {
+                        if items.is_empty() {
+                            return;
+                        }
+                        group.truncate(next_depth);
+                        let (window, child_state) = popup_menu_window(
+                            items.clone(),
+                            child_origin,
+                            group.clone(),
+                            next_depth,
+                            metrics,
+                            text,
+                        );
+                        group.push(child_state);
+                        env.get::<PopupWindowManager>()
+                            .expect(
+                                "hydrolysis popup menus require PopupWindowManager in environment",
+                            )
+                            .show(window, &env);
+                    },
+                );
+                // The button sizes to its label: a leading-aligned frame puts
+                // the content-width row at the menu's leading edge, so every
+                // row's label shares one leading x regardless of kind.
+                rows.push(AnyView::new(
+                    Frame::new(button)
+                        .height(row_height as f32)
+                        .max_width(f32::INFINITY)
+                        .alignment(waterui_layout::alignment::Leading),
+                ));
+            }
+        }
+        row_top += row_height;
+    }
+    let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> = rows.into_iter().collect();
+    AnyView::new(
+        menu_content
+            .alignment(HorizontalAlignment::Leading)
+            .spacing(0.0)
+            .padding_with(EdgeInsets::symmetric(metrics.vertical_padding as f32, 0.0))
+            // A menu row's label is body text that happens to be tappable,
+            // not button chrome: it draws in the foreground colour, with the
+            // destructive role's explicit error colour still winning.
+            .with(ListRowChrome)
+            // A menu row is not a button: its inset is the theme's menu-item
+            // inset (`md.comp.menu.list-item.leading-space`/`trailing-space`,
+            // 12 dp in M3), its state layer is the on-surface colour under
+            // `md.sys.state.*` opacities, and the label colours stay semantic
+            // (`label_color: None`).
+            .install(InteractionStyle::new(
+                ButtonMetrics::new(metrics.horizontal_padding, 0.0, 0.0, 0.0),
+                Color::new(waterui::theme::color::Foreground),
+                vello::kurbo::RoundedRectRadii::from(0.0),
+            )),
+    )
 }
 
 pub(crate) fn popup_menu_window(
@@ -220,77 +404,28 @@ pub(crate) fn popup_menu_window(
     group: PopupMenuStateGroup,
     depth: usize,
     metrics: TextContextMenuMetrics,
+    text: PopupMenuTextMetrics,
 ) -> (Window, Binding<WindowState>) {
     let state = Binding::container(WindowState::Normal);
-    let (width, height) = popup_menu_size(&nodes, metrics);
-    let popup_origin_x = origin.x;
-    let popup_origin_y = origin.y;
+    let (width, height) = popup_menu_size(&nodes, metrics, &text);
     let group_for_content = group.clone();
     let state_for_content = state.clone();
     let nodes_for_content = nodes.clone();
     let popup_content = move || {
-        let mut rows = Vec::with_capacity(nodes_for_content.len());
-        for (index, node) in nodes_for_content.clone().into_iter().enumerate() {
-            match node {
-                PopupMenuNode::Command {
-                    label,
-                    action,
-                    disabled,
-                    ..
-                } => {
-                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
-                        move |group: PopupMenuStateGroup, env: Environment| {
-                            if disabled {
-                                return;
-                            }
-                            group.close_all();
-                            call_action_discarding_result(&action, &env);
-                        },
-                    );
-                    rows.push(AnyView::new(button));
-                }
-                PopupMenuNode::Divider => rows.push(AnyView::new(Divider)),
-                PopupMenuNode::Menu { label, items, .. } => {
-                    let next_depth = depth + 1;
-                    let child_origin = LayoutPoint::new(
-                        popup_origin_x + width as f32,
-                        popup_origin_y + (metrics.row_height * index as f64) as f32,
-                    );
-                    let button = Button::new(label).style(ButtonStyle::Borderless).action(
-                        move |group: PopupMenuStateGroup, env: Environment| {
-                            if items.is_empty() {
-                                return;
-                            }
-                            group.truncate(next_depth);
-                            let (window, child_state) = popup_menu_window(
-                                items.clone(),
-                                child_origin,
-                                group.clone(),
-                                next_depth,
-                                metrics,
-                            );
-                            group.push(child_state);
-                            env.get::<PopupWindowManager>()
-                                .expect(
-                                    "hydrolysis popup menus require PopupWindowManager in environment",
-                                )
-                                .show(window, &env);
-                        },
-                    );
-                    rows.push(AnyView::new(button));
-                }
-            }
-        }
-        let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
-            rows.into_iter().collect();
         AnyView::new(animated_popup_panel(
-            menu_content
-                .alignment(HorizontalAlignment::Leading)
-                .spacing(0.0)
-                .background(
-                    FixedRoundedRectangle::new(metrics.corner_radius as f32)
-                        .fill(waterui::Color::new(Surface)),
+            Metadata::new(
+                popup_menu_content(
+                    nodes_for_content.clone(),
+                    depth,
+                    metrics,
+                    text,
+                    origin.x,
+                    origin.y,
+                    width,
                 ),
+                PopupMenuSurface,
+            )
+            .padding_with(POPUP_MENU_PANEL_MARGIN as f32),
             group_for_content.clone(),
         ))
     };
@@ -303,9 +438,19 @@ pub(crate) fn popup_menu_window(
     .resizable(false)
     .background(Color::transparent());
     popup.closable = false;
+    // The window inflates by the panel margin on every side: the menu panel
+    // draws inside the inset, and the transparent ring gives the panel's
+    // elevation shadow room inside the window's own surface instead of
+    // being clipped at the frame.
     popup.frame.set(LayoutRect::new(
-        origin,
-        LayoutSize::new(width as f32, height as f32),
+        LayoutPoint::new(
+            origin.x - POPUP_MENU_PANEL_MARGIN as f32,
+            origin.y - POPUP_MENU_PANEL_MARGIN as f32,
+        ),
+        LayoutSize::new(
+            (width + POPUP_MENU_PANEL_MARGIN * 2.0) as f32,
+            (height + POPUP_MENU_PANEL_MARGIN * 2.0) as f32,
+        ),
     ));
     (popup, state)
 }
@@ -868,6 +1013,9 @@ impl SemanticCore {
     }
 
     pub(crate) fn dismiss_active_popup_menu(&mut self) {
+        // Dropping the presentation hands the preview and accessory back to
+        // their owning node's slots, so a later open mounts them again.
+        self.popup_menu.context_menu_presentation = None;
         if let Some(group) = self.popup_menu.active_popup_menu_group.take() {
             group.close_all();
         }
@@ -914,6 +1062,7 @@ impl SemanticCore {
                 },
             ),
             disabled: false,
+            subtitle: None,
         });
     }
 
@@ -976,6 +1125,62 @@ impl SemanticCore {
             .map(|(_, target)| target.clone())
     }
 
+    /// The measured height of a command's secondary line, drawn in the theme's
+    /// supporting text style. Measured once per presented menu — every
+    /// subtitled row grows by the same line height.
+    pub(crate) fn popup_menu_subtitle_height(&mut self, env: &Environment) -> f64 {
+        let styled = StyledStr::plain("Ag").font(waterui_text::font::Caption);
+        f64::from(
+            HydrolysisRenderer::measure_text_intrinsic_size(&mut self.state, styled, env).height,
+        )
+    }
+
+    /// The text measurements a popup menu's size comes from: every row's
+    /// intrinsic label/supporting-line width — the widest wins, so a subtitle
+    /// never wraps mid-word into a clipped column — the supporting line's
+    /// intrinsic height, and the row's horizontal label inset, the theme's
+    /// menu-item inset every row's leading edge shares
+    /// (`md.comp.menu.list-item.leading-space`/`trailing-space`).
+    pub(crate) fn popup_menu_text_metrics(
+        &mut self,
+        nodes: &[PopupMenuNode],
+        metrics: TextContextMenuMetrics,
+        env: &Environment,
+    ) -> PopupMenuTextMetrics {
+        let row_inset = metrics.horizontal_padding;
+        let mut max_row_text_width = 0.0_f64;
+        for node in nodes {
+            let mut consider = |state: &mut HydroState, styled: StyledStr| {
+                let size = HydrolysisRenderer::measure_text_intrinsic_size(state, styled, env);
+                max_row_text_width = max_row_text_width.max(f64::from(size.width));
+            };
+            match node {
+                PopupMenuNode::Command {
+                    plain_label,
+                    subtitle,
+                    ..
+                } => {
+                    consider(&mut self.state, StyledStr::plain(plain_label.clone()));
+                    if let Some(subtitle) = subtitle {
+                        consider(
+                            &mut self.state,
+                            StyledStr::plain(subtitle.clone()).font(waterui_text::font::Caption),
+                        );
+                    }
+                }
+                PopupMenuNode::Menu { plain_label, .. } => {
+                    consider(&mut self.state, StyledStr::plain(plain_label.clone()));
+                }
+                PopupMenuNode::Divider => {}
+            }
+        }
+        PopupMenuTextMetrics {
+            subtitle_height: self.popup_menu_subtitle_height(env),
+            max_row_text_width,
+            row_inset,
+        }
+    }
+
     pub(crate) fn show_popup_menu_nodes(
         &mut self,
         nodes: Vec<PopupMenuNode>,
@@ -989,7 +1194,9 @@ impl SemanticCore {
         self.dismiss_active_popup_menu();
         let group = PopupMenuStateGroup::new();
         let popup_origin = popup_window_origin(origin, env);
-        let (window, state) = popup_menu_window(nodes, popup_origin, group.clone(), 0, metrics);
+        let text = self.popup_menu_text_metrics(&nodes, metrics, env);
+        let (window, state) =
+            popup_menu_window(nodes, popup_origin, group.clone(), 0, metrics, text);
         group.push(state);
         env.get::<PopupWindowManager>()
             .expect("hydrolysis popup menus require PopupWindowManager in environment")
@@ -1183,16 +1390,31 @@ impl SemanticCore {
         bounds: vello::kurbo::Rect,
         items: nami::Computed<Vec<ResolvedMenuItem>>,
         env: &Environment,
+        dismiss_requests: nami::Computed<i32>,
+        preview: Rc<RefCell<Option<RetainedSubview>>>,
+        accessory: Rc<RefCell<Option<RetainedSubview>>>,
     ) {
-        self.register_context_menu_target_data(bounds, items, self.render_depth, env);
+        self.register_context_menu_target_data(
+            bounds,
+            items,
+            self.render_depth,
+            env,
+            dismiss_requests,
+            preview,
+            accessory,
+        );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_context_menu_target_data(
         &mut self,
         bounds: vello::kurbo::Rect,
         items: nami::Computed<Vec<ResolvedMenuItem>>,
         depth: usize,
         env: &Environment,
+        dismiss_requests: nami::Computed<i32>,
+        preview: Rc<RefCell<Option<RetainedSubview>>>,
+        accessory: Rc<RefCell<Option<RetainedSubview>>>,
     ) {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -1204,6 +1426,9 @@ impl SemanticCore {
             order,
             items,
             env: env.clone(),
+            dismiss_requests,
+            preview,
+            accessory,
         });
     }
 }

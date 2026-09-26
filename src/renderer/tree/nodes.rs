@@ -562,7 +562,7 @@ pub(super) enum WrapperEffect {
     Cursor(Cursor),
     Draggable(Draggable),
     DropDestination(DropDestinationHandles),
-    ContextMenu(ResolvedContextMenu),
+    ContextMenu(ContextMenuEffect),
     /// Conditional hit-testing: renders the child, then truncates the interaction
     /// targets it registered when disabled. The bookkeeping counts targets across
     /// the (node-flushed) child render, so reactive descendants stay live.
@@ -586,6 +586,37 @@ pub(super) enum WrapperEffect {
     /// fires from this effect's [`Drop`] when the node leaves the retained tree (a
     /// `Dynamic` / collection reconcile that drops the subtree, or app teardown).
     LifeCycle(LifeCycleEffect),
+    /// The theme's drawn context-menu surface behind the wrapped menu rows —
+    /// the panel a `PopupWindowManager` window shows instead of a view-level
+    /// fill (water-rs/hydrolysis#200). Draws nothing on targets that lack a
+    /// `draw_text_context_menu_panel` implementation.
+    PopupMenuSurface,
+}
+
+/// The node-owned state of a `.context_menu(...)` wrapper: the resolved menu
+/// plus the lifted preview and interactive accessory as retained sub-views.
+///
+/// The slots are `Rc<RefCell<Option<RetainedSubview>>>` because ownership moves
+/// with presentation state, not with the node: a context menu's preview and
+/// accessory mount into the open presentation and must be handed back to the
+/// node when it closes, so a later open mounts them again. The node keeps them
+/// across the rest of the tree's lifetime exactly like a widget's label
+/// sub-view — built lazily at the first open, patched and re-flushed per frame
+/// while presented.
+pub(crate) struct ContextMenuEffect {
+    /// The resolved menu items the popup is built from.
+    pub(crate) items: nami::Computed<Vec<ResolvedMenuItem>>,
+    /// Counter of the accessory's dismiss requests; every change closes the
+    /// open menu (water-rs/waterui#1245).
+    pub(crate) dismiss_requests: nami::Computed<i32>,
+    /// The view lifted over the dimmed backdrop at the source's frame while
+    /// the menu is open. `None` means lift the source view itself, realized
+    /// as a hole punched in the dim backdrop — the source is still drawn by
+    /// the owning tree, so it cannot be re-flushed here.
+    pub(crate) preview: Rc<RefCell<Option<RetainedSubview>>>,
+    /// The interactive view anchored to the lifted preview, mounted outside
+    /// the menu so its own pointer, touch and keyboard input reaches it.
+    pub(crate) accessory: Rc<RefCell<Option<RetainedSubview>>>,
 }
 
 /// The node-owned state of a lifecycle hook (see [`WrapperEffect::LifeCycle`]).

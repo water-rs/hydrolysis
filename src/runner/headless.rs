@@ -636,6 +636,32 @@ impl HeadlessRuntime {
             .collect()
     }
 
+    /// The open `.context_menu` presentation's drawn frames in hit space —
+    /// `(menu, accessory)` — or `None` when no drawn presentation is open.
+    /// The drawn menu mounts no popup window, so `popup_frames` stays empty
+    /// while it is up.
+    #[cfg(test)]
+    pub(crate) fn context_menu_presentation_frames(
+        &self,
+    ) -> Option<(vello::kurbo::Rect, Option<vello::kurbo::Rect>)> {
+        self.runtime.renderer.context_menu_presentation_frames()
+    }
+
+    /// The row frames inside the open drawn menu, in hit order — empty when
+    /// no drawn presentation is open.
+    #[cfg(test)]
+    pub(crate) fn context_menu_row_frames(&self) -> Vec<vello::kurbo::Rect> {
+        self.runtime.renderer.context_menu_row_frames()
+    }
+
+    /// The lifted preview's frame in the open drawn `.context_menu`
+    /// presentation — the source's rect unless fitting the stack moved or
+    /// cropped it — or `None` when none is open.
+    #[cfg(test)]
+    pub(crate) fn context_menu_lift_frame(&self) -> Option<vello::kurbo::Rect> {
+        self.runtime.renderer.context_menu_lift_frame()
+    }
+
     /// Digest of the last layout pass's placed bounds — the frame-profile
     /// example's byte-identical layout check.
     #[cfg(feature = "frame-profile")]

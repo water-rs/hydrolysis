@@ -170,6 +170,25 @@ impl HydrolysisRenderer {
         render_content(renderer);
     }
 
+    /// Draw the theme's context-menu panel behind the wrapped menu rows,
+    /// then render the content over it. This is the popup-window menu's
+    /// surface ([`WrapperEffect::PopupMenuSurface`]): on Material 3 themes it
+    /// is `md.comp.menu.container.color` (`surface-container`), the extra-small
+    /// 4 dp `md.sys.shape.corner.extra-small` shape and
+    /// `md.comp.menu.container.elevation` level 2 — drawn by the theme's
+    /// `draw_text_context_menu_panel`. The window leaves the panel's shadow
+    /// room inside its own bounds via `POPUP_MENU_PANEL_MARGIN`.
+    pub(super) fn apply_popup_menu_surface(
+        renderer: &mut HydrolysisRenderer,
+        ctx: RenderContext,
+        render_content: impl FnOnce(&mut HydrolysisRenderer),
+    ) {
+        let theme = renderer.theme();
+        let mut draw = VelloDrawContext::with_root_transform(&mut renderer.scene, ctx.transform);
+        theme.draw_text_context_menu_panel(&mut draw, ctx.bounds);
+        render_content(renderer);
+    }
+
     /// Render the wrapped content, then bind the single focusable target — a
     /// text input or an input surface — it registered to the
     /// `.focused(binding)` binding and reconcile focus state. Shared by the
@@ -591,18 +610,26 @@ impl HydrolysisRenderer {
 
     /// Register the context-menu hit-target, then render the given content. Shared
     /// by the dispatch handler and the retained `Wrapper` node. The node owns the
-    /// [`ResolvedContextMenu`] by reference, so the menu items are cloned for
-    /// registration. The node's environment travels with the target so the popup
-    /// opens inside it (water-rs/hydrolysis#140).
+    /// [`ContextMenuEffect`] by reference, so the menu items are cloned for
+    /// registration and the preview/accessory slots travel with the target for
+    /// the open presentation to mount. The node's environment travels with the
+    /// target so the popup opens inside it (water-rs/hydrolysis#140).
     pub(super) fn apply_context_menu(
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
         env: &Environment,
-        value: &ResolvedContextMenu,
+        value: &ContextMenuEffect,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        renderer.register_context_menu_target(bounds, value.items.clone(), env);
+        renderer.register_context_menu_target(
+            bounds,
+            value.items.clone(),
+            env,
+            value.dismiss_requests.clone(),
+            Rc::clone(&value.preview),
+            Rc::clone(&value.accessory),
+        );
         render_content(renderer);
     }
 

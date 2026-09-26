@@ -501,6 +501,10 @@ impl HydrolysisRenderer {
         // over; drawing it only on the one-time build path would leave it visible
         // for a single frame.
         self.render_active_text_context_menu_overlay(env, transform);
+        // Same for an open `.context_menu` presentation: its dim backdrop,
+        // lifted preview and anchored accessory re-encode per frame and the
+        // pass is where dismiss_requests/menu-close is observed.
+        self.render_context_menu_presentation(transform);
         self.flush_vello_scene_layer();
         drop(_encode_span);
         #[cfg(feature = "frame-profile")]
