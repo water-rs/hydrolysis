@@ -54,8 +54,12 @@ impl RenderNode {
             }
             RenderNode::Container(container) => {
                 renderer.push_render_owner(&container.accessibility_identity);
+                // The claim is resolved against the env the flush actually
+                // sees: an enclosing claim (e.g. a tap gesture's own node)
+                // hands its children a stripped environment where this
+                // container no longer carries semantics to claim.
                 #[cfg(feature = "accessibility")]
-                let container_scope = container.accessibility_child_env.as_ref().map(|_| {
+                let container_scope = accessibility_container_child_environment(env).map(|_| {
                     renderer.begin_accessibility_container(
                         transformed_rect(ctx.hit_transform, ctx.bounds),
                         env,
@@ -250,8 +254,8 @@ impl RenderNode {
                             ctx,
                             child_env,
                             effect,
-                            |r| {
-                                node.child.flush(r, ctx, child_env);
+                            |r, walk_env| {
+                                node.child.flush(r, ctx, walk_env);
                             },
                         );
                     }
@@ -484,9 +488,10 @@ impl RenderNode {
             }
             RenderNode::Container(container) => {
                 renderer.push_accessibility_owner(&container.accessibility_identity);
-                let container_scope = container
-                    .accessibility_child_env
-                    .as_ref()
+                // As in `flush`: the claim is resolved on the env this walk
+                // actually sees — an enclosing claim strips the naming
+                // metadata before it reaches here.
+                let container_scope = accessibility_container_child_environment(env)
                     .map(|_| renderer.begin_accessibility_container_semantic(env));
                 let child_env = container.accessibility_child_env.as_ref().unwrap_or(env);
                 renderer.pop_accessibility_owner();
@@ -518,18 +523,33 @@ impl RenderNode {
                 let child_env = &node.env;
                 match &node.effect {
                     WrapperEffect::GestureObserver(effect) => {
-                        HydrolysisRenderer::emit_gesture_observer_accessibility(
+                        let claimed_node = HydrolysisRenderer::emit_gesture_observer_accessibility(
                             renderer, child_env, effect,
                         );
+                        // The gesture's node claimed the naming scope: the
+                        // content walks under the same shielded environment a
+                        // naming container hands its children, so a leaf cannot
+                        // repeat the claim's role and label as a second node.
+                        let content_env;
+                        let walk_env = if claimed_node.is_some() {
+                            content_env = accessibility_container_child_environment(child_env)
+                                .unwrap_or_else(|| child_env.clone());
+                            &content_env
+                        } else {
+                            child_env
+                        };
                         if child_env
                             .get::<AccessibilityChildren>()
                             .is_some_and(AccessibilityChildren::excludes_descendants)
                         {
                             renderer.push_accessibility_suppression();
-                            node.child.emit_accessibility(renderer, child_env);
+                            node.child.emit_accessibility(renderer, walk_env);
                             renderer.pop_accessibility_suppression();
                         } else {
-                            node.child.emit_accessibility(renderer, child_env);
+                            node.child.emit_accessibility(renderer, walk_env);
+                        }
+                        if let Some(node_id) = claimed_node {
+                            renderer.drain_delegated_activation(node_id, child_env);
                         }
                     }
                     WrapperEffect::Focused(value) => {

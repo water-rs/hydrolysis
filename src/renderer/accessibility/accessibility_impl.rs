@@ -53,6 +53,12 @@ impl ScopedAccessibilityIdentifier {
 #[derive(Clone)]
 pub(crate) struct ScopedAccessibilitySemantics {
     identity: Rc<()>,
+    /// The `Activate` a representative silenced by this scope's claim delegates
+    /// to the claiming node. Shared across clones — `Environment` clones share
+    /// their `Rc` values and [`crate::renderer::restore_a11y_naming_scope`]
+    /// clones the scope itself — so a donation always lands in the slot the
+    /// claimer drains.
+    delegated_activation: Rc<RefCell<Option<AccessibilityActivation>>>,
 }
 
 #[cfg(feature = "accessibility")]
@@ -63,11 +69,28 @@ impl ScopedAccessibilitySemantics {
     pub(crate) fn new() -> Self {
         Self {
             identity: Rc::new(()),
+            delegated_activation: Rc::new(RefCell::new(None)),
         }
     }
 
     fn key(&self) -> usize {
         Rc::as_ptr(&self.identity) as usize
+    }
+
+    /// Deposit `activation` for the node claiming this scope — called by a tap
+    /// gesture whose own element the claim silences. The first donor wins: the
+    /// claim stands in for the nearest actionable representative.
+    pub(crate) fn delegate_activation(&self, activation: AccessibilityActivation) {
+        let mut slot = self.delegated_activation.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(activation);
+        }
+    }
+
+    /// Take the activation silenced representatives delegated, if any — the
+    /// claiming node drains it after its subtree has been walked.
+    pub(crate) fn take_delegated_activation(&self) -> Option<AccessibilityActivation> {
+        self.delegated_activation.borrow_mut().take()
     }
 }
 
@@ -475,6 +498,40 @@ impl AccessibilityBuilder {
             .is_some_and(|scope| self.consumed_semantics_scopes.contains(&scope.key()))
     }
 
+    /// Bind `node_id`'s `Click` to `activation`, advertising the `Focus` and
+    /// `Click` actions a tap gesture's own node would have carried.
+    ///
+    /// Called with the activation a silenced tap delegated to this node's
+    /// naming scope — the node stands in for that gesture, so it must be no
+    /// less activatable than the view it represents. A node that already has
+    /// an action target — or is disabled and advertises no actions — is left
+    /// alone: a donation never overrides a real action.
+    fn attach_delegated_activation(
+        &mut self,
+        node_id: AccessibilityNodeId,
+        activation: AccessibilityActivation,
+    ) {
+        if self.actions.contains_key(&node_id) {
+            return;
+        }
+        let Some(node) = self
+            .nodes
+            .iter_mut()
+            .find_map(|(id, node)| (*id == node_id).then_some(node))
+        else {
+            return;
+        };
+        if node.is_disabled() {
+            return;
+        }
+        node.add_action(AccessibilityAction::Focus);
+        node.add_action(AccessibilityAction::Click);
+        self.actions.insert(
+            node_id,
+            AccessibilityActionTarget::Activate { action: activation },
+        );
+    }
+
     /// Collapses a synthesized naming container around exactly one semantic
     /// node into that node.
     ///
@@ -516,6 +573,8 @@ impl AccessibilityBuilder {
         let label = container.label().map(str::to_owned);
         let author_id = container.author_id().map(str::to_owned);
         let role = container.role();
+        let click = container.supports_action(AccessibilityAction::Click);
+        let focus = container.supports_action(AccessibilityAction::Focus);
         let child = self
             .nodes
             .iter_mut()
@@ -523,6 +582,18 @@ impl AccessibilityBuilder {
             .expect("hydrolysis accessibility container child is not registered");
         if let Some(label) = label {
             child.set_label(label);
+        }
+        // The container's advertised actions and action target — the activation
+        // a silenced tap delegated to it — move to the surviving node; a real
+        // action the child registered itself always wins.
+        if click {
+            child.add_action(AccessibilityAction::Click);
+        }
+        if focus {
+            child.add_action(AccessibilityAction::Focus);
+        }
+        if let Some(target) = self.actions.remove(&container_id) {
+            self.actions.entry(child_id).or_insert(target);
         }
         // The scope's automation id was claimed by the container, so it would
         // vanish with it. A child that carries its own id keeps it, matching
@@ -609,6 +680,10 @@ pub(crate) struct AccessibilityContainerScope {
     suppression_pushed: bool,
     /// The node this scope synthesized for the container, when it did.
     container_node: Option<AccessibilityNodeId>,
+    /// The naming scope that node's registration claimed — the channel
+    /// silenced representatives (a tap gesture whose own node was suppressed)
+    /// delegate their activation through, drained when the scope ends.
+    naming_scope: Option<ScopedAccessibilitySemantics>,
 }
 
 #[cfg(feature = "accessibility")]
@@ -619,6 +694,7 @@ impl AccessibilityContainerScope {
         parent_pushed: false,
         suppression_pushed: false,
         container_node: None,
+        naming_scope: None,
     };
 }
 
@@ -640,7 +716,6 @@ pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Op
     }
 
     let mut child_env = env.clone();
-    child_env.remove::<ScopedAccessibilitySemantics>();
     child_env.remove::<ScopedAccessibilityIdentifier>();
     child_env.remove::<AccessibilityLabel>();
     child_env.remove::<AccessibilityRole>();
@@ -648,6 +723,10 @@ pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Op
     child_env.remove::<AccessibilityChildren>();
     child_env.remove::<AccessibilityState>();
     child_env.remove::<AccessibilityStateSignal>();
+    // `ScopedAccessibilitySemantics` deliberately stays: it no longer names
+    // anything — the claim consumed it — but it is still the claim's identity,
+    // which is how a silenced representative inside (a tap gesture) sees the
+    // scope is spoken for and delegates its activation to the claiming node.
     Some(child_env)
 }
 
@@ -1197,6 +1276,7 @@ impl SemanticCore {
                 parent_pushed: false,
                 suppression_pushed: true,
                 container_node: None,
+                naming_scope: None,
             };
         }
 
@@ -1226,6 +1306,7 @@ impl SemanticCore {
                 parent_pushed: false,
                 suppression_pushed: true,
                 container_node: None,
+                naming_scope: None,
             };
         }
         self.watch_accessibility_state(env);
@@ -1252,6 +1333,33 @@ impl SemanticCore {
             parent_pushed: true,
             suppression_pushed,
             container_node: Some(node_id),
+            naming_scope: env.get::<ScopedAccessibilitySemantics>().cloned(),
+        }
+    }
+
+    /// Whether the naming scope `env` sits in was already claimed this flush —
+    /// for gesture observers, which delegate their activation to the claimer
+    /// instead of registering a silenced second element.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn accessibility_scope_is_claimed(&self, env: &Environment) -> bool {
+        self.accessibility.semantics_scope_is_claimed(env)
+    }
+
+    /// Attach the activation a silenced representative delegated to `node_id`'s
+    /// naming scope (see [`ScopedAccessibilitySemantics::delegate_activation`])
+    /// onto the node that claimed it. Called once the claimer's subtree has
+    /// been walked, when every donation has already landed.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn drain_delegated_activation(
+        &mut self,
+        node_id: AccessibilityNodeId,
+        env: &Environment,
+    ) {
+        if let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
+            && let Some(activation) = scope.take_delegated_activation()
+        {
+            self.accessibility
+                .attach_delegated_activation(node_id, activation);
         }
     }
 
@@ -1267,6 +1375,17 @@ impl SemanticCore {
                 .expect("hydrolysis accessibility container parent stack underflow");
         }
         if let Some(container_id) = scope.container_node {
+            // A tap gesture the claim silenced delegates its activation through
+            // the scope: the container node stands in for it, so it must stay
+            // activatable. Drained after the subtree walk — every donation has
+            // landed — and before the collapse hands the node to its child.
+            if let Some(activation) = scope
+                .naming_scope
+                .and_then(|scope| scope.take_delegated_activation())
+            {
+                self.accessibility
+                    .attach_delegated_activation(container_id, activation);
+            }
             self.accessibility
                 .collapse_single_child_container(container_id);
             // No real child ever registered under the container, but suppressed
