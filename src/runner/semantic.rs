@@ -539,6 +539,13 @@ fn advance_semantic_window(window: &mut SemanticWindow, env: &Environment, now: 
 /// window's `body()` when none exists, otherwise patches and re-emits it when
 /// work is pending. Returns whether the tree was emitted this pump.
 fn pump_semantic_window(window: &mut SemanticWindow, env: &Environment) -> bool {
+    // The rendered pump subscribes to the window's frame/state signals every
+    // frame (`render_window_with_capture`): the semantic pump holds the same
+    // subscriptions so a `frame`/`state` change re-emits here too, and so their
+    // watch guards roll over through `signal_watches` in the same teardown
+    // order the renderer releases them in (water-rs/waterui#1213).
+    let _ = window.core.read_signal(&window.window.frame);
+    let _ = window.core.read_signal(&window.window.state);
     #[cfg(feature = "accessibility")]
     window
         .core

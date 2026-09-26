@@ -36,6 +36,8 @@ mod scroll_frames;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod semantic_runtime;
 mod shadow;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod teardown_order;
 mod tree;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_background;
