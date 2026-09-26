@@ -229,3 +229,130 @@ fn edit_controls_emit_accessibility_nodes_offscreen() {
         "row 0's move-down control moves it down"
     );
 }
+
+/// An item whose id stays stable while a baked field changes — the shape from
+/// <https://github.com/water-rs/hydrolysis/issues/227>: `get_id` still resolves
+/// the same identity, so membership reconciliation alone never sees that the
+/// row's retained content is stale.
+#[derive(Clone)]
+struct FieldRow {
+    id: u64,
+    badge: &'static str,
+}
+
+impl waterui::id::Identifiable for FieldRow {
+    type Id = u64;
+
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+}
+
+fn badge_list(items: nami::collection::SignalCollection<Binding<Vec<FieldRow>>>) -> impl View {
+    List::for_each(items, |item| {
+        ListItem::new(waterui::component::vstack((
+            text(format!("row {}", item.id)),
+            text(item.badge),
+        )))
+    })
+}
+
+/// The semantic path: a same-id update must re-materialize the retained row so
+/// the row's *emitted descendants* carry the new fields. The row's own label is
+/// re-read from a fresh materialization every emit, so only a descendant leaf
+/// can observe whether the retained subtree rebuilt.
+#[test]
+fn for_each_same_id_item_update_rematerializes_row_semantic() {
+    let items = Binding::container(vec![
+        FieldRow {
+            id: 1,
+            badge: "badge-a",
+        },
+        FieldRow {
+            id: 2,
+            badge: "badge-b",
+        },
+    ]);
+    let mut app = ui().mount({
+        let items = items.clone();
+        move || badge_list(nami::collection::SignalCollection::new(items.clone()))
+    });
+    app.settle();
+    app.query()
+        .role(Role::LABEL)
+        .label("badge-a")
+        .assert_exists();
+
+    items.set(vec![
+        FieldRow {
+            id: 1,
+            badge: "badge-z",
+        },
+        FieldRow {
+            id: 2,
+            badge: "badge-b",
+        },
+    ]);
+    app.settle();
+
+    app.query()
+        .role(Role::LABEL)
+        .label("badge-z")
+        .assert_exists();
+    app.query()
+        .role(Role::LABEL)
+        .label("badge-a")
+        .assert_not_exists();
+    app.query()
+        .role(Role::LABEL)
+        .label("badge-b")
+        .assert_exists();
+}
+
+/// The rendered path: the same update must repaint the changed row, and the
+/// virtualized row bookkeeping keyed by item id — scroll offset and row focus —
+/// survives the re-materialization.
+#[test]
+fn for_each_same_id_item_update_rematerializes_row_offscreen() {
+    let items = Binding::container(
+        (0..10)
+            .map(|id| FieldRow {
+                id,
+                badge: "badge-a",
+            })
+            .collect::<Vec<_>>(),
+    );
+    let mut app = ui()
+        .viewport(320, 320)
+        .theme(Material3::defaults())
+        .mount_offscreen({
+            let items = items.clone();
+            move || badge_list(nami::collection::SignalCollection::new(items.clone()))
+        });
+    app.settle();
+    let before = app.snapshot();
+
+    // Focus a row so its claim is retained by id, then update a different row.
+    app.tap_at(20.0, 20.0);
+    app.settle();
+
+    items.set(
+        (0..10)
+            .map(|id| FieldRow {
+                id,
+                badge: if id == 1 { "badge-z" } else { "badge-a" },
+            })
+            .collect::<Vec<_>>(),
+    );
+    app.settle();
+    let after = app.snapshot();
+    assert!(
+        after.rgba8 != before.rgba8,
+        "the updated row must repaint: a same-id content change must re-materialize \
+         the retained row instead of replaying the stale subtree"
+    );
+    app.query()
+        .role(Role::LABEL)
+        .label("badge-z")
+        .assert_exists();
+}

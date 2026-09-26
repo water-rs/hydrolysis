@@ -4,9 +4,27 @@
 use super::*;
 use std::rc::Rc;
 
+use nami::collection::CollectionChange;
 use waterui_core::animation::Animation;
 use waterui_core::layout::Point;
 use waterui_layout::collection_transition::CollectionTransition;
+
+/// Collect into `out` the ids occupying the positions a [`CollectionChange`]
+/// reports as replaced: `change.replaced` names new-snapshot indices, and
+/// `ids` is the notified snapshot slice — index-parallel with the collection.
+/// A producer that knows only a whole-value replacement reports
+/// `everything`, so an empty change means nothing needs re-materializing.
+pub(crate) fn collect_replaced_ids<Id: Copy + Eq + core::hash::Hash>(
+    ids: &[Id],
+    change: &CollectionChange,
+    out: &mut std::collections::HashSet<Id>,
+) {
+    for range in &change.replaced {
+        let start = range.start.min(ids.len());
+        let end = range.end.min(ids.len());
+        out.extend(ids[start..end].iter().copied());
+    }
+}
 
 /// The membership-transition phase of a retained collection entry. An entry with
 /// a transition fades and (along the stack axis) collapses in while `Entering`
@@ -181,6 +199,11 @@ pub(crate) struct CollectionNode {
     pub(super) transition: Option<CollectionTransitionRuntime>,
     /// Set by the membership watcher; consumed by `patch` to trigger a reconcile.
     pub(super) dirty: Rc<Cell<bool>>,
+    /// Ids the watcher reported as replaced since the last reconcile — the
+    /// items whose content may differ under an unchanged id, so their nodes
+    /// are rebuilt while every other surviving id keeps its node and state.
+    /// Shared with the watcher closure via `Rc`.
+    pub(super) replaced_ids: Rc<RefCell<std::collections::HashSet<CollectionItemId>>>,
     /// Stable allocation whose address is this collection's patch dirty-key.
     pub(super) _dirty_key: Rc<()>,
     /// Membership-change watcher; a change sets `dirty` and schedules a refresh.
@@ -239,6 +262,11 @@ pub(crate) struct LazyStackNode {
     /// Membership changes reset index-based measurements, including moves that
     /// preserve the collection length.
     pub(super) dirty: Rc<Cell<bool>>,
+    /// Ids the watcher reported as replaced since the last consume — the
+    /// items whose content may differ under an unchanged id. `patch_visible`
+    /// drops exactly those ids' retained rows; untouched rows keep their
+    /// nodes. Shared with the watcher closure via `Rc`.
+    pub(super) replaced_ids: Rc<RefCell<std::collections::HashSet<CollectionItemId>>>,
     /// Stable allocation whose address is this collection's patch dirty-key,
     /// owned so the key cannot be reused by another allocation while it lives.
     pub(super) _dirty_key: Rc<()>,
@@ -546,10 +574,13 @@ impl CollectionNode {
 
     /// Apply a membership change: keep each surviving id's node (and its
     /// in-flight state), build newly-present ids, and drop departed ones — in
-    /// the new order. With a transition, departed entries instead begin their
-    /// exit — kept in display order, anchored after the live id they followed —
-    /// and new ids animate in (the initial membership was built at rest by
-    /// [`RenderNode::build_collection`]; only later changes reach here).
+    /// the new order. Entries the watcher flagged as replaced keep their id
+    /// and phase but their node is rebuilt — a same-id content change re-
+    /// materializes exactly that row. With a transition, departed entries
+    /// instead begin their exit — kept in display order, anchored after the
+    /// live id they followed — and new ids animate in (the initial membership
+    /// was built at rest by [`RenderNode::build_collection`]; only later
+    /// changes reach here).
     pub(super) fn reconcile(&mut self, renderer: &mut SemanticCore) {
         let env = self.env.clone();
         let len = self.views.len().snapshot();
@@ -563,7 +594,7 @@ impl CollectionNode {
                     .unwrap_or_else(|| panic!("hydrolysis collection: item {index} has no id"))
             })
             .collect();
-        let live: std::collections::BTreeSet<CollectionItemId> = ids.iter().copied().collect();
+        let live: std::collections::HashSet<CollectionItemId> = ids.iter().copied().collect();
 
         // Partition the previous display order into entries still live
         // (reusable, keyed by id) and departed ones. With a transition the
@@ -598,10 +629,21 @@ impl CollectionNode {
 
         let mut next = Vec::with_capacity(len + head_dead.len());
         next.extend(head_dead.into_iter().map(begin_exit));
+        let replaced = core::mem::take(&mut *self.replaced_ids.borrow_mut());
         for (index, id) in ids.into_iter().enumerate() {
             let entry = match reuse_by_id.remove(&id) {
                 Some(mut previous) => {
                     previous.phase = next_live_phase(self.transition.as_ref(), previous.phase, now);
+                    if replaced.contains(&id) {
+                        // Same id, changed content: re-materialize this row's
+                        // node from the current item. The entry keeps its
+                        // identity and phase; only the node is rebuilt.
+                        let view = self.views.get_view(index).unwrap_or_else(|| {
+                            panic!("hydrolysis collection: item {index} missing")
+                        });
+                        previous.node =
+                            RenderNode::build(normalize_layout_view(view, &env), &env, renderer);
+                    }
                     previous
                 }
                 None => {
@@ -680,6 +722,13 @@ impl LazyStackNode {
     /// Applies structural updates owned by the currently visible retained items
     /// before the parent scroll view measures this stack.
     pub(super) fn patch_visible(&self, renderer: &mut SemanticCore) -> bool {
+        let replaced = core::mem::take(&mut *self.replaced_ids.borrow_mut());
+        if !replaced.is_empty() {
+            // A same-id content change drops exactly those rows' retained
+            // sub-views; they re-materialize from the collection's current
+            // data when the visible window next fills them.
+            self.item_cache.borrow_mut().invalidate_ids(&replaced);
+        }
         let changed = self.item_cache.borrow_mut().patch_for_parent(renderer);
         if changed {
             self.estimate_sample.set(None);

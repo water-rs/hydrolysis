@@ -1,3 +1,4 @@
+mod collection_update;
 use super::*;
 use std::borrow::Cow;
 use std::cell::RefCell;
