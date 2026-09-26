@@ -435,7 +435,9 @@ impl HydrolysisRenderer {
             &input,
             Some(ctx.bounds.width() as f32),
             tail,
-            |layout, fragment| Self::encode_text_layout(fragment, layout, tail.parts().0),
+            |layout, effective, fragment| {
+                Self::encode_text_layout(fragment, layout, effective, tail.parts().0);
+            },
         );
         scene.append(
             &fragment,
@@ -460,12 +462,14 @@ impl HydrolysisRenderer {
         let height = f64::from(metrics.line_height);
         let x = ((ctx.bounds.width() - width) * 0.5).max(0.0);
         let y = ((ctx.bounds.height() - height) * 0.5).max(0.0);
-        let fragment =
-            state
-                .text
-                .glyph_scene_with(&input, None, TailMark::Clip(1), |layout, fragment| {
-                    Self::encode_text_layout(fragment, layout, Some(1));
-                });
+        let fragment = state.text.glyph_scene_with(
+            &input,
+            None,
+            TailMark::Clip(1),
+            |layout, effective, fragment| {
+                Self::encode_text_layout(fragment, layout, effective, Some(1));
+            },
+        );
         scene.append(
             &fragment,
             Some(ctx.transform * vello::kurbo::Affine::translate((x, y))),
@@ -478,14 +482,19 @@ impl HydrolysisRenderer {
     fn encode_text_layout(
         scene: &mut vello::Scene,
         layout: &parley::Layout<[u8; 4]>,
+        input: &ResolvedTextLayoutInput,
         max_lines: Option<usize>,
     ) {
         if layout.is_empty() {
             return;
         }
+        let paint_backgrounds = input.has_background();
         for (index, line) in layout.lines().enumerate() {
             if max_lines.is_some_and(|limit| index >= limit) {
                 break;
+            }
+            if paint_backgrounds {
+                Self::encode_line_backgrounds(scene, &line, input);
             }
             for item in line.items() {
                 if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
@@ -517,6 +526,66 @@ impl HydrolysisRenderer {
                 }
             }
         }
+    }
+
+    /// Fill each backgrounded span's glyph extent on `line` — the full line
+    /// box (`block_min_coord..block_max_coord`) tall — under the text.
+    ///
+    /// The horizontal cursor accumulates cluster advances over `runs()` in
+    /// display order, the same sequence parley's own glyph-run iterator places
+    /// left-to-right (both are driven by `Run::visual_clusters`). These layouts
+    /// come from a ranged builder, which emits no inline boxes, so runs are
+    /// the whole item sequence.
+    fn encode_line_backgrounds(
+        scene: &mut vello::Scene,
+        line: &parley::Line<'_, [u8; 4]>,
+        input: &ResolvedTextLayoutInput,
+    ) {
+        let metrics = line.metrics();
+        let (top, bottom) = (
+            f64::from(metrics.block_min_coord),
+            f64::from(metrics.block_max_coord),
+        );
+        let mut cursor = metrics.inline_min_coord + metrics.offset;
+        // Adjacent clusters with the same background merge into one fill.
+        let mut open: Option<(f32, [u8; 4])> = None;
+        for run in line.runs() {
+            for cluster in run.visual_clusters() {
+                let end = cursor + cluster.advance();
+                let background = input.span_background(cluster.text_range().start);
+                let extends = matches!(
+                    (open, background),
+                    (Some((_, open_colour)), Some(colour)) if open_colour == colour
+                );
+                if !extends {
+                    if let Some((start, colour)) = open.take() {
+                        Self::fill_span_background(scene, start, cursor, top, bottom, colour);
+                    }
+                    open = background.map(|colour| (cursor, colour));
+                }
+                cursor = end;
+            }
+        }
+        if let Some((start, colour)) = open {
+            Self::fill_span_background(scene, start, cursor, top, bottom, colour);
+        }
+    }
+
+    fn fill_span_background(
+        scene: &mut vello::Scene,
+        start: f32,
+        end: f32,
+        top: f64,
+        bottom: f64,
+        colour: [u8; 4],
+    ) {
+        scene.fill(
+            vello::peniko::Fill::NonZero,
+            vello::kurbo::Affine::IDENTITY,
+            rgba8_to_peniko(colour),
+            None,
+            &vello::kurbo::Rect::new(f64::from(start), top, f64::from(end), bottom),
+        );
     }
 
     pub(crate) fn build_text_layout(
@@ -1443,5 +1512,89 @@ mod tests {
 
         assert_eq!(measured_input_field_height(34.0, 0.0, metrics), 56.0);
         assert_eq!(measured_input_field_height(48.0, 0.0, metrics), 64.0);
+    }
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use crate::renderer::tests::test_environment;
+    use waterui_graphics::color::Color;
+    use waterui_text::styled::{Style as TextStyle, StyledStr};
+
+    const BACKGROUND: [u8; 4] = [0, 128, 0, 255];
+
+    /// The premultiplied solid colours a scene draws — glyph brushes and
+    /// background fills alike — read straight off the encoding. `0x44` is
+    /// `vello_encoding`'s `DrawTag::COLOR`; each entry consumes
+    /// `tag.info_size()` words of the draw-data stream.
+    fn solid_fill_colours(scene: &vello::Scene) -> Vec<u32> {
+        let encoding = scene.encoding();
+        let mut colours = Vec::new();
+        let mut offset = 0usize;
+        for tag in &encoding.draw_tags {
+            if tag.0 == 0x44 {
+                colours.push(encoding.draw_data[offset]);
+            }
+            offset += tag.info_size() as usize;
+        }
+        colours
+    }
+
+    fn rendered_fill_colours(styled: StyledStr, width: f64) -> Vec<u32> {
+        let env = test_environment();
+        let mut state = HydroState::default();
+        let mut scene = vello::Scene::new();
+        let ctx = RenderContext::with_transforms(
+            vello::kurbo::Rect::new(0.0, 0.0, width, 200.0),
+            vello::kurbo::Affine::IDENTITY,
+            vello::kurbo::Affine::IDENTITY,
+        );
+        HydrolysisRenderer::render_styled_text_limited(
+            &mut state,
+            &mut scene,
+            ctx,
+            styled,
+            HorizontalAlignment::Leading,
+            &env,
+            TailMark::None,
+        );
+        solid_fill_colours(&scene)
+    }
+
+    /// A span's `TextStyle::background` must reach the encoded scene: one fill
+    /// per contiguous backgrounded run on each line it covers.
+    #[test]
+    fn styled_backgrounds_paint_fills_under_their_runs() {
+        let expected = u32::from_ne_bytes(BACKGROUND);
+
+        let mut single = StyledStr::empty();
+        single.push("before ", TextStyle::new());
+        single.push(
+            "spoiler",
+            TextStyle::new().background(Color::srgb(0, 128, 0)),
+        );
+        single.push(" after", TextStyle::new());
+        let colours = rendered_fill_colours(single, 300.0);
+        assert!(
+            colours.contains(&expected),
+            "a mid-line span paints its background fill"
+        );
+
+        let mut wrapped = StyledStr::empty();
+        wrapped.push(
+            "the hidden words run long enough to wrap the line ",
+            TextStyle::new(),
+        );
+        wrapped.push(
+            "across its own boundary here",
+            TextStyle::new().background(Color::srgb(0, 128, 0)),
+        );
+        wrapped.push(" and out", TextStyle::new());
+        let colours = rendered_fill_colours(wrapped, 120.0);
+        assert!(
+            colours.iter().filter(|colour| **colour == expected).count() >= 2,
+            "a span wrapped over two lines paints one fill per line"
+        );
     }
 }

@@ -163,17 +163,35 @@ impl TextMeasureService {
         max_width: Option<f32>,
         max_lines: Option<usize>,
     ) -> Arc<parley::Layout<[u8; 4]>> {
+        self.shape_limited_effective(input, max_width, max_lines).0
+    }
+
+    /// [`Self::shape_limited`] plus the input the returned layout was actually
+    /// shaped from: `Some` is the respelled truncation input — whose span
+    /// ranges are shifted and clamped to the cut text — so an encoder reads
+    /// per-span properties against the same text the layout carries; `None`
+    /// means `input` itself produced the layout.
+    fn shape_limited_effective(
+        &self,
+        input: &ResolvedTextLayoutInput,
+        max_width: Option<f32>,
+        max_lines: Option<usize>,
+    ) -> (
+        Arc<parley::Layout<[u8; 4]>>,
+        Option<ResolvedTextLayoutInput>,
+    ) {
         let mut layout = self.shape(input, max_width);
         let Some(limit) = max_lines.filter(|limit| *limit > 0) else {
-            return layout;
+            return (layout, None);
         };
         if !needs_tail_truncation(&layout, limit) {
-            return layout;
+            return (layout, None);
         }
 
         let ellipsis_advance = self.ellipsis_advance(input, &layout, limit);
         let mut text = input.plain.clone();
         let mut spans = input.spans.clone();
+        let mut respelled = None;
         while let Some(cut) = truncate_layout_tail(&layout, &text, &spans, limit, ellipsis_advance)
         {
             if cut.0 == text {
@@ -181,12 +199,14 @@ impl TextMeasureService {
             }
             text = cut.0;
             spans = cut.1;
-            layout = self.shape(&input.respell(text.clone(), spans.clone()), max_width);
+            let next = input.respell(text.clone(), spans.clone());
+            layout = self.shape(&next, max_width);
+            respelled = Some(next);
             if !needs_tail_truncation(&layout, limit) {
                 break;
             }
         }
-        layout
+        (layout, respelled)
     }
 
     /// The marker's advance in the style at the tail of the last allowed line,
@@ -219,13 +239,15 @@ impl TextMeasureService {
     /// shapes through [`Self::shape`] — or [`Self::shape_limited`] for
     /// [`TailMark::Ellipsis`] — and encodes once via `encode`; a hit returns
     /// the shared fragment so the caller only pays a transformed append into
-    /// the frame's scene.
+    /// the frame's scene. `encode` receives the input the layout was shaped
+    /// from — `input` itself, or its respelled truncation tail — because a
+    /// truncated layout's text ranges no longer match `input`'s spans.
     pub(crate) fn glyph_scene_with(
         &self,
         input: &ResolvedTextLayoutInput,
         max_width: Option<f32>,
         tail: TailMark,
-        encode: impl FnOnce(&parley::Layout<[u8; 4]>, &mut vello::Scene),
+        encode: impl FnOnce(&parley::Layout<[u8; 4]>, &ResolvedTextLayoutInput, &mut vello::Scene),
     ) -> Arc<vello::Scene> {
         let (max_lines, tail_ellipsis) = tail.parts();
         let key = TextSceneCacheKey {
@@ -241,13 +263,13 @@ impl TextMeasureService {
         {
             return Arc::clone(scene);
         }
-        let layout = if tail_ellipsis {
-            self.shape_limited(input, max_width, max_lines)
+        let (layout, respelled) = if tail_ellipsis {
+            self.shape_limited_effective(input, max_width, max_lines)
         } else {
-            self.shape(input, max_width)
+            (self.shape(input, max_width), None)
         };
         let mut scene = vello::Scene::new();
-        encode(&layout, &mut scene);
+        encode(&layout, respelled.as_ref().unwrap_or(input), &mut scene);
         let scene = Arc::new(scene);
         self.scene_cache
             .lock()
@@ -306,6 +328,23 @@ impl ResolvedTextLayoutInput {
         }
     }
 
+    /// The background colour of the span covering `byte_index`, if that span
+    /// painted one. Spans partition `plain`, so every index belongs to exactly
+    /// one span.
+    pub(crate) fn span_background(&self, byte_index: usize) -> Option<[u8; 4]> {
+        self.spans
+            .iter()
+            .find(|(range, _)| range.contains(&byte_index))
+            .and_then(|(_, style)| style.background)
+    }
+
+    /// `true` when at least one resolved span paints a background.
+    pub(crate) fn has_background(&self) -> bool {
+        self.spans
+            .iter()
+            .any(|(_, style)| style.background.is_some())
+    }
+
     /// The same shaping defaults respelled over different text — how the
     /// ellipsis probe and each truncated re-shape mint their inputs.
     fn respell(&self, plain: String, spans: Vec<(Range<usize>, ResolvedTextStyleSpec)>) -> Self {
@@ -354,6 +393,7 @@ struct ResolvedFontSpec {
 struct ResolvedTextStyleSpec {
     font: ResolvedFontSpec,
     foreground: Option<[u8; 4]>,
+    background: Option<[u8; 4]>,
     italic: bool,
     underline: bool,
     strikethrough: bool,
@@ -417,6 +457,7 @@ fn span_cache_key(range: &Range<usize>, style: &ResolvedTextStyleSpec) -> TextLa
         end: range.end,
         font: text_layout_font_cache_key(&style.font),
         foreground: style.foreground,
+        background: style.background,
         italic: style.italic,
         underline: style.underline,
         strikethrough: style.strikethrough,
@@ -438,6 +479,10 @@ fn resolve_text_style(style: &TextStyle, env: &Environment) -> ResolvedTextStyle
         font: font_spec(&style.font.resolve(env).snapshot()),
         foreground: style
             .foreground
+            .clone()
+            .map(|color| resolved_color_to_rgba8(color.resolve(env).snapshot())),
+        background: style
+            .background
             .clone()
             .map(|color| resolved_color_to_rgba8(color.resolve(env).snapshot())),
         italic: style.italic,
@@ -934,6 +979,7 @@ pub(crate) struct TextLayoutSpanCacheKey {
     pub(crate) end: usize,
     pub(crate) font: TextLayoutFontCacheKey,
     pub(crate) foreground: Option<[u8; 4]>,
+    pub(crate) background: Option<[u8; 4]>,
     pub(crate) italic: bool,
     pub(crate) underline: bool,
     pub(crate) strikethrough: bool,
