@@ -1050,8 +1050,8 @@ pub(super) fn runtime_window_origin<P: PlatformWindow>(
     }
 }
 
-/// Brings the retained hit-test geometry up to date before queued input is
-/// dispatched.
+/// Brings the retained hit-test geometry up to date before a queued scroll
+/// event is dispatched.
 ///
 /// Reactive layout and platform input are delivered independently. If a scroll
 /// wheel event arrives while a Dynamic/lazy item size refresh is pending, using
@@ -1059,6 +1059,10 @@ pub(super) fn runtime_window_origin<P: PlatformWindow>(
 /// `max_y == 0`. This preflight patches and lays out the retained tree without
 /// presenting it; the already-pending render still presents the refreshed scene
 /// normally after input has been applied.
+///
+/// The refreshed registrations describe a frame the user has not seen yet, so
+/// the caller only runs this for scroll input — pointer events must keep
+/// resolving against the presented frame's geometry.
 fn refresh_pending_input_geometry<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
@@ -1112,9 +1116,6 @@ where
 {
     let mut should_close = runtime.window.state.snapshot() == waterui::window::WindowState::Closed;
     let events = runtime.platform.drain_events();
-    if !events.is_empty() {
-        refresh_pending_input_geometry(runtime, env);
-    }
     // Platform IMEs mark their own keystrokes by what they emit: ownership
     // follows the event order inside the batch (see `ime_owned_events`), so
     // a confirming keystroke that arrives before its commit is the
@@ -1123,7 +1124,25 @@ where
     // embedded sink — the committing Enter/Backspace in particular must not
     // activate a form or delete committed text.
     let ime_owned = ime::ime_owned_events(&events, runtime.renderer.ime_composition_active());
+    let mut geometry_refreshed = false;
     for (event, ime_owned) in events.into_iter().zip(ime_owned) {
+        // The preflight re-registers every hit target at the geometry a
+        // pending refresh is *about to* paint, so it is reserved for the
+        // input that reads scroll extents: a wheel or trackpad-pan delta
+        // applied against the last presented extent can be rejected at a
+        // stale `max_y`. Pointer input instead resolves against the last
+        // *presented* frame — a tap targets the pixels the user saw, so
+        // hit-testing it against un-presented geometry would move every
+        // region out from under it (water-rs/hydrolysis#208).
+        if !geometry_refreshed
+            && matches!(
+                event,
+                InputEvent::Scroll { .. } | InputEvent::TrackpadPan { .. }
+            )
+        {
+            refresh_pending_input_geometry(runtime, env);
+            geometry_refreshed = true;
+        }
         match event {
             InputEvent::CloseRequested => {
                 runtime
