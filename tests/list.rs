@@ -9,13 +9,17 @@
 //! row that may not exist yet: it stays pending until the contents contain the
 //! index, and a newer generation supersedes it.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use hydrolysis_m3::Material3;
 use nami::collection::List as ReactiveList;
-use waterui::component::list::{List, ListItem};
-use waterui::component::text;
+use waterui::component::list::{List, ListDelete, ListItem};
+use waterui::component::{hstack, spacer, text};
 use waterui::id::SelfId;
 use waterui::layout::scroll::ScrollController;
-use waterui::{View, ViewExt};
+use waterui::{Binding, View, ViewExt};
+use waterui_core::dynamic::watch;
 use waterui_testing::{Role, ui};
 
 /// Material's one-line list row: a scroll request landing on row `N` reports a
@@ -106,4 +110,57 @@ fn pending_scroll_target_above_row_count_waits_for_contents_offscreen() {
     // realized, row 0 scrolled out and was evicted.
     app.query().label("row 8").assert_exists();
     app.query().label("row 0").assert_not_exists();
+}
+
+/// <https://github.com/water-rs/hydrolysis/issues/111>: a tap on `List` row
+/// content never fires once the row's content re-renders while the row's swipe
+/// gesture stays armed. The retained swipe re-registers with the hit-test order
+/// minted on its birth frame while the rebuilt tap mints a fresh order — and
+/// the order counter resets every rebuild, so the stale order can permanently
+/// outrank the tap: `top_group_id_at` then picks the swipe's gesture group and
+/// the tap recognizer never activates.
+#[test]
+fn row_content_tap_survives_retained_swipe_order_offscreen() {
+    let highlight = Binding::bool(false);
+    let taps = Rc::new(Cell::new(0));
+    let mut app = ui()
+        .viewport(360, 240)
+        .theme(Material3::defaults())
+        .mount_offscreen({
+            let taps = Rc::clone(&taps);
+            let highlight = highlight.clone();
+            move || {
+                let highlight = highlight.clone();
+                let taps = Rc::clone(&taps);
+                let items =
+                    ReactiveList::from((1..=3).map(SelfId::new).collect::<Vec<SelfId<i32>>>());
+                List::for_each(items, move |item| {
+                    let row = *item;
+                    let taps = Rc::clone(&taps);
+                    ListItem::new(watch(highlight.clone(), move |on| {
+                        let label = if on { "high" } else { "low" };
+                        let taps = Rc::clone(&taps);
+                        hstack((text(format!("row {row} {label}")), spacer()))
+                            .on_tap(move || taps.set(row))
+                    }))
+                })
+                .on_delete(|_: ListDelete| {})
+            }
+        });
+
+    app.query().label_contains("row 2").tap_at(0.5, 0.5);
+    assert_eq!(taps.get(), 2, "baseline: row content on_tap must fire");
+
+    // Rebuilding the row contents re-mints their tap targets while the rows'
+    // swipe gestures stay retained; the taps must still outrank them.
+    highlight.set(true);
+    app.settle();
+
+    taps.set(0);
+    app.query().label_contains("row 2").tap_at(0.5, 0.5);
+    assert_eq!(
+        taps.get(),
+        2,
+        "row content on_tap must still fire after the contents rebuild"
+    );
 }

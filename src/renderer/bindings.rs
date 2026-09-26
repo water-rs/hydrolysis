@@ -256,6 +256,11 @@ impl SemanticCore {
     /// at that row's current bounds. The recognizer state machine is shared, so
     /// a drag that began before this frame keeps running instead of being
     /// forgotten when the engine's per-frame target list is rebuilt.
+    ///
+    /// The order minted on the target's birth frame is not reused: the hit-test
+    /// order counter resets every rebuild, so a stale order ranks the target
+    /// against siblings it was never painted with. Re-minting keeps the
+    /// recognizer while ranking the target by where it paints this frame.
     pub(crate) fn register_retained_gesture_target(
         &mut self,
         target: &crate::gesture::GestureTarget,
@@ -265,17 +270,15 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let order = self.hit_test.next_hit_test_order();
         self.hit_test.gesture_regions.push(GestureRegion {
             bounds,
-            order: target.order,
+            order,
             owners: self.owner_stack.clone(),
         });
-        self.gesture_engine
-            .register_existing_target(target.with_bounds_depth_and_group(
-                bounds,
-                self.render_depth,
-                group_id,
-            ));
+        let mut target = target.with_bounds_depth_and_group(bounds, self.render_depth, group_id);
+        target.order = order;
+        self.gesture_engine.register_existing_target(target);
     }
 
     pub(crate) fn allocate_gesture_group_id(&mut self) -> usize {
