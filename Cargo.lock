@@ -2887,6 +2887,7 @@ dependencies = [
  "waterui-graphics",
  "waterui-icon",
  "waterui-icons-lucide",
+ "waterui-image",
  "waterui-inspector-protocol",
  "waterui-layout",
  "waterui-locale",

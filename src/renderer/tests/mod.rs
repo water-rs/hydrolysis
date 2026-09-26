@@ -7,6 +7,8 @@ use std::rc::Rc;
 use executor_core::LocalExecutor;
 use executor_core::async_task::{self, AsyncTask, Runnable};
 
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod dynamic_remeasure;
 mod gesture_capture;
 mod gesture_env;
 mod gesture_retention;
