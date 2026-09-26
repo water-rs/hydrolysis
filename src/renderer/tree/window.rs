@@ -182,18 +182,46 @@ impl RenderNode {
 }
 
 impl SemanticCore {
-    /// The emit-pass equivalent of `HydrolysisRenderer::reset_scene`: clears
-    /// every pure-emission registry the accessibility walk re-pushes — input
-    /// targets, gesture targets, text-input targets and the accessibility
-    /// builder's node/action state — so each walk re-registers exactly what is
-    /// live. Callers then roll the frame boundaries the walk's signal reads
-    /// and retained-state bindings live under.
-    fn begin_semantic_emit_frame(&mut self) {
-        self.lifecycle.begin_rebuild_frame();
-        self.hit_test.begin_rebuild_frame();
+    /// The emit-pass equivalent of the `SemanticCore` half of
+    /// `HydrolysisRenderer::reset_scene`: clears every pure-emission registry
+    /// the accessibility walk re-pushes — input targets, gesture targets,
+    /// text-input targets and the accessibility builder's node/action
+    /// state — so each walk re-registers exactly what is live. The rendered
+    /// pump runs this after the structural patch, so state the patch orphaned
+    /// drops in the renderer's teardown order rather than ahead of it.
+    fn reset_semantic_scene(&mut self) {
         self.hit_test.reset_scene();
         self.gesture_engine.clear_targets();
         self.text_editing.text_input_targets.clear();
+        self.state.measurement.reset_counters();
+        #[cfg(feature = "accessibility")]
+        self.accessibility.reset_scene();
+    }
+
+    /// The emit-pass equivalent of the subsystem frame opens in
+    /// `HydrolysisRenderer::flush_window_tree` — the Retain watcher rollover
+    /// plus the input, lazy and navigation registries' begins. The scene
+    /// clears stay in `reset_semantic_scene`, which the pump runs after the
+    /// patch like the rendered path.
+    fn begin_semantic_emit_frame(&mut self) {
+        self.lifecycle.begin_rebuild_frame();
+        self.hit_test.begin_rebuild_frame();
+        self.lazy.begin_rebuild_frame();
+        self.navigation.begin_rebuild_frame();
+    }
+
+    /// The emit-pass equivalent of the `SemanticCore` half of
+    /// `HydrolysisRenderer::begin_rebuild_frame` — the build path's frame
+    /// opens, including the animation and accessibility registries the pump
+    /// path leaves to `reset_semantic_scene`.
+    /// `signals.begin_rebuild` stays with the caller — only a build enters one.
+    fn begin_semantic_rebuild_frame(&mut self) {
+        self.state.measurement.begin_frame();
+        self.lifecycle.begin_rebuild_frame();
+        self.hit_test.begin_rebuild_frame();
+        self.gesture_group_ids.clear();
+        self.next_gesture_group_id = 0;
+        self.animation_controller.begin_rebuild_frame();
         self.lazy.begin_rebuild_frame();
         self.navigation.begin_rebuild_frame();
         #[cfg(feature = "accessibility")]
@@ -201,11 +229,12 @@ impl SemanticCore {
     }
 
     /// The emit-pass equivalent of the non-scene half of
-    /// `HydrolysisRenderer::finish_rebuild_frame`: Retain watcher rollover, the
-    /// measurement-cache and animation-slot prunes, focus validation, and the
-    /// accessibility tree's publication. `signals.finish_rebuild` stays with
-    /// the caller — only a build entered one.
-    fn finish_semantic_emit_frame(&mut self, live_dynamics: &FxHashSet<usize>) {
+    /// `HydrolysisRenderer::finish_rebuild_frame` — the build path: Retain
+    /// watcher rollover, the measurement-cache and animation-slot prunes,
+    /// focus validation, and the accessibility tree's publication.
+    /// `signals.finish_rebuild` stays with the caller — only a build entered
+    /// one.
+    fn finish_semantic_rebuild_frame(&mut self, live_dynamics: &FxHashSet<usize>) {
         self.lifecycle.finish_rebuild_frame();
         self.prune_dynamic_measurements(live_dynamics);
         self.validate_focused_text_input_after_flush();
@@ -213,7 +242,34 @@ impl SemanticCore {
             .finish_rebuild_frame_with_inactive_slot_retention(false);
         self.hit_test
             .finish_rebuild_frame(&self.text_editing.text_input_targets);
+        self.relocate_dropped_focus();
         self.navigation.finish_rebuild_frame();
+        #[cfg(feature = "accessibility")]
+        self.finalize_accessibility_tree_update();
+    }
+
+    /// The emit-pass equivalent of `HydrolysisRenderer::flush_window_tree`'s
+    /// finish ordering — the pump path: the input and navigation teardowns run
+    /// while the frame's retained subscriptions are still held, then the
+    /// structural-change prunes, then the Retain watcher rollover last, then
+    /// focus validation/relocation and the accessibility tree's publication.
+    /// Releasing in the renderer's order is what exposes same-manager watcher
+    /// re-entrancy (water-rs/waterui#1213) to `#[waterui::test]`.
+    fn finish_semantic_emit_frame(&mut self, tree: &RenderNode, structural_change: bool) {
+        self.hit_test
+            .finish_rebuild_frame(&self.text_editing.text_input_targets);
+        self.navigation.finish_rebuild_frame();
+        if structural_change {
+            // The emit re-bound every live animation slot; drop the slots and
+            // cached Dynamic measurements belonging to subtrees the patch
+            // removed, before the frame's retained subscriptions release.
+            self.animation_controller
+                .finish_rebuild_frame_with_inactive_slot_retention(false);
+            self.prune_dynamic_measurements(&tree.collect_dynamic_identities());
+        }
+        self.lifecycle.finish_rebuild_frame();
+        self.validate_focused_text_input_after_flush();
+        self.relocate_dropped_focus();
         #[cfg(feature = "accessibility")]
         self.finalize_accessibility_tree_update();
     }
@@ -233,15 +289,18 @@ impl SemanticCore {
             );
             return;
         }
+        // Mirror `build_window_scene`: `reset_scene` runs before the frame
+        // opens on the rendered build path.
+        self.reset_semantic_scene();
         self.signals.begin_rebuild();
-        self.begin_semantic_emit_frame();
+        self.begin_semantic_rebuild_frame();
         self.render_depth = 0;
         let tree = RenderNode::build(content, env, self);
         let live_dynamics = tree.collect_dynamic_identities();
         #[cfg(feature = "accessibility")]
         tree.emit_accessibility(self, env);
         self.render_tree = Some(tree);
-        self.finish_semantic_emit_frame(&live_dynamics);
+        self.finish_semantic_rebuild_frame(&live_dynamics);
         self.signals.finish_rebuild();
     }
 
@@ -263,11 +322,14 @@ impl SemanticCore {
         if structural_change {
             self.animation_controller.begin_rebuild_frame();
         }
+        self.reset_semantic_scene();
+        // The emit-side half of `begin_redraw_frame`: roll the per-frame
+        // measurement cache before the walk.
+        self.state.measurement.begin_frame();
         #[cfg(feature = "accessibility")]
         tree.emit_accessibility(self, _env);
-        let live_dynamics = tree.collect_dynamic_identities();
+        self.finish_semantic_emit_frame(&tree, structural_change);
         self.render_tree = Some(tree);
-        self.finish_semantic_emit_frame(&live_dynamics);
         true
     }
 }
