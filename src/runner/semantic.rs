@@ -490,6 +490,7 @@ fn handle_semantic_input_events(window: &mut SemanticWindow, env: &Environment) 
             InputEvent::ImeCommit { text } => window.core.handle_ime_commit(text.as_str()),
             InputEvent::ImeDisabled => window.core.handle_ime_disabled(),
             InputEvent::Focused(focused) => window.core.handle_window_focused(focused),
+            InputEvent::KeyboardCancel => window.core.cancel_keyboard_press(),
             InputEvent::ModifiersChanged(modifiers) => {
                 // Modifier state is input context, not geometry: keep it so
                 // semantic actions (e.g. a row's Select click) observe the

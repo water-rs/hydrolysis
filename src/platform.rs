@@ -183,6 +183,13 @@ pub enum InputEvent {
         state: KeyState,
         modifiers: Modifiers,
     },
+    /// A focus-change replay released a key that was held: winit resends
+    /// every held key as a synthetic release when the window loses focus
+    /// (on X11, at `XI_FocusOut`). The press it belonged to is aborted, not
+    /// completed — the armed keyboard activation and its pressed affordance
+    /// come down without firing an action, so a real release arriving later
+    /// finds nothing stale left to activate.
+    KeyboardCancel,
     ModifiersChanged(Modifiers),
     ImePreedit {
         text: String,
@@ -1254,10 +1261,10 @@ mod winit_impl {
     use winit::{
         dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
         event::{
-            ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta,
-            TouchPhase as WinitTouchPhase, WindowEvent,
+            ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase as WinitTouchPhase,
+            WindowEvent,
         },
-        keyboard::{Key, ModifiersState},
+        keyboard::{Key, ModifiersState, PhysicalKey},
         window::{
             Cursor as WinitCursor, CursorIcon, Fullscreen, ImePurpose, Window as NativeWindow,
             WindowId,
@@ -2494,43 +2501,22 @@ mod winit_impl {
                     self.pending_events
                         .push(InputEvent::ModifiersChanged(self.modifiers));
                 }
-                WindowEvent::KeyboardInput { event, .. } => {
-                    if event.state == ElementState::Pressed
-                        && should_emit_keyboard_text(self.modifiers)
-                        && let Some(text) = keyboard_text_payload(event)
-                    {
-                        tracing::trace!(
-                            target: "waterui::hydrolysis::input_raw",
-                            event = "keyboard_text",
-                            text = text.as_str(),
-                            "winit raw input event"
-                        );
-                        self.pending_events.push(InputEvent::TextInput { text });
-                    }
-                    tracing::trace!(
-                        target: "waterui::hydrolysis::input_raw",
-                        event = "keyboard_input",
-                        state = ?event.state,
-                        logical_key = ?event.logical_key,
-                        modifiers = ?self.modifiers,
-                        "winit raw input event"
-                    );
-                    self.pending_events.push(InputEvent::Key {
-                        key: map_key_event(event, self.modifiers),
-                        logical_key: ui_events_winit::keyboard::from_winit_key(
-                            event.logical_key.clone(),
-                        ),
-                        physical_code: ui_events_winit::keyboard::from_winit_code(
-                            event.physical_key,
-                        ),
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => queue_keyboard_input(
+                    &mut self.pending_events,
+                    self.modifiers,
+                    WinitKeyInput {
+                        is_synthetic: *is_synthetic,
+                        state: event.state,
                         repeat: event.repeat,
-                        state: match event.state {
-                            ElementState::Pressed => KeyState::Pressed,
-                            ElementState::Released => KeyState::Released,
-                        },
-                        modifiers: self.modifiers,
-                    });
-                }
+                        text: event.text.as_deref(),
+                        logical_key: &event.logical_key,
+                        physical_key: event.physical_key,
+                    },
+                ),
                 WindowEvent::Ime(ime) => match ime {
                     Ime::Preedit(text, caret) => {
                         tracing::trace!(
@@ -2826,22 +2812,92 @@ mod winit_impl {
         !(modifiers.control || modifiers.alt || modifiers.super_key)
     }
 
-    fn map_key_event(event: &KeyEvent, modifiers: Modifiers) -> KeyCode {
+    /// The fields of `WindowEvent::KeyboardInput` hydrolysis reads, decomposed
+    /// at the match site: `winit::event::KeyEvent` cannot be constructed
+    /// outside winit (its `platform_specific` field is private), and this
+    /// translation is what the unit tests drive.
+    #[derive(Clone, Copy)]
+    struct WinitKeyInput<'a> {
+        /// winit's focus-change replay (on X11, `XI_FocusIn` resends every
+        /// held key as a synthetic press and `XI_FocusOut` as a synthetic
+        /// release): state synchronisation, not a keystroke the user made.
+        is_synthetic: bool,
+        state: ElementState,
+        repeat: bool,
+        text: Option<&'a str>,
+        logical_key: &'a Key,
+        physical_key: PhysicalKey,
+    }
+
+    fn queue_keyboard_input(
+        pending_events: &mut Vec<InputEvent>,
+        modifiers: Modifiers,
+        input: WinitKeyInput<'_>,
+    ) {
+        if input.is_synthetic {
+            // A replayed press carries no user input: no text, key action or
+            // gesture may observe it. The modifier side of the same sync
+            // still arrives through `ModifiersChanged`.
+            if input.state == ElementState::Released {
+                // The focus-out replay of a held key's release aborts the
+                // press it belonged to: nothing downstream may activate on
+                // it, but the armed press state must come down so a real
+                // release later cannot fire a stale target.
+                pending_events.push(InputEvent::KeyboardCancel);
+            }
+            return;
+        }
+        if input.state == ElementState::Pressed
+            && should_emit_keyboard_text(modifiers)
+            && let Some(text) = keyboard_text_payload(input.text)
+        {
+            tracing::trace!(
+                target: "waterui::hydrolysis::input_raw",
+                event = "keyboard_text",
+                text,
+                "winit raw input event"
+            );
+            pending_events.push(InputEvent::TextInput {
+                text: text.to_string(),
+            });
+        }
+        tracing::trace!(
+            target: "waterui::hydrolysis::input_raw",
+            event = "keyboard_input",
+            state = ?input.state,
+            logical_key = ?input.logical_key,
+            modifiers = ?modifiers,
+            "winit raw input event"
+        );
+        pending_events.push(InputEvent::Key {
+            key: map_key_event(input.logical_key, input.text, modifiers),
+            logical_key: ui_events_winit::keyboard::from_winit_key(input.logical_key.clone()),
+            physical_code: ui_events_winit::keyboard::from_winit_code(input.physical_key),
+            repeat: input.repeat,
+            state: match input.state {
+                ElementState::Pressed => KeyState::Pressed,
+                ElementState::Released => KeyState::Released,
+            },
+            modifiers,
+        });
+    }
+
+    fn map_key_event(logical_key: &Key, text: Option<&str>, modifiers: Modifiers) -> KeyCode {
         if should_emit_keyboard_text(modifiers)
-            && keyboard_text_payload(event).is_some()
-            && matches!(event.logical_key, Key::Character(_))
+            && keyboard_text_payload(text).is_some()
+            && matches!(logical_key, Key::Character(_))
         {
             return KeyCode::Unidentified;
         }
-        map_key(&event.logical_key)
+        map_key(logical_key)
     }
 
-    fn keyboard_text_payload(event: &KeyEvent) -> Option<String> {
-        let text = event.text.as_ref()?;
+    fn keyboard_text_payload(text: Option<&str>) -> Option<&str> {
+        let text = text?;
         if text.is_empty() || text.chars().all(char::is_control) {
             return None;
         }
-        Some(text.to_string())
+        Some(text)
     }
 
     fn map_cursor_style(style: CursorStyle) -> CursorIcon {
@@ -2872,13 +2928,14 @@ mod winit_impl {
     #[cfg(test)]
     mod tests {
         use winit::dpi::PhysicalPosition;
-        use winit::event::MouseScrollDelta;
+        use winit::event::{ElementState, MouseScrollDelta};
+        use winit::keyboard::{Key, PhysicalKey};
 
         use super::{
-            TextInputSync, TextInputSyncOp, map_cursor_position, map_scroll_delta,
-            should_emit_keyboard_text,
+            TextInputSync, TextInputSyncOp, WinitKeyInput, map_cursor_position, map_scroll_delta,
+            queue_keyboard_input, should_emit_keyboard_text,
         };
-        use crate::platform::{Modifiers, TextInputPurpose, TextInputState};
+        use crate::platform::{InputEvent, KeyState, Modifiers, TextInputPurpose, TextInputState};
 
         fn input_state(x: f64, y: f64, purpose: TextInputPurpose) -> TextInputState {
             TextInputState {
@@ -3031,6 +3088,73 @@ mod winit_impl {
                 alt: true,
                 ..Modifiers::default()
             }));
+        }
+
+        /// water-rs/hydrolysis#211: on X11, `XI_FocusIn` replays every held
+        /// key as a synthetic `KeyboardInput` press and `XI_FocusOut` as a
+        /// synthetic release — state synchronisation, not keystrokes. The
+        /// replayed press must not produce text or a key event; the replayed
+        /// release surfaces only as the cancellation of the press it paired
+        /// with. The real press that follows is the only one that types.
+        #[test]
+        fn a_synthetic_focus_replay_emits_no_input() {
+            let logical_e = Key::Character("e".into());
+            let held_key = WinitKeyInput {
+                is_synthetic: true,
+                state: ElementState::Pressed,
+                repeat: false,
+                text: Some("e"),
+                logical_key: &logical_e,
+                physical_key: PhysicalKey::Code(winit::keyboard::KeyCode::KeyE),
+            };
+
+            let mut events = Vec::new();
+            // The focus-in replay of the held key, then the real press.
+            queue_keyboard_input(&mut events, Modifiers::default(), held_key);
+            queue_keyboard_input(
+                &mut events,
+                Modifiers::default(),
+                WinitKeyInput {
+                    state: ElementState::Released,
+                    ..held_key
+                },
+            );
+            queue_keyboard_input(
+                &mut events,
+                Modifiers::default(),
+                WinitKeyInput {
+                    is_synthetic: false,
+                    ..held_key
+                },
+            );
+
+            let text_inputs = events
+                .iter()
+                .filter(|event| matches!(event, InputEvent::TextInput { .. }))
+                .count();
+            let presses = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        InputEvent::Key {
+                            state: KeyState::Pressed,
+                            ..
+                        }
+                    )
+                })
+                .count();
+            let cancels = events
+                .iter()
+                .filter(|event| matches!(event, InputEvent::KeyboardCancel))
+                .count();
+            assert_eq!(text_inputs, 1, "only the real press may type text");
+            assert_eq!(presses, 1, "only the real press may produce a key event");
+            assert_eq!(
+                cancels, 1,
+                "the synthetic release cancels the press it belonged to"
+            );
+            assert_eq!(events.len(), 3, "the synthetic press emits nothing");
         }
 
         #[test]
