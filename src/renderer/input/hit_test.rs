@@ -763,10 +763,18 @@ impl HydrolysisRenderer {
                 return visual_changed || changed;
             }
         }
+        // A press inside the open context-menu presentation — its drawn menu
+        // or its accessory — belongs to the presentation's own targets: it
+        // neither dismisses the menu nor opens a new one, because accessory
+        // actions do not close the menu by themselves
+        // (water-rs/waterui#1245).
+        let in_context_menu_presentation = self.context_menu_presentation_contains(point);
         if button != PointerButton::Secondary {
             self.dismiss_active_text_context_menu();
         }
-        self.dismiss_active_popup_menu();
+        if !in_context_menu_presentation {
+            self.dismiss_active_popup_menu();
+        }
         tracing::trace!(
             target: "waterui::hydrolysis::input",
             x,
@@ -813,6 +821,7 @@ impl HydrolysisRenderer {
         // the platforms bind the gesture to touch and pen only.
         if button == PointerButton::Primary
             && matches!(pointer_kind, PointerKind::Touch | PointerKind::Pen)
+            && !in_context_menu_presentation
         {
             let menu_present = if let Some((_, surface, _)) =
                 self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
@@ -833,8 +842,9 @@ impl HydrolysisRenderer {
                 });
             }
         }
-        if let Some((_index, target, local_position)) =
-            self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
+        if !in_context_menu_presentation
+            && let Some((_index, target, local_position)) =
+                self.embedded_target_wins_at(point, top_pointer_priority, focused_priority)
         {
             // A press on a surface focuses it through the keyboard-focus
             // machinery — the same path Tab traversal and `.focused(binding)`
@@ -868,11 +878,13 @@ impl HydrolysisRenderer {
                         // overlays reach the item actions.
                         let menu_env = menu_target.env.layered_on(env);
                         let metrics = self.theme().text_context_menu_metrics();
-                        self.show_popup_menu_nodes(
+                        self.show_context_menu(
                             items,
+                            Some(&menu_target),
                             LayoutPoint::new(point.x as f32, point.y as f32),
                             metrics,
                             &menu_env,
+                            false,
                         );
                         return true;
                     }
@@ -953,7 +965,7 @@ impl HydrolysisRenderer {
         }
 
         if button != PointerButton::Primary {
-            if button == PointerButton::Secondary {
+            if button == PointerButton::Secondary && !in_context_menu_presentation {
                 let menu_target = self.topmost_context_menu_target_at_point(point);
                 let mut items = menu_target
                     .as_ref()
@@ -974,11 +986,13 @@ impl HydrolysisRenderer {
                         .as_ref()
                         .map_or_else(|| env.clone(), |target| target.env.layered_on(env));
                     let metrics = self.theme().text_context_menu_metrics();
-                    let changed = self.show_popup_menu_nodes(
+                    let changed = self.show_context_menu(
                         items,
+                        menu_target.as_ref(),
                         LayoutPoint::new(point.x as f32, point.y as f32),
                         metrics,
                         &menu_env,
+                        false,
                     );
                     return refresh_requested || visual_changed || changed;
                 }
@@ -2306,10 +2320,10 @@ impl HydrolysisRenderer {
     /// `.context_menu` region claiming the spot — for an embedded surface,
     /// the topmost region enclosing its window rect; for anything else, the
     /// topmost region containing the point — shown through
-    /// [`SemanticCore::show_popup_menu_nodes`] anchored at the press point.
-    /// A touch or pen press-and-hold resolves here once it earns the
-    /// gesture, so it lands the same menu a secondary click would. Returns
-    /// whether a menu opened.
+    /// [`HydrolysisRenderer::show_context_menu`]. A touch or pen
+    /// press-and-hold resolves here once it earns the gesture, so it takes
+    /// the drawn presentation: the source lifts and the menu sits beside it.
+    /// Returns whether a menu opened.
     fn open_context_menu_at(&mut self, point: vello::kurbo::Point, env: &Environment) -> bool {
         let pointer_priority = self
             .hit_test
@@ -2350,11 +2364,13 @@ impl HydrolysisRenderer {
             .as_ref()
             .map_or_else(|| env.clone(), |target| target.env.layered_on(env));
         let metrics = self.theme().text_context_menu_metrics();
-        self.show_popup_menu_nodes(
+        self.show_context_menu(
             items,
+            menu_target.as_ref(),
             LayoutPoint::new(point.x as f32, point.y as f32),
             metrics,
             &menu_env,
+            true,
         )
     }
 
@@ -2447,7 +2463,12 @@ impl HydrolysisRenderer {
                     // but its placements are unchanged — no layout.
                     self.request_refresh();
                     self.dismiss_active_text_context_menu();
-                    self.dismiss_active_popup_menu();
+                    // A scroll inside the context-menu presentation — its
+                    // drawn menu or its accessory — belongs to it and does
+                    // not close the menu.
+                    if !self.context_menu_presentation_contains(point) {
+                        self.dismiss_active_popup_menu();
+                    }
                 }
                 return changed;
             }

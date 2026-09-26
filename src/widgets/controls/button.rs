@@ -409,9 +409,9 @@ pub(crate) fn menu_accessibility(
                 move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
                     let nodes = popup_menu_nodes(&items.snapshot());
                     let env = menu_env.layered_on(env);
-                    match request {
+                    match &request {
                         Some((anchor, metrics)) => {
-                            renderer.show_popup_menu_nodes(nodes, anchor, metrics, &env);
+                            renderer.show_popup_menu_nodes(nodes, *anchor, *metrics, &env);
                         }
                         None => {
                             renderer.activate_popup_menu_nodes(nodes, &env);

@@ -336,6 +336,17 @@ impl RenderNode {
             }
             Err(view) => view,
         };
+        let view = match view.downcast::<Metadata<PopupMenuSurface>>() {
+            Ok(meta) => {
+                return RenderNode::build_wrapper(
+                    WrapperEffect::PopupMenuSurface,
+                    meta.content,
+                    env,
+                    renderer,
+                );
+            }
+            Err(view) => view,
+        };
         let view = match view.downcast::<Metadata<LayoutPriority>>() {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
@@ -387,8 +398,19 @@ impl RenderNode {
         let view = match view.downcast::<Metadata<ResolvedContextMenu>>() {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
+                let ResolvedContextMenu {
+                    items,
+                    preview,
+                    accessory,
+                    dismiss_requests,
+                } = value;
                 return RenderNode::build_wrapper(
-                    WrapperEffect::ContextMenu(value),
+                    WrapperEffect::ContextMenu(ContextMenuEffect {
+                        items,
+                        dismiss_requests,
+                        preview: Rc::new(RefCell::new(preview.map(RetainedSubview::new))),
+                        accessory: Rc::new(RefCell::new(accessory.map(RetainedSubview::new))),
+                    }),
                     content,
                     env,
                     renderer,

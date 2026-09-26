@@ -196,6 +196,11 @@ impl RenderNode {
                             node.child.flush(r, ctx, child_env);
                         });
                     }
+                    WrapperEffect::PopupMenuSurface => {
+                        HydrolysisRenderer::apply_popup_menu_surface(renderer, ctx, |r| {
+                            node.child.flush(r, ctx, child_env);
+                        });
+                    }
                     WrapperEffect::LayoutPriority(_) => {
                         // Layout-only: nothing to apply while drawing.
                         node.child.flush(renderer, ctx, child_env);

@@ -8,6 +8,8 @@ use executor_core::LocalExecutor;
 use executor_core::async_task::{self, AsyncTask, Runnable};
 
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod context_menu_presentation;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod dynamic_remeasure;
 mod gesture_capture;
 mod gesture_env;
@@ -2218,7 +2220,25 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_text_context_menu_panel(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_text_context_menu_panel(&self, draw: &mut dyn DrawContext, bounds: Rect) {
+        let radii = vello::kurbo::RoundedRectRadii::from_single_radius(
+            self.text_context_menu_metrics().corner_radius,
+        );
+        // A level-2-like shadow under the panel, deep enough for tests to
+        // distinguish it from the scrim's uniform dim.
+        draw.draw_shadow(
+            bounds,
+            radii,
+            vello::kurbo::Vec2::new(0.0, 3.0),
+            6.0,
+            vello::peniko::Color::new([0.0, 0.0, 0.0, 0.35]),
+        );
+        draw.fill_rounded_rect(
+            bounds,
+            radii,
+            &Brush::Solid(vello::peniko::Color::new([0.96, 0.94, 0.97, 1.0])),
+        );
+    }
 
     fn draw_text_context_menu_separator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
 

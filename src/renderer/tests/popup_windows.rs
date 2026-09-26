@@ -536,23 +536,24 @@ fn a_touch_hold_past_the_threshold_mounts_the_menu_at_the_press_point() {
         );
     }
 
-    // At the threshold the hold fires: the menu mounts as a popup window
-    // anchored at the press point, and its items merge into the tree.
+    // At the threshold the hold fires: the menu mounts through the drawn
+    // presentation — the host fills the window and the menu is taller than
+    // it, so it clamps to the window's top edge — and its items merge into
+    // the tree.
     let update = runtime
         .pump_at(false, start + HOLD)
         .tree_update
         .expect("the hold frame must publish the merged tree");
     assert!(
         find_by_label(&update, Role::Button, "Copy").is_some(),
-        "a held touch press must mount the context menu at the press point"
+        "a held touch press must mount the context menu"
     );
-    let frames = runtime.popup_frames();
-    assert_eq!(frames.len(), 1, "exactly one popup window mounts");
-    let frame = frames[0];
+    let (menu, _) = runtime
+        .context_menu_presentation_frames()
+        .expect("the drawn menu mounts");
     assert!(
-        (f64::from(frame.x()) - f64::from(PRESS.0)).abs() < 1.0
-            && (f64::from(frame.y()) - f64::from(PRESS.1)).abs() < 1.0,
-        "the popup anchors at the press point, got {frame:?}"
+        menu.x0.abs() < 1.0 && menu.y0.abs() < 1.0,
+        "the menu sits beside the lifted source, clamped inside the window, got {menu:?}"
     );
 
     // The press is consumed: releasing it fires no tap.
@@ -594,8 +595,8 @@ fn a_touch_released_early_fires_the_tap_and_no_menu() {
         );
     }
     assert!(
-        runtime.popup_frames().is_empty(),
-        "no popup mounts once the press released early"
+        runtime.popup_frames().is_empty() && runtime.context_menu_presentation_frames().is_none(),
+        "no menu mounts once the press released early"
     );
 }
 
@@ -615,7 +616,7 @@ fn a_touch_that_moves_past_slop_opens_nothing() {
     let _ = runtime.pump_at(false, start + Duration::from_millis(100));
     let _ = runtime.pump_at(false, start + HOLD);
     assert!(
-        runtime.popup_frames().is_empty(),
+        runtime.popup_frames().is_empty() && runtime.context_menu_presentation_frames().is_none(),
         "a press that leaves the slop never opens the menu"
     );
 
@@ -645,8 +646,8 @@ fn a_held_primary_mouse_button_opens_nothing() {
         );
     }
     assert!(
-        runtime.popup_frames().is_empty(),
-        "a held primary mouse button mounts no popup"
+        runtime.popup_frames().is_empty() && runtime.context_menu_presentation_frames().is_none(),
+        "a held primary mouse button mounts no menu"
     );
 
     // The press behaves like an ordinary click: releasing it taps.
@@ -678,8 +679,10 @@ fn a_pen_hold_behaves_like_a_touch_hold() {
         find_by_label(&update, Role::Button, "Copy").is_some(),
         "a held pen press must mount the context menu at the press point"
     );
-    let frames = runtime.popup_frames();
-    assert_eq!(frames.len(), 1, "exactly one popup window mounts");
+    assert!(
+        runtime.context_menu_presentation_frames().is_some(),
+        "the drawn menu mounts"
+    );
 
     runtime.push_input_event(primary_release(PointerKind::Pen, PRESS.0, PRESS.1));
     let _ = runtime.pump_at(false, start + HOLD);

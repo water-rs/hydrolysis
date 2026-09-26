@@ -25,20 +25,60 @@ pub(crate) fn popup_menu_node(item: ResolvedMenuItem) -> PopupMenuNode {
             if command.selected.snapshot() {
                 styled = StyledStr::plain("✓ ") + styled;
             }
+            // The destructive role lives in the styled label itself: an explicit
+            // span colour survives the button's environment-level foreground,
+            // so the theme's error colour wins (water-rs/hydrolysis#200).
+            if command.role == CommandRole::Destructive {
+                styled = styled.foreground(waterui::Color::new(waterui::theme::color::Error));
+            }
             let plain_label = styled.to_plain().to_string();
-            let label = command.semantic_label.text(Text::new(styled));
+            // `Label::new` keeps the semantic text for accessibility while the
+            // custom content fills the row's label slot and aligns it leading —
+            // plain and subtitled rows share one leading edge.
+            let semantic_text = command.semantic_label.semantic_text().clone();
+            let label = match command.subtitle.clone() {
+                Some(subtitle) => SemanticLabel::new(semantic_text, move || {
+                    AnyView::new(
+                        waterui_layout::frame::Frame::new(
+                            waterui_layout::stack::vstack((
+                                Text::new(styled.clone()),
+                                waterui_text::text(subtitle.clone()).caption().muted(),
+                            ))
+                            .alignment(HorizontalAlignment::Leading)
+                            .spacing(0.0),
+                        )
+                        .alignment(waterui_layout::alignment::Leading)
+                        .max_width(f32::INFINITY),
+                    )
+                }),
+                None => SemanticLabel::new(semantic_text, move || {
+                    AnyView::new(
+                        waterui_layout::frame::Frame::new(Text::new(styled.clone()))
+                            .alignment(waterui_layout::alignment::Leading)
+                            .max_width(f32::INFINITY),
+                    )
+                }),
+            };
             PopupMenuNode::Command {
                 label,
                 plain_label,
                 action: command.action,
                 disabled: command.disabled.snapshot(),
+                subtitle: command.subtitle,
             }
         }
         ResolvedMenuItem::Divider => PopupMenuNode::Divider,
         ResolvedMenuItem::Menu(menu) => {
             let styled = menu.label.content.snapshot() + StyledStr::plain(" ›");
             let plain_label = styled.to_plain().to_string();
-            let label = menu.semantic_label.text(Text::new(styled));
+            let semantic_text = menu.semantic_label.semantic_text().clone();
+            let label = SemanticLabel::new(semantic_text, move || {
+                AnyView::new(
+                    waterui_layout::frame::Frame::new(Text::new(styled.clone()))
+                        .alignment(waterui_layout::alignment::Leading)
+                        .max_width(f32::INFINITY),
+                )
+            });
             PopupMenuNode::Menu {
                 label,
                 plain_label,
