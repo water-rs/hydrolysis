@@ -303,8 +303,8 @@ hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "29c8
 # Migrated framework crates pinned to waterui's devin/chore/nami-snapshot
 # branch head so the graph resolves a single nami Signal trait; waterkit
 # rides the same-wave migration head for its VA-API gating.
-nami = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
-nami-core = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
+nami = { git = "https://github.com/water-rs/nami", rev = "1a3711e4f93515098bc6414a80dbe9640bf19a2b" }
+nami-core = { git = "https://github.com/water-rs/nami", rev = "1a3711e4f93515098bc6414a80dbe9640bf19a2b" }
 waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }
 waterui-assets-core = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }
 waterui-assets-macros = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }

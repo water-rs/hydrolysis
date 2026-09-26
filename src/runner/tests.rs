@@ -10,6 +10,7 @@ use crate::platform::{
 use crate::renderer::tests::MinimalTestTheme;
 use crate::renderer::{HydrolysisRenderer, InteractionKey};
 use core::time::Duration;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 use waterui::component::list::{List, ListItem};
@@ -830,4 +831,56 @@ impl SurfaceProvider for RecoveringSurface {
         self.resize_count += 1;
         self.inner.resize(width, height);
     }
+}
+
+/// Regression test for water-rs/hydrolysis#228: an `on_change` handler fed by
+/// `debounce` must still fire once the quiet period elapses. `OnChange`
+/// retains only the guard `watch()` returns, so the `Debounce` value drops
+/// when `body` evaluates — and with it the cell holding the upstream
+/// subscription, unless the guard keeps it alive. The timer itself has to run
+/// on the runner's local executor, the queue every `pump_*` drains the way
+/// the winit loop drains `PollLocalTasks`.
+#[test]
+fn debounced_on_change_fires_after_the_quiet_period() {
+    use nami::SignalExt as _;
+    use waterui::text;
+    use waterui_core::handler::AnyViewBuilder;
+
+    // `pumped_test_environment` leaves the local-executor slot open so the
+    // runtime installs its draining `HeadlessMainThreadExecutor` — a parked
+    // runnable would make the timer invisible regardless of the bug.
+    let env = crate::renderer::tests::pumped_test_environment();
+    let source = binding(0i32);
+    let fired = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let builder = {
+        let source = source.clone();
+        let fired = Rc::clone(&fired);
+        AnyViewBuilder::<AnyView>::new(move || {
+            let debounced = source.debounce(Duration::from_millis(20));
+            AnyView::new(text!("x").on_change(&debounced, {
+                let fired = Rc::clone(&fired);
+                move |value: i32| {
+                    fired.borrow_mut().push(value);
+                }
+            }))
+        })
+    };
+    let mut runtime =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
+
+    // The mount pump builds the view, installs the watch, and drops the
+    // `Debounce` value — where a buggy subscription died with it.
+    let _ = runtime.pump_snapshot();
+    source.set(1);
+    // The first drain polls the spawned task once, arming the real
+    // `async_io::Timer`; its reactor-thread wake re-queues the runnable.
+    let _ = runtime.pump_offscreen();
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = runtime.pump_offscreen();
+
+    assert_eq!(
+        fired.borrow().as_slice(),
+        &[1],
+        "debounce never re-emitted: the upstream watch died with the combinator"
+    );
 }
