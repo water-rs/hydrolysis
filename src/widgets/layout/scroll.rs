@@ -114,6 +114,29 @@ pub(crate) fn register_scroll_accessibility_node(
     }
 }
 
+/// Registers `handle`'s scroll view as the wheel/trackpad target covering
+/// `viewport` — the one registration every scrolling container performs, in
+/// window hit-test space through `hit_transform`.
+///
+/// A container must call this *before* flushing its scrollable children:
+/// `handle_scroll` walks the frame's targets newest-first, so a scroll region
+/// nested inside this one — registered by the children below — hit-tests
+/// ahead of it and consumes the delta until it hits its own edge, where the
+/// delta falls through to the next enclosing region.
+pub(crate) fn register_scroll_wheel_target(
+    renderer: &mut crate::renderer::SemanticCore,
+    hit_transform: vello::kurbo::Affine,
+    viewport: vello::kurbo::Rect,
+    handle: &crate::scroll::ScrollHandle,
+) {
+    let target_handle = handle.clone();
+    renderer.register_scroll_target(
+        transformed_rect(hit_transform, viewport),
+        handle.clone(),
+        move |dx, dy, is_line_delta| target_handle.apply_scroll_delta(dx, dy, is_line_delta),
+    );
+}
+
 /// Geometry of one scroll indicator along its track: where the thumb starts,
 /// its extent, and how far it can travel. `None` when the content does not
 /// overflow the viewport on that axis.

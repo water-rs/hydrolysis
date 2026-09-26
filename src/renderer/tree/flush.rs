@@ -426,6 +426,16 @@ impl RenderNode {
                     }
                     scroll_accessibility_node
                 };
+                // The wheel/trackpad target registers before the content
+                // flushes: dispatch walks the frame's targets newest-first, so
+                // a scroll region nested inside this one — registered by the
+                // child below — wins the delta until it hits its own edge.
+                crate::widgets::scroll::register_scroll_wheel_target(
+                    renderer,
+                    ctx.hit_transform,
+                    viewport_rect,
+                    &handle,
+                );
                 renderer.push_lazy_viewport(crate::renderer::lifecycle::LazyViewport {
                     bounds: lazy_viewport,
                     transform: content_ctx.transform,
@@ -437,14 +447,6 @@ impl RenderNode {
                     renderer.pop_accessibility_parent();
                 }
                 renderer.pop_layer();
-                let target_handle = handle.clone();
-                renderer.register_scroll_target(
-                    transformed_rect(ctx.hit_transform, viewport_rect),
-                    handle.clone(),
-                    move |dx, dy, is_line_delta| {
-                        target_handle.apply_scroll_delta(dx, dy, is_line_delta)
-                    },
-                );
                 let scroll_ctx =
                     RenderContext::with_transforms(viewport_rect, ctx.transform, ctx.hit_transform);
                 let mut widget_ctx = WidgetRenderContext::new(renderer, scroll_ctx);

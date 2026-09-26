@@ -2453,25 +2453,32 @@ impl HydrolysisRenderer {
         if self.handle_embedded_scroll(point, dx, dy, unit, is_line_delta) {
             return true;
         }
+        // Newest-registered first: every scroll container registers its target
+        // before flushing its children, so a nested scroll region hit-tests
+        // ahead of the one enclosing it. A region that cannot move — at its
+        // edge, or on the delta's dead axis — does not consume; the delta
+        // falls through to the next enclosing region.
         for target in self.hit_test.scroll_targets.iter_mut().rev() {
-            if target.bounds.contains(point) {
-                let changed = (target.action.borrow_mut())(dx, dy, is_line_delta);
-                if changed {
-                    // A scroll offset is transform-level state outside the
-                    // reactive graph: the retained tree must re-encode at the
-                    // new offset (scene, hit-test geometry, accessibility),
-                    // but its placements are unchanged — no layout.
-                    self.request_refresh();
-                    self.dismiss_active_text_context_menu();
-                    // A scroll inside the context-menu presentation — its
-                    // drawn menu or its accessory — belongs to it and does
-                    // not close the menu.
-                    if !self.context_menu_presentation_contains(point) {
-                        self.dismiss_active_popup_menu();
-                    }
-                }
-                return changed;
+            if !target.bounds.contains(point) {
+                continue;
             }
+            let changed = (target.action.borrow_mut())(dx, dy, is_line_delta);
+            if !changed {
+                continue;
+            }
+            // A scroll offset is transform-level state outside the
+            // reactive graph: the retained tree must re-encode at the
+            // new offset (scene, hit-test geometry, accessibility),
+            // but its placements are unchanged — no layout.
+            self.request_refresh();
+            self.dismiss_active_text_context_menu();
+            // A scroll inside the context-menu presentation — its
+            // drawn menu or its accessory — belongs to it and does
+            // not close the menu.
+            if !self.context_menu_presentation_contains(point) {
+                self.dismiss_active_popup_menu();
+            }
+            return true;
         }
         false
     }

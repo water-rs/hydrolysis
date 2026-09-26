@@ -12,7 +12,10 @@
 use core::time::Duration;
 use std::time::Instant;
 
+use nami::Binding;
+use nami::collection::SignalCollection;
 use waterui::ViewExt as _;
+use waterui::component::list::{List, ListItem};
 use waterui::component::text;
 use waterui_core::AnyView;
 use waterui_core::handler::AnyViewBuilder;
@@ -336,5 +339,336 @@ fn inset_lazy_stack_materializes_the_visible_rows_after_pan() {
             .iter()
             .any(|(_, node)| node.label() == Some("Inset row 10")),
         "a row below the header and inside the viewport must be materialized"
+    );
+}
+
+/// Like [`scroll_y`], but `None` when the pump published no update at all — a
+/// delta that changed nothing schedules no frame, and the quiet frame is the
+/// expected outcome for a clamped edge.
+fn scroll_y_opt(result: &crate::HeadlessPumpResult) -> Option<f64> {
+    result
+        .tree_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find_map(|(_, node)| node.scroll_y())
+}
+
+/// The offset a scroll container published in a pump's accessibility update,
+/// found by the label it was given — `None` when no node carries both.
+fn labeled_scroll_offset(result: &crate::HeadlessPumpResult, label: &str) -> Option<f64> {
+    result
+        .tree_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find_map(|(_, node)| {
+            if node.label() == Some(label) {
+                node.scroll_y()
+            } else {
+                None
+            }
+        })
+}
+
+/// The scrollable extent (`scroll_y_max`) published alongside
+/// [`labeled_scroll_offset`].
+fn labeled_scroll_max(result: &crate::HeadlessPumpResult, label: &str) -> Option<f64> {
+    result
+        .tree_update
+        .as_ref()?
+        .nodes
+        .iter()
+        .find_map(|(_, node)| {
+            if node.label() == Some(label) {
+                node.scroll_y_max()
+            } else {
+                None
+            }
+        })
+}
+
+#[test]
+fn wheel_and_pan_deltas_clamp_the_offset_at_both_ends() {
+    let mut runtime = runtime();
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    // A pixel delta far past the bottom clamps at the scrollable extent.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: WINDOW_HEIGHT as f32 / 2.0,
+        dx: 0.0,
+        dy: -10_000.0,
+        phase: TouchPhase::Moved,
+    });
+    let panned = runtime.pump_at(false, start + Duration::from_millis(16));
+    let (offset, max) = scroll_extents(&panned);
+    assert!(max > 0.0, "the content must overflow the viewport");
+    assert!(
+        (offset - max).abs() < 0.5,
+        "a pixel delta past the bottom must clamp at the extent \
+         (got {offset}, max {max})"
+    );
+
+    // Pushing further changes nothing: the offset is already the end.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: WINDOW_HEIGHT as f32 / 2.0,
+        dx: 0.0,
+        dy: -10.0,
+        phase: TouchPhase::Moved,
+    });
+    let pinned = runtime.pump_at(false, start + Duration::from_millis(32));
+    let pinned_offset = scroll_y_opt(&pinned).unwrap_or(max);
+    assert!(
+        (pinned_offset - max).abs() < 0.5,
+        "a delta at the bottom edge must not overscroll (got {pinned_offset})"
+    );
+
+    // Back past the top clamps at zero the same way.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: WINDOW_HEIGHT as f32 / 2.0,
+        dx: 0.0,
+        dy: 10_000.0,
+        phase: TouchPhase::Moved,
+    });
+    let home = runtime.pump_at(false, start + Duration::from_millis(48));
+    assert!(
+        scroll_y(&home).abs() < 0.5,
+        "a delta past the top must clamp at zero (got {})",
+        scroll_y(&home)
+    );
+
+    // Line deltas take the same clamps through the smooth-scroll target.
+    runtime.push_input_event(InputEvent::Scroll {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: WINDOW_HEIGHT as f32 / 2.0,
+        dx: 0.0,
+        dy: -1_000.0,
+        is_line_delta: true,
+    });
+    let mut glided = 0.0;
+    for frame in 4..=60u64 {
+        let result = runtime.pump_at(false, start + Duration::from_millis(frame * 16));
+        if let Some(update) = &result.tree_update
+            && let Some(offset) = update.nodes.iter().find_map(|(_, node)| node.scroll_y())
+        {
+            glided = offset;
+        }
+    }
+    assert!(
+        (glided - max).abs() < 0.5,
+        "repeated wheel ticks must glide to and clamp at the extent \
+         (got {glided}, max {max})"
+    );
+}
+
+/// An inner `scroll` (200pt tall) inside a taller outer `scroll` — a scrolling
+/// card inside a scrolling page. Both overflow their viewports, so either one
+/// could consume a wheel delta.
+fn nested_scrolls(inner_label: &'static str, outer_label: &'static str) -> AnyViewBuilder<AnyView> {
+    let inner_rows = (0..ROWS).map(SelfId::new).collect::<Vec<_>>();
+    AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(
+            scroll(
+                vstack((
+                    scroll(VStack::for_each(inner_rows.clone(), |row| {
+                        let index = row.into_inner();
+                        vstack((text(format!("Inner {index}")),)).size(360.0, ROW_HEIGHT)
+                    }))
+                    .height(200.0)
+                    .a11y_label(inner_label),
+                    // A tall filler below the inner scroll gives the outer one
+                    // a scrollable extent of its own.
+                    ().size(360.0, 1_200.0),
+                ))
+                .spacing(0.0),
+            )
+            .a11y_label(outer_label),
+        )
+    })
+}
+
+#[test]
+fn a_nested_scroll_consumes_the_delta_until_it_hits_its_edge() {
+    let builder = nested_scrolls("inner scroll", "outer scroll");
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    // A pan over the inner viewport moves the inner scroll only.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -80.0,
+        phase: TouchPhase::Moved,
+    });
+    let panned = runtime.pump_at(false, start + Duration::from_millis(16));
+    let inner = labeled_scroll_offset(&panned, "inner scroll")
+        .expect("the inner scroll must publish an offset");
+    let outer = labeled_scroll_offset(&panned, "outer scroll")
+        .expect("the outer scroll must publish an offset");
+    assert!(
+        (inner - 80.0).abs() < 0.5,
+        "a pan over the inner scroll must scroll the inner (got inner {inner}, outer {outer})"
+    );
+    assert!(
+        outer.abs() < 0.5,
+        "the outer scroll must not move while the inner can consume (got {outer})"
+    );
+
+    // Driving the inner far past its end clamps it; the delta that reached the
+    // edge is still consumed whole — nothing spills into the outer mid-gesture.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -4_000.0,
+        phase: TouchPhase::Moved,
+    });
+    let at_edge = runtime.pump_at(false, start + Duration::from_millis(32));
+    let inner = labeled_scroll_offset(&at_edge, "inner scroll").unwrap();
+    let inner_max = labeled_scroll_max(&at_edge, "inner scroll").unwrap();
+    let outer = labeled_scroll_offset(&at_edge, "outer scroll").unwrap();
+    assert!(
+        (inner - inner_max).abs() < 0.5,
+        "the inner scroll must clamp at its own edge (got {inner}, max {inner_max})"
+    );
+    assert!(
+        outer.abs() < 0.5,
+        "the edge-reaching delta must not spill into the outer scroll (got {outer})"
+    );
+
+    // At its edge the inner cannot consume: the next delta falls through to
+    // the enclosing scroll — nested scrolling, not a dead zone.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -60.0,
+        phase: TouchPhase::Moved,
+    });
+    let fell_through = runtime.pump_at(false, start + Duration::from_millis(48));
+    let inner = labeled_scroll_offset(&fell_through, "inner scroll").unwrap();
+    let outer = labeled_scroll_offset(&fell_through, "outer scroll").unwrap();
+    assert!(
+        (inner - inner_max).abs() < 0.5,
+        "the inner scroll must stay pinned at its edge (got {inner})"
+    );
+    assert!(
+        (outer - 60.0).abs() < 0.5,
+        "a delta the inner cannot consume must fall through to the outer (got {outer})"
+    );
+
+    // Scrolling back up resumes with the inner: the outer keeps its offset.
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: 50.0,
+        phase: TouchPhase::Moved,
+    });
+    let rebound = runtime.pump_at(false, start + Duration::from_millis(64));
+    let inner = labeled_scroll_offset(&rebound, "inner scroll").unwrap();
+    let outer = labeled_scroll_offset(&rebound, "outer scroll").unwrap();
+    assert!(
+        (inner - (inner_max - 50.0)).abs() < 0.5,
+        "scrolling back up must resume on the inner (got inner {inner}, max {inner_max})"
+    );
+    assert!(
+        (outer - 60.0).abs() < 0.5,
+        "the outer must keep its offset while the inner scrolls back (got {outer})"
+    );
+}
+
+/// A `List` pinned inside a `scroll` is the same nested scroller: the list —
+/// which registers its scroll target the same way — consumes the delta until
+/// its own edge, then the outer scroll takes over.
+#[test]
+fn a_list_inside_a_scroll_consumes_the_delta_until_its_edge() {
+    let rows = Binding::container((0..ROWS as u64).map(SelfId::new).collect::<Vec<_>>());
+    let builder = AnyViewBuilder::<AnyView>::new(move || {
+        AnyView::new(
+            scroll(
+                vstack((
+                    List::for_each(SignalCollection::new(rows.clone()), |id| {
+                        let index = id.into_inner();
+                        ListItem::new(text(format!("Row {index}")))
+                    })
+                    .height(240.0)
+                    .a11y_label("inner list"),
+                    ().size(360.0, 1_200.0),
+                ))
+                .spacing(0.0),
+            )
+            .a11y_label("outer scroll"),
+        )
+    });
+    let mut runtime = HeadlessRuntime::new_for_tests(
+        test_environment(),
+        builder,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        MinimalTestTheme::default(),
+    );
+    let start = Instant::now();
+    let _ = runtime.pump_at(false, start);
+
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -80.0,
+        phase: TouchPhase::Moved,
+    });
+    let panned = runtime.pump_at(false, start + Duration::from_millis(16));
+    let list = labeled_scroll_offset(&panned, "inner list")
+        .expect("the inner list must publish an offset");
+    let outer = labeled_scroll_offset(&panned, "outer scroll")
+        .expect("the outer scroll must publish an offset");
+    assert!(
+        (list - 80.0).abs() < 0.5,
+        "a pan over the list must scroll the list (got list {list}, outer {outer})"
+    );
+    assert!(
+        outer.abs() < 0.5,
+        "the outer scroll must not move while the list can consume (got {outer})"
+    );
+
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -4_000.0,
+        phase: TouchPhase::Moved,
+    });
+    let _ = runtime.pump_at(false, start + Duration::from_millis(32));
+    runtime.push_input_event(InputEvent::TrackpadPan {
+        x: WINDOW_WIDTH as f32 / 2.0,
+        y: 100.0,
+        dx: 0.0,
+        dy: -60.0,
+        phase: TouchPhase::Moved,
+    });
+    let fell_through = runtime.pump_at(false, start + Duration::from_millis(48));
+    let list = labeled_scroll_offset(&fell_through, "inner list").unwrap();
+    let list_max = labeled_scroll_max(&fell_through, "inner list").unwrap();
+    let outer = labeled_scroll_offset(&fell_through, "outer scroll").unwrap();
+    assert!(
+        (list - list_max).abs() < 0.5,
+        "the inner list must stay pinned at its edge (got {list}, max {list_max})"
+    );
+    assert!(
+        (outer - 60.0).abs() < 0.5,
+        "a delta the list cannot consume must fall through to the outer (got {outer})"
     );
 }
