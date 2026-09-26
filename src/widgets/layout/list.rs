@@ -1300,6 +1300,16 @@ pub(crate) fn render_list_parts(
         .apply_scroll_request(ctx.renderer_mut(), &handle, row_count, true);
     let mut metrics = handle.metrics();
     let needs_viewport_clip = metrics.max_y > 0.0;
+    // Register before the rows flush: scroll-target dispatch walks the frame's
+    // targets newest-first, so a scroll region inside a row wins the delta
+    // until it hits its own edge, where it falls through to the list.
+    let hit_transform = ctx.hit_transform;
+    crate::widgets::scroll::register_scroll_wheel_target(
+        ctx.renderer_mut(),
+        hit_transform,
+        viewport,
+        &handle,
+    );
     if needs_viewport_clip {
         ctx.push_layer_rect(1.0, viewport);
     }
@@ -1837,13 +1847,6 @@ pub(crate) fn render_list_parts(
         ctx.pop_layer();
     }
 
-    let handle_for_input = handle.clone();
-    let hit_transform = ctx.hit_transform;
-    ctx.renderer_mut().register_scroll_target(
-        transformed_rect(hit_transform, viewport),
-        handle.clone(),
-        move |dx, dy, is_line_delta| handle_for_input.apply_scroll_delta(dx, dy, is_line_delta),
-    );
     draw_scroll_indicators(ctx, env, viewport, metrics, ScrollAxis::Vertical, &handle);
 }
 

@@ -10,10 +10,12 @@ use crate::renderer::lazy::{
 };
 #[cfg(feature = "accessibility")]
 use crate::renderer::lazy::{VisibleColumnWindow, VisibleIndexWindow};
+#[cfg(feature = "accessibility")]
+use crate::renderer::transformed_rect;
 use crate::renderer::{
     HydroNativeView, HydroState, MeasuredTableMetrics, RenderContext, VisibleSubviewCache,
     WidgetRenderContext, measure_table_metrics, refresh_table_slot_baseline, table_data_cell_rect,
-    table_header_cell_rect, transformed_rect, update_table_slot_visible_cell_widths,
+    table_header_cell_rect, update_table_slot_visible_cell_widths,
 };
 use crate::scroll::ScrollHandle;
 #[cfg(feature = "accessibility")]
@@ -501,6 +503,16 @@ pub(crate) fn render_table_parts(
     }
 
     ctx.push_layer_rect(1.0, viewport);
+    // Register before the cells flush: scroll-target dispatch walks the
+    // frame's targets newest-first, so a scroll region inside a cell wins the
+    // delta until it hits its own edge, where it falls through to the table.
+    let hit_transform = ctx.hit_transform;
+    crate::widgets::scroll::register_scroll_wheel_target(
+        ctx.renderer_mut(),
+        hit_transform,
+        viewport,
+        &handle,
+    );
 
     let origin_x = viewport.x0 - scroll_metrics.offset_x;
     let origin_y = viewport.y0 - scroll_metrics.offset_y;
@@ -602,13 +614,6 @@ pub(crate) fn render_table_parts(
 
     ctx.pop_layer();
 
-    let handle_for_input = handle.clone();
-    let hit_transform = ctx.hit_transform;
-    ctx.renderer_mut().register_scroll_target(
-        transformed_rect(hit_transform, viewport),
-        handle.clone(),
-        move |dx, dy, is_line_delta| handle_for_input.apply_scroll_delta(dx, dy, is_line_delta),
-    );
     draw_scroll_indicators(ctx, env, viewport, scroll_metrics, ScrollAxis::All, &handle);
 }
 
