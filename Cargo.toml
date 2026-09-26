@@ -184,6 +184,9 @@ waterui-navigation = "0.5.0"
 # directly: live photos (media), the MCP session harness (mcp, aither-mcp,
 # futures-lite, serde_json).
 waterui-media = "0.5.0"
+# The #210 regression test drives a real `ReactiveImage`: its handle's `set`
+# is the same call the decode pipeline makes when an image lands.
+waterui-image = "0.5.0"
 waterui-mcp = "0.5.0"
 aither-mcp = { version = "0.4", default-features = false, features = ["server"] }
 futures-lite = "2.6"

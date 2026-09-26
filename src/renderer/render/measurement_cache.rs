@@ -420,13 +420,23 @@ impl MeasurementCaches {
     }
 
     /// Prune `Dynamic` entries whose node no longer exists in the view tree.
+    ///
+    /// `is_alive` is computed by walking the window's retained tree, which
+    /// cannot see into widget-owned subview caches — a `List` keeps each row's
+    /// subtree in its own `item_cache`, so dynamics living inside a live row
+    /// always look dead to that walk. Dropping the registry entry anyway would
+    /// orphan a connected `Dynamic` from the measure path, so `dynamic_nodes`
+    /// answers liveness with its own `Weak`: it stays registered exactly as
+    /// long as the `DynamicHostNode` that owns it does. The measured-dimension
+    /// caches still use `is_alive`, since their entries are keyed by the
+    /// `Dynamic`'s `Rc` pointer and must not outlive it.
     pub(crate) fn retain_dynamic_identities(&mut self, is_alive: impl Fn(usize) -> bool) {
         self.dynamic_intrinsic
             .retain(|identity, _| is_alive(*identity));
         self.dynamic_proposal
             .retain(|(identity, _), _| is_alive(*identity));
         self.dynamic_nodes
-            .retain(|identity, weak| is_alive(*identity) && weak.upgrade().is_some());
+            .retain(|_, weak| weak.upgrade().is_some());
     }
 
     pub(crate) fn reset_counters(&mut self) {

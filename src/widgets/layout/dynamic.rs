@@ -42,21 +42,25 @@ fn measure_dynamic(
         None => {
             match dynamic.with_connected_pending_view_mut(|slot| measure_content(slot, state)) {
                 Some(Some(dimensions)) => dimensions,
-                Some(None) | None => match state.measurement.dynamic_dimensions(identity, proposal)
-                {
-                    Some(dimensions) => dimensions,
-                    None => {
-                        // The content lives in the retained `DynamicHostNode`;
-                        // measure that child for the proposal actually given —
-                        // a leaf must answer the offer it was probed with, not
-                        // a cached answer to a different one.
-                        let node = state.measurement.dynamic_node(identity).unwrap_or_else(|| {
+                Some(None) | None => match state.measurement.dynamic_node(identity) {
+                    // The connected content lives in the retained
+                    // `DynamicHostNode` child: measure it for the proposal
+                    // actually given. Its subtree reads the content's live
+                    // signals, so a size that changed in place since the last
+                    // staged update — an image whose async decode just
+                    // published its natural size — is answered now. The
+                    // `dynamic_dimensions` cache only stands in once the
+                    // registry has dropped the node (a row's retained subtree
+                    // evicted offscreen still answers its last live measure).
+                    Some(node) => node.borrow().measure(state, env, theme, proposal),
+                    None => state
+                        .measurement
+                        .dynamic_dimensions(identity, proposal)
+                        .unwrap_or_else(|| {
                             panic!(
                                 "hydrolysis Dynamic measurement found a connected dynamic node missing from the retained registry"
                             )
-                        });
-                        node.borrow().measure(state, env, theme, proposal)
-                    }
+                        }),
                 },
             }
         }
