@@ -673,17 +673,24 @@ impl HydroNativeView for Native<ListConfig> {
     }
 }
 
-/// A row contributes up to three accessibility nodes — the section header it
-/// opens, the row itself, and the section footer it closes — so each row's id
-/// owns a slot of three keys rather than one.
+/// A row contributes up to six accessibility nodes — the section header it
+/// opens, the row itself, the delete control and the two reorder halves edit
+/// mode draws on it, and the section footer it closes — so each row's id owns
+/// a slot of six keys rather than one.
 #[cfg(feature = "accessibility")]
-const A11Y_KEYS_PER_ROW: i64 = 3;
+const A11Y_KEYS_PER_ROW: i64 = 6;
 #[cfg(feature = "accessibility")]
 const A11Y_KEY_ROW: i64 = 0;
 #[cfg(feature = "accessibility")]
 const A11Y_KEY_HEADER: i64 = 1;
 #[cfg(feature = "accessibility")]
 const A11Y_KEY_FOOTER: i64 = 2;
+#[cfg(feature = "accessibility")]
+const A11Y_KEY_DELETE: i64 = 3;
+#[cfg(feature = "accessibility")]
+const A11Y_KEY_MOVE_UP: i64 = 4;
+#[cfg(feature = "accessibility")]
+const A11Y_KEY_MOVE_DOWN: i64 = 5;
 
 #[cfg(feature = "accessibility")]
 fn row_a11y_key_base(row_id: ListItemId) -> i64 {
@@ -818,6 +825,9 @@ pub(crate) fn list_accessibility(
         list_node.set_scroll_y_max(metrics.max_y);
         list_node.add_action(AccessibilityAction::ScrollUp);
         list_node.add_action(AccessibilityAction::ScrollDown);
+        let editing = renderer.read_signal(&list.editing);
+        let has_delete = list.on_delete.is_some();
+        let has_move = list.on_move.is_some();
         if ctx.is_none() {
             // The semantic walk emits every row's content through the shared
             // sub-view cache — the same frame bookkeeping the rendered flush
@@ -965,11 +975,17 @@ pub(crate) fn list_accessibility(
             };
             if let Some(row_node_id) = row_node_id {
                 list_node.push_child(row_node_id);
+                // Interaction slots per row: 0 and 1 are the reorder handle's
+                // up/down press slots, 2 the delete control's, 3 the row's own
+                // selection press, 4 the row's anchor — the key the draw pass
+                // resolves the row node through to parent its content under.
+                // Each press slot links to the node that control emits below,
+                // so a pointer press lands keyboard focus on it.
                 let row_interaction_base = (i32::from(*row_id) as u32 as usize)
-                    .checked_mul(4)
+                    .checked_mul(5)
                     .expect("hydrolysis List interaction identity overflow");
                 renderer.register_accessibility_focus_link(
-                    &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base),
+                    &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base + 4),
                     row_node_id,
                 );
                 // The row's own press slot — the selection target the draw
@@ -978,6 +994,9 @@ pub(crate) fn list_accessibility(
                     &crate::renderer::InteractionKey::for_rc(owner, row_interaction_base + 3),
                     row_node_id,
                 );
+                let deletable = editing && renderer.read_signal(&item.deletable);
+                let subtree_env = accessibility_container_child_environment(&row_a11y_env)
+                    .unwrap_or_else(|| row_a11y_env.clone());
                 if ctx.is_none() {
                     // Emit the row content's own semantics under the row's node:
                     // every text, control and image in the row becomes a child
@@ -985,8 +1004,6 @@ pub(crate) fn list_accessibility(
                     // tree. The rendered path parents the same subtree in
                     // `render_list_parts`.
                     renderer.push_accessibility_parent(row_node_id);
-                    let subtree_env = accessibility_container_child_environment(&row_a11y_env)
-                        .unwrap_or_else(|| row_a11y_env.clone());
                     let content = item.content;
                     {
                         let mut cache = state.item_cache.borrow_mut();
@@ -994,6 +1011,101 @@ pub(crate) fn list_accessibility(
                         subview.emit_accessibility(renderer, &subtree_env);
                     }
                     renderer.pop_accessibility_parent();
+                }
+                // Edit mode's delete and reorder controls are pointer-only hit
+                // regions in the draw pass — emit their nodes too, or the tree
+                // is identical to a non-editing list and nothing can delete or
+                // reorder a row through assistive technology
+                // (water-rs/hydrolysis#52).
+                //
+                // The nodes take the same rects the draw pass paints and
+                // hit-tests from `row_edit_controls`; the semantic walk has no
+                // metrics, so its nodes carry no bounds.
+                let controls = list_metrics.map(|metrics| {
+                    row_edit_controls(
+                        &metrics,
+                        row_rect,
+                        slot_rect.height(),
+                        index,
+                        row_count,
+                        has_move,
+                        deletable && has_delete,
+                    )
+                });
+                if editing && deletable && has_delete {
+                    let state = Rc::clone(owner);
+                    let action_env = row_env.clone();
+                    let node_id = register_edit_control_node(
+                        renderer,
+                        ctx,
+                        key_base + A11Y_KEY_DELETE,
+                        crate::localization::text(&subtree_env, "delete"),
+                        controls.as_ref().and_then(|controls| controls.delete),
+                        &subtree_env,
+                        Rc::new(RefCell::new(
+                            move |_renderer: &mut crate::renderer::SemanticCore,
+                                  _env: &Environment| {
+                                run_row_delete(&state, &action_env, index)
+                            },
+                        )),
+                    );
+                    if let Some(node_id) = node_id {
+                        list_node.push_child(node_id);
+                        renderer.register_accessibility_focus_link(
+                            &crate::renderer::InteractionKey::for_rc(
+                                owner,
+                                row_interaction_base + 2,
+                            ),
+                            node_id,
+                        );
+                    }
+                }
+                if editing && has_move {
+                    // The handle's halves are the two directions the draw pass
+                    // presses on: a row at a boundary advertises only the
+                    // direction it can move.
+                    for (label_key, up, key, slot) in [
+                        ("move_up", true, A11Y_KEY_MOVE_UP, 0usize),
+                        ("move_down", false, A11Y_KEY_MOVE_DOWN, 1usize),
+                    ] {
+                        let enabled = if up { index > 0 } else { index + 1 < row_count };
+                        if !enabled {
+                            continue;
+                        }
+                        let state = Rc::clone(owner);
+                        let action_env = row_env.clone();
+                        let to = if up { index - 1 } else { index + 1 };
+                        let node_id = register_edit_control_node(
+                            renderer,
+                            ctx,
+                            key_base + key,
+                            crate::localization::text(&subtree_env, label_key),
+                            controls.as_ref().and_then(|controls| {
+                                if up {
+                                    controls.reorder_up
+                                } else {
+                                    controls.reorder_down
+                                }
+                            }),
+                            &subtree_env,
+                            Rc::new(RefCell::new(
+                                move |_renderer: &mut crate::renderer::SemanticCore,
+                                      _env: &Environment| {
+                                    run_row_move(&state, &action_env, index, to)
+                                },
+                            )),
+                        );
+                        if let Some(node_id) = node_id {
+                            list_node.push_child(node_id);
+                            renderer.register_accessibility_focus_link(
+                                &crate::renderer::InteractionKey::for_rc(
+                                    owner,
+                                    row_interaction_base + slot,
+                                ),
+                                node_id,
+                            );
+                        }
+                    }
                 }
             }
             if let Some(footer) = chrome.footer.clone() {
@@ -1032,6 +1144,59 @@ pub(crate) fn list_accessibility(
     #[cfg(not(feature = "accessibility"))]
     {
         let _ = handle;
+    }
+}
+
+/// Emits one list edit-control node — a row's delete button or one half of its
+/// reorder handle — as a sibling of the row under the list node, at the bounds
+/// the draw pass paints the control into (water-rs/hydrolysis#52).
+///
+/// The controls sit beside their row rather than inside it: under the row they
+/// would be its innermost `Click` descendants, and the semantic runtime's row
+/// activation resolves to exactly that child — turning "activate row" into
+/// "delete row". The draw pass registers its pointer targets on the same
+/// rects, so the node's `Click` and a physical tap reach the same handler.
+///
+/// `bounds` is `Some` only on the rendered walk — the semantic walk carries
+/// no geometry — and the rendered walk must have it: emitting a control node
+/// without the rect the draw pass painted would silently desynchronize the
+/// two trees.
+#[cfg(feature = "accessibility")]
+fn register_edit_control_node(
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
+    semantic_key: i64,
+    label: String,
+    bounds: Option<vello::kurbo::Rect>,
+    env: &Environment,
+    action: crate::renderer::AccessibilityActivation,
+) -> Option<AccessibilityNodeId> {
+    let mut node = AccessibilityNode::new(
+        renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+    );
+    node.set_label(label);
+    node.add_action(AccessibilityAction::Focus);
+    node.add_action(AccessibilityAction::Click);
+    let target = Some(AccessibilityActionTarget::Activate { action });
+    match ctx {
+        Some(ctx) => renderer.register_accessibility_child_node_with_key(
+            semantic_key,
+            node,
+            transformed_rect(
+                ctx.hit_transform,
+                bounds.expect(
+                    "hydrolysis list edit-control node: the rendered walk always has list metrics",
+                ),
+            ),
+            env,
+            target,
+        ),
+        None => renderer.register_accessibility_child_node_with_key_semantic(
+            semantic_key,
+            node,
+            env,
+            target,
+        ),
     }
 }
 
@@ -1264,8 +1429,12 @@ pub(crate) fn render_list_parts(
             accessibility_container_child_environment(&row_env).unwrap_or_else(|| row_env.clone());
         #[cfg(not(feature = "accessibility"))]
         let subtree_env = row_env.clone();
+        // Interaction slots per row: 0 and 1 are the reorder handle's up/down
+        // press slots, 2 the delete control's, 3 the row's own selection
+        // press, 4 the row's anchor — the key `list_accessibility` links the
+        // row node to and this pass resolves it through below.
         let row_interaction_base = (i32::from(*row_id) as u32 as usize)
-            .checked_mul(4)
+            .checked_mul(5)
             .expect("hydrolysis List interaction identity overflow");
         let chrome = state.borrow().section_chrome(index);
         let reorder_dy = state.borrow().reorder_offset_for(index, row_id, row_height);
@@ -1370,7 +1539,17 @@ pub(crate) fn render_list_parts(
             content_size,
             &row_env,
         );
-        let mut trailing_x = row_rect.x1 - 8.0;
+        // Edit mode's trailing controls — the same computation the
+        // accessibility emit uses to place their nodes.
+        let controls = row_edit_controls(
+            &list_metrics,
+            row_rect,
+            row_height,
+            index,
+            total_rows,
+            editing && has_move,
+            editing && deletable && has_delete,
+        );
 
         // Refreshed before either recognizer runs this frame, so an in-flight
         // drag always sees the row's current index and size.
@@ -1443,17 +1622,7 @@ pub(crate) fn render_list_parts(
             );
         }
 
-        if editing && has_move {
-            let control_width = list_metrics.move_control_width;
-            let vertical_inset = list_metrics.trailing_control_vertical_inset;
-            let control_height = (row_height - vertical_inset * 2.0).max(vertical_inset * 2.0);
-            let control_rect = vello::kurbo::Rect::new(
-                trailing_x - control_width,
-                row_rect.y0 + vertical_inset,
-                trailing_x,
-                row_rect.y0 + vertical_inset + control_height,
-            );
-            trailing_x -= control_width + list_metrics.trailing_control_spacing;
+        if let Some(control_rect) = controls.reorder {
             // The handle is also the reorder grip: dragging it lifts the row.
             // The tap targets below stay, so the same control still offers
             // discrete one-step moves for pointer and keyboard users.
@@ -1466,97 +1635,75 @@ pub(crate) fn render_list_parts(
                 control_rect,
                 &row_env,
             );
-            let up_rect = vello::kurbo::Rect::new(
-                control_rect.x0,
-                control_rect.y0,
-                control_rect.x1,
-                control_rect.y0 + control_rect.height() / 2.0,
-            );
-            let down_rect = vello::kurbo::Rect::new(
-                control_rect.x0,
-                control_rect.y0 + control_rect.height() / 2.0,
-                control_rect.x1,
-                control_rect.y1,
-            );
-            let up_interaction = (index > 0).then(|| {
-                let hit_bounds = transformed_rect(ctx.hit_transform, up_rect);
+            let up_interaction = controls.reorder_up.map(|rect| {
+                let hit_bounds = transformed_rect(ctx.hit_transform, rect);
                 let key = crate::renderer::InteractionKey::for_rc(state, row_interaction_base);
-                let (state, slot, _) = ctx
+                let (interaction, slot, _) = ctx
                     .renderer_mut()
                     .bind_interaction_target(key, hit_bounds, &row_env);
-                (hit_bounds, state, slot)
+                (rect, hit_bounds, interaction, slot)
             });
-            let down_interaction = (index + 1 < total_rows).then(|| {
-                let hit_bounds = transformed_rect(ctx.hit_transform, down_rect);
+            let down_interaction = controls.reorder_down.map(|rect| {
+                let hit_bounds = transformed_rect(ctx.hit_transform, rect);
                 let key = crate::renderer::InteractionKey::for_rc(state, row_interaction_base + 1);
-                let (state, slot, _) = ctx
+                let (interaction, slot, _) = ctx
                     .renderer_mut()
                     .bind_interaction_target(key, hit_bounds, &row_env);
-                (hit_bounds, state, slot)
+                (rect, hit_bounds, interaction, slot)
             });
             {
                 let up_state = up_interaction
                     .as_ref()
-                    .map(|(_, state, _)| local_interaction_state(*state, ctx.hit_transform));
-                let down_state = down_interaction
-                    .as_ref()
-                    .map(|(_, state, _)| local_interaction_state(*state, ctx.hit_transform));
+                    .map(|(rect, _, interaction_state, _)| {
+                        (
+                            *rect,
+                            local_interaction_state(*interaction_state, ctx.hit_transform),
+                        )
+                    });
+                let down_state =
+                    down_interaction
+                        .as_ref()
+                        .map(|(rect, _, interaction_state, _)| {
+                            (
+                                *rect,
+                                local_interaction_state(*interaction_state, ctx.hit_transform),
+                            )
+                        });
                 let theme = ctx.theme();
                 let mut draw = ctx.draw_context();
                 theme.draw_list_move_control(&mut draw, control_rect);
-                if let Some(state) = up_state {
-                    theme.draw_list_move_control_state_layer(&mut draw, up_rect, state);
+                if let Some((rect, state)) = up_state {
+                    theme.draw_list_move_control_state_layer(&mut draw, rect, state);
                 }
-                if let Some(state) = down_state {
-                    theme.draw_list_move_control_state_layer(&mut draw, down_rect, state);
+                if let Some((rect, state)) = down_state {
+                    theme.draw_list_move_control_state_layer(&mut draw, rect, state);
                 }
             }
-            if let Some((hit_bounds, _, press_slot)) = up_interaction {
+            if let Some((_, hit_bounds, _, press_slot)) = up_interaction {
                 let state = Rc::clone(state);
                 let action_env = row_env.clone();
                 ctx.renderer_mut().register_interactive_pointer_target(
                     hit_bounds,
                     press_slot,
                     move |_renderer, _point, _env| {
-                        state.borrow().preserve_anchor_index_once.set(true);
-                        if let Some(action) = state.borrow().config.on_move.as_ref() {
-                            (action)(&action_env, Move::new(index, index - 1));
-                        }
-                        if !state.borrow().rows_dirty.get() {
-                            state.borrow().preserve_anchor_index_once.set(false);
-                        }
-                        true
+                        run_row_move(&state, &action_env, index, index - 1)
                     },
                 );
             }
-            if let Some((hit_bounds, _, press_slot)) = down_interaction {
+            if let Some((_, hit_bounds, _, press_slot)) = down_interaction {
                 let state = Rc::clone(state);
                 let action_env = row_env.clone();
                 ctx.renderer_mut().register_interactive_pointer_target(
                     hit_bounds,
                     press_slot,
                     move |_renderer, _point, _env| {
-                        state.borrow().preserve_anchor_index_once.set(true);
-                        if let Some(action) = state.borrow().config.on_move.as_ref() {
-                            (action)(&action_env, Move::new(index, index + 1));
-                        }
-                        if !state.borrow().rows_dirty.get() {
-                            state.borrow().preserve_anchor_index_once.set(false);
-                        }
-                        true
+                        run_row_move(&state, &action_env, index, index + 1)
                     },
                 );
             }
         }
 
-        if editing && deletable && has_delete {
-            let delete_rect = vello::kurbo::Rect::new(
-                trailing_x - list_metrics.delete_control_width,
-                row_rect.y0 + list_metrics.trailing_control_vertical_inset,
-                trailing_x,
-                row_rect.y1 - list_metrics.trailing_control_vertical_inset,
-            );
-            trailing_x = delete_rect.x0 - list_metrics.trailing_control_spacing;
+        if let Some(delete_rect) = controls.delete {
             let delete_hit_bounds = transformed_rect(ctx.hit_transform, delete_rect);
             let delete_key =
                 crate::renderer::InteractionKey::for_rc(state, row_interaction_base + 2);
@@ -1580,16 +1727,11 @@ pub(crate) fn render_list_parts(
             ctx.renderer_mut().register_interactive_pointer_target(
                 delete_hit_bounds,
                 delete_press_slot,
-                move |_renderer, _point, _env| {
-                    if let Some(action) = state.borrow().config.on_delete.as_ref() {
-                        (action)(&action_env, index);
-                    }
-                    true
-                },
+                move |_renderer, _point, _env| run_row_delete(&state, &action_env, index),
             );
         }
 
-        content_rect.x1 = content_rect.x1.min(trailing_x);
+        content_rect.x1 = content_rect.x1.min(controls.trailing_x);
         if content_rect.width() > 0.0 && content_rect.height() > 0.0 {
             // Render the row content through a persistent node held in the per-widget
             // cache, keyed by stable row id, instead of re-dispatching it each frame.
@@ -1607,7 +1749,7 @@ pub(crate) fn render_list_parts(
                 ctx.renderer_mut()
                     .focus_node_for_key(&crate::renderer::InteractionKey::for_rc(
                         state,
-                        row_interaction_base,
+                        row_interaction_base + 4,
                     ));
             #[cfg(feature = "accessibility")]
             let row_parented = {
@@ -1761,6 +1903,110 @@ fn register_row_gesture(
     let mut gestures = state_ref.row_gestures.borrow_mut();
     let row = gestures.entry(row_id).or_insert_with(RowGestures::empty);
     slot.set(row, target);
+}
+
+/// One row's edit-mode controls as the draw pass paints them: the reorder
+/// handle, the up and down halves it presses through (each only toward a
+/// direction the row can actually move), and the delete control left of them.
+/// `trailing_x` is where the row's content resumes. `list_accessibility`
+/// registers the same controls' accessibility nodes on these bounds, so a
+/// `Click` and a pointer tap land identically (water-rs/hydrolysis#52).
+struct RowEditControls {
+    reorder: Option<vello::kurbo::Rect>,
+    reorder_up: Option<vello::kurbo::Rect>,
+    reorder_down: Option<vello::kurbo::Rect>,
+    delete: Option<vello::kurbo::Rect>,
+    trailing_x: f64,
+}
+
+fn row_edit_controls(
+    metrics: &waterui_backend_core::widget::ListMetrics,
+    row_rect: vello::kurbo::Rect,
+    slot_height: f64,
+    index: usize,
+    total_rows: usize,
+    move_enabled: bool,
+    delete_enabled: bool,
+) -> RowEditControls {
+    let mut controls = RowEditControls {
+        reorder: None,
+        reorder_up: None,
+        reorder_down: None,
+        delete: None,
+        trailing_x: row_rect.x1 - 8.0,
+    };
+    let mut trailing_x = controls.trailing_x;
+    if move_enabled {
+        let control_width = metrics.move_control_width;
+        let vertical_inset = metrics.trailing_control_vertical_inset;
+        let control_height = (slot_height - vertical_inset * 2.0).max(vertical_inset * 2.0);
+        let control_rect = vello::kurbo::Rect::new(
+            trailing_x - control_width,
+            row_rect.y0 + vertical_inset,
+            trailing_x,
+            row_rect.y0 + vertical_inset + control_height,
+        );
+        trailing_x -= control_width + metrics.trailing_control_spacing;
+        let half_height = control_rect.height() / 2.0;
+        controls.reorder = Some(control_rect);
+        controls.reorder_up = (index > 0).then(|| {
+            vello::kurbo::Rect::new(
+                control_rect.x0,
+                control_rect.y0,
+                control_rect.x1,
+                control_rect.y0 + half_height,
+            )
+        });
+        controls.reorder_down = (index + 1 < total_rows).then(|| {
+            vello::kurbo::Rect::new(
+                control_rect.x0,
+                control_rect.y0 + half_height,
+                control_rect.x1,
+                control_rect.y1,
+            )
+        });
+    }
+    if delete_enabled {
+        let delete_rect = vello::kurbo::Rect::new(
+            trailing_x - metrics.delete_control_width,
+            row_rect.y0 + metrics.trailing_control_vertical_inset,
+            trailing_x,
+            row_rect.y1 - metrics.trailing_control_vertical_inset,
+        );
+        trailing_x = delete_rect.x0 - metrics.trailing_control_spacing;
+        controls.delete = Some(delete_rect);
+    }
+    controls.trailing_x = trailing_x;
+    controls
+}
+
+/// The delete control's one action — shared by its pointer target and its
+/// accessibility `Click` node so both delete the row identically.
+fn run_row_delete(state: &RefCell<ListRenderState>, env: &Environment, index: usize) -> bool {
+    if let Some(action) = state.borrow().config.on_delete.as_ref() {
+        (action)(env, index);
+    }
+    true
+}
+
+/// One discrete reorder step — shared by the move halves' pointer targets and
+/// their accessibility `Click` nodes. The preserve-anchor latch stays set only
+/// when the move dirtied the rows: it holds the viewport's index over the
+/// membership reconcile so the moved row visibly travels.
+fn run_row_move(
+    state: &RefCell<ListRenderState>,
+    env: &Environment,
+    from: usize,
+    to: usize,
+) -> bool {
+    state.borrow().preserve_anchor_index_once.set(true);
+    if let Some(action) = state.borrow().config.on_move.as_ref() {
+        (action)(env, Move::new(from, to));
+    }
+    if !state.borrow().rows_dirty.get() {
+        state.borrow().preserve_anchor_index_once.set(false);
+    }
+    true
 }
 
 /// Swipe-to-dismiss across a whole row, committing `on_delete` once the row

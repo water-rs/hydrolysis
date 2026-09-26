@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use hydrolysis_m3::Material3;
 use nami::collection::List as ReactiveList;
-use waterui::component::list::{List, ListDelete, ListItem};
+use waterui::component::list::{List, ListDelete, ListItem, ListMove};
 use waterui::component::{hstack, spacer, text};
 use waterui::id::SelfId;
 use waterui::layout::scroll::ScrollController;
@@ -162,5 +162,70 @@ fn row_content_tap_survives_retained_swipe_order_offscreen() {
         taps.get(),
         2,
         "row content on_tap must still fire after the contents rebuild"
+    );
+}
+
+/// <https://github.com/water-rs/hydrolysis/issues/52>: a `List` in edit mode
+/// draws a delete control and a reorder handle on every row but published no
+/// accessibility node for either — the tree was byte-identical to the same
+/// list without `editing`, `on_delete` or `on_move`, so no assistive
+/// technology (and no `Query::tap`, which acts on nodes) could reach them.
+/// Each control now emits a `Button` node at the drawn control bounds whose
+/// `Click` runs the same handler its pointer target does.
+#[test]
+fn edit_controls_emit_accessibility_nodes_offscreen() {
+    let deletes = Rc::new(Cell::new(usize::MAX));
+    let moves = Rc::new(Cell::new((usize::MAX, usize::MAX)));
+    let mut app = ui()
+        .viewport(360, 240)
+        .theme(Material3::defaults())
+        .mount_offscreen({
+            let deletes = Rc::clone(&deletes);
+            let moves = Rc::clone(&moves);
+            move || {
+                let deletes = Rc::clone(&deletes);
+                let moves = Rc::clone(&moves);
+                let items =
+                    ReactiveList::from((1..=3).map(SelfId::new).collect::<Vec<SelfId<i32>>>());
+                List::for_each(items, move |item| {
+                    ListItem::new(text(format!("row {}", *item)))
+                })
+                .editing(true)
+                .on_delete(move |ListDelete(index)| deletes.set(index))
+                .on_move(move |ListMove(reorder)| moves.set((reorder.from(), reorder.to())))
+            }
+        });
+
+    // Three editing rows emit three delete controls; the reorder handle's up
+    // half exists only where a row can move up, its down half where it can
+    // move down — two each across three rows.
+    assert_eq!(
+        app.query().role(Role::BUTTON).label("Delete").all().len(),
+        3,
+        "every editing row's delete control"
+    );
+    assert_eq!(
+        app.query().role(Role::BUTTON).label("Move up").all().len(),
+        2,
+        "every movable row's move-up control"
+    );
+
+    // `tap` performs the node's `Click` — it must reach the same handler the
+    // drawn control's pointer target runs. Handles are re-resolved right
+    // before acting: every query settles a fresh tree revision.
+    let delete_nodes = app.query().role(Role::BUTTON).label("Delete").all();
+    delete_nodes[1].tap(&mut app);
+    assert_eq!(
+        deletes.get(),
+        1,
+        "tapping row 1's delete control deletes it"
+    );
+
+    let move_downs = app.query().role(Role::BUTTON).label("Move down").all();
+    move_downs[0].tap(&mut app);
+    assert_eq!(
+        moves.get(),
+        (0, 1),
+        "row 0's move-down control moves it down"
     );
 }
