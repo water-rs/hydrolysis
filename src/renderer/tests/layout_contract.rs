@@ -7,9 +7,10 @@ use waterui_graphics::{
     EffectRenderer, ViewEffect, ViewEffectContext, ViewEffectInput, ViewEffectOutput,
 };
 use waterui_layout::container::FixedContainer;
+use waterui_layout::stack::vstack;
 use waterui_layout::{
     Layout, Point, ProposalSize, Rect, Size, Spacer, SubView, SubviewPlacement, scroll,
-    scroll_horizontal, spacer,
+    scroll_horizontal, spacer, spacer_min,
 };
 
 #[derive(Debug)]
@@ -379,6 +380,49 @@ fn spacer_default_priority_survives_wrappers_and_explicit_overrides() {
             Some(explicit.unwrap_or(Spacer::DEFAULT_LAYOUT_PRIORITY))
         );
     }
+}
+
+/// water-rs/hydrolysis#53: a `Native<Spacer>` must answer its `min_length`
+/// on the enclosing stack's main axis — the stack keeps that answer as the
+/// flexible child's floor under compression, so a zero answer collapses
+/// `Spacer::new(40.0)` exactly like `Spacer::new(0.0)` (the
+/// water-rs/waterui#1080 symptom).
+#[test]
+fn spacer_min_length_is_the_stack_compression_floor() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let theme = renderer.theme();
+
+    let mut node = RenderNode::build(
+        AnyView::new(vstack((
+            Color::srgb_hex("#2563EB"),
+            spacer_min(40.0),
+            Color::srgb_hex("#DC2626"),
+        ))),
+        &env,
+        &mut renderer,
+    );
+    let container = node
+        .transparent_container()
+        .expect("a vstack must build a container node");
+    assert_eq!(container.children.len(), 3, "color, spacer, color");
+
+    // Compress a 20x50 offer: the spacer's 40pt floor stands and the two
+    // colors split what is left over.
+    let proposal = ProposalSize::new(Some(20.0), Some(50.0));
+    let measured = node.measure(&mut renderer.state, &env, &theme, proposal);
+    node.layout(&mut renderer, &env, proposal, measured.size);
+    let heights: Vec<f32> = node
+        .transparent_container()
+        .expect("a vstack must build a container node")
+        .placed
+        .iter()
+        .map(|frame| frame.height())
+        .collect();
+    assert_eq!(
+        heights[1], 40.0,
+        "the spacer keeps its min_length floor under compression"
+    );
 }
 
 struct LayoutOnlyEffect;
