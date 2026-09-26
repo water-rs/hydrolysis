@@ -18,7 +18,6 @@
 //! their own input ABIs — so the renderer knows nothing about any of them.
 
 use super::*;
-use crate::renderer::render::EmbeddedGpuSurfaceRuntime;
 use waterui_graphics::SceneContent;
 use waterui_graphics::input::{
     Code, Key, NamedKey, ScrollUnit, SurfaceInputEvent, SurfacePointerButton,
@@ -50,11 +49,11 @@ pub(crate) trait EmbeddedInputSink {
     fn identity(&self) -> *const ();
     fn set_focus(&self, focused: bool);
     fn set_modifiers(&self, modifiers: Modifiers);
-    fn pointer_move(&self, position: vello::kurbo::Point);
-    fn pointer_button(&self, pressed: bool, button: PointerButton, position: vello::kurbo::Point);
+    fn pointer_move(&self, position: cherenkov::kurbo::Point);
+    fn pointer_button(&self, pressed: bool, button: PointerButton, position: cherenkov::kurbo::Point);
     fn scroll(
         &self,
-        position: vello::kurbo::Point,
+        position: cherenkov::kurbo::Point,
         delta_x: f32,
         delta_y: f32,
         unit: ScrollUnit,
@@ -68,7 +67,7 @@ pub(crate) trait EmbeddedInputSink {
     fn composition_cancel(&self);
     /// The surface's own text caret, in logical surface-local coordinates, for
     /// placing the platform's input-method candidate window.
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect>;
+    fn ime_caret(&self) -> Option<cherenkov::kurbo::Rect>;
 }
 
 #[derive(Clone)]
@@ -76,8 +75,8 @@ pub(crate) struct EmbeddedInputTarget {
     /// The surface owner's interaction identity — what keyboard focus and a
     /// `.focused(binding)` write address the surface by.
     pub(crate) interaction_key: InteractionKey,
-    pub(crate) local_bounds: vello::kurbo::Rect,
-    pub(crate) inverse_transform: vello::kurbo::Affine,
+    pub(crate) local_bounds: cherenkov::kurbo::Rect,
+    pub(crate) inverse_transform: cherenkov::kurbo::Affine,
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) sink: Rc<dyn EmbeddedInputSink>,
@@ -91,7 +90,7 @@ pub(crate) struct EmbeddedInputTarget {
 }
 
 impl EmbeddedInputTarget {
-    pub(crate) fn local_position(&self, point: vello::kurbo::Point) -> Option<vello::kurbo::Point> {
+    pub(crate) fn local_position(&self, point: cherenkov::kurbo::Point) -> Option<cherenkov::kurbo::Point> {
         self.local_bounds
             .contains(self.inverse_transform * point)
             .then(|| self.local_position_unclamped(point))
@@ -102,40 +101,29 @@ impl EmbeddedInputTarget {
     /// drag that has left the surface still being the surface's drag.
     pub(crate) fn local_position_unclamped(
         &self,
-        point: vello::kurbo::Point,
-    ) -> vello::kurbo::Point {
+        point: cherenkov::kurbo::Point,
+    ) -> cherenkov::kurbo::Point {
         let local = self.inverse_transform * point;
-        vello::kurbo::Point::new(
+        cherenkov::kurbo::Point::new(
             local.x - self.local_bounds.x0,
             local.y - self.local_bounds.y0,
         )
     }
 
     /// Maps a surface-local rect back into window hit-test space.
-    pub(crate) fn to_window_rect(&self, local: vello::kurbo::Rect) -> vello::kurbo::Rect {
+    pub(crate) fn to_window_rect(&self, local: cherenkov::kurbo::Rect) -> cherenkov::kurbo::Rect {
         self.inverse_transform.inverse().transform_rect_bbox(
-            local + vello::kurbo::Vec2::new(self.local_bounds.x0, self.local_bounds.y0),
+            local + cherenkov::kurbo::Vec2::new(self.local_bounds.x0, self.local_bounds.y0),
         )
     }
 }
 
 /// Something that consumes the neutral [`SurfaceInputEvent`] vocabulary: the
-/// runtime of an embedded [`GpuSurface`](waterui_graphics::GpuSurface), or the
 /// content of a self-drawn [`SceneView`](waterui_graphics::SceneView).
 pub(crate) trait SurfaceInputReceiver {
     fn input(&mut self, event: &SurfaceInputEvent);
     /// The receiver's text caret, in logical surface-local coordinates.
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect>;
-}
-
-impl SurfaceInputReceiver for EmbeddedGpuSurfaceRuntime {
-    fn input(&mut self, event: &SurfaceInputEvent) {
-        Self::input(self, event);
-    }
-
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
-        Self::ime_caret(self)
-    }
+    fn ime_caret(&self) -> Option<cherenkov::kurbo::Rect>;
 }
 
 /// Scene content redraws through the invalidator it was handed at build time,
@@ -146,7 +134,7 @@ impl SurfaceInputReceiver for Box<dyn SceneContent> {
         SceneContent::input(&mut **self, event);
     }
 
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
+    fn ime_caret(&self) -> Option<cherenkov::kurbo::Rect> {
         SceneContent::ime_caret(&**self)
     }
 }
@@ -196,11 +184,11 @@ impl<R: SurfaceInputReceiver> EmbeddedInputSink for SurfaceInputSink<R> {
         self.send(&SurfaceInputEvent::Modifiers(modifiers.into()));
     }
 
-    fn pointer_move(&self, position: vello::kurbo::Point) {
+    fn pointer_move(&self, position: cherenkov::kurbo::Point) {
         self.send(&SurfaceInputEvent::PointerMove { position });
     }
 
-    fn pointer_button(&self, pressed: bool, button: PointerButton, position: vello::kurbo::Point) {
+    fn pointer_button(&self, pressed: bool, button: PointerButton, position: cherenkov::kurbo::Point) {
         let Some(button) = surface_pointer_button(button) else {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
@@ -218,7 +206,7 @@ impl<R: SurfaceInputReceiver> EmbeddedInputSink for SurfaceInputSink<R> {
 
     fn scroll(
         &self,
-        position: vello::kurbo::Point,
+        position: cherenkov::kurbo::Point,
         delta_x: f32,
         delta_y: f32,
         unit: ScrollUnit,
@@ -268,7 +256,7 @@ impl<R: SurfaceInputReceiver> EmbeddedInputSink for SurfaceInputSink<R> {
         self.send(&SurfaceInputEvent::CompositionCancel);
     }
 
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
+    fn ime_caret(&self) -> Option<cherenkov::kurbo::Rect> {
         self.receiver.borrow().ime_caret()
     }
 }
@@ -287,8 +275,8 @@ impl SemanticCore {
     /// semantic tree exists.
     pub(crate) fn register_embedded_input_target(
         &mut self,
-        local_bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
+        local_bounds: cherenkov::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
         sink: Rc<dyn EmbeddedInputSink>,
         interaction_key: InteractionKey,
         #[cfg(feature = "accessibility")] accessibility_node_id: Option<AccessibilityNodeId>,
@@ -332,8 +320,8 @@ impl SemanticCore {
     /// exists.
     pub(crate) fn register_surface_input_target<R: SurfaceInputReceiver + 'static>(
         &mut self,
-        local_bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
+        local_bounds: cherenkov::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
         receiver: Rc<RefCell<R>>,
         #[cfg(feature = "accessibility")] focus_node: Option<AccessibilityNodeId>,
     ) {
@@ -350,8 +338,8 @@ impl SemanticCore {
 
     fn topmost_embedded_target_at(
         &self,
-        point: vello::kurbo::Point,
-    ) -> Option<(usize, vello::kurbo::Point)> {
+        point: cherenkov::kurbo::Point,
+    ) -> Option<(usize, cherenkov::kurbo::Point)> {
         self.hit_test
             .embedded_input_targets
             .iter()
@@ -372,10 +360,10 @@ impl SemanticCore {
 
     pub(super) fn embedded_target_wins_at(
         &self,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         pointer_priority: Option<(usize, usize, usize)>,
         text_priority: Option<(usize, usize, usize)>,
-    ) -> Option<(usize, EmbeddedInputTarget, vello::kurbo::Point)> {
+    ) -> Option<(usize, EmbeddedInputTarget, cherenkov::kurbo::Point)> {
         let (index, position) = self.topmost_embedded_target_at(point)?;
         let target = &self.hit_test.embedded_input_targets[index];
         let embedded_priority = Self::target_hit_priority(target.depth, target.order, index);
@@ -387,7 +375,7 @@ impl SemanticCore {
         Some((index, target.clone(), position))
     }
 
-    pub(crate) fn handle_embedded_pointer_move(&mut self, point: vello::kurbo::Point) -> bool {
+    pub(crate) fn handle_embedded_pointer_move(&mut self, point: cherenkov::kurbo::Point) -> bool {
         if let Some(target) = self.hit_test.active_embedded_target.as_ref() {
             target
                 .sink
@@ -428,7 +416,7 @@ impl SemanticCore {
 
     pub(crate) fn handle_embedded_scroll(
         &mut self,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         delta_x: f32,
         delta_y: f32,
         unit: ScrollUnit,
@@ -627,7 +615,7 @@ impl SemanticCore {
     /// The surface reports it in its own logical coordinates; its live target
     /// supplies the transform, so a surface that has moved since it was
     /// focused still places the candidate window correctly.
-    pub(crate) fn focused_embedded_ime_caret(&self) -> Option<vello::kurbo::Rect> {
+    pub(crate) fn focused_embedded_ime_caret(&self) -> Option<cherenkov::kurbo::Rect> {
         let sink = self.hit_test.focused_embedded_sink.as_ref()?;
         let caret = sink.ime_caret()?;
         let target = self

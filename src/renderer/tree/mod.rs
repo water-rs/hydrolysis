@@ -78,7 +78,6 @@ mod subview;
 mod window;
 
 pub(crate) use collection::*;
-pub(crate) use flush::ChildTextureTarget;
 pub(crate) use nodes::*;
 use subview::*;
 
@@ -151,15 +150,6 @@ pub(crate) enum RenderNode {
     /// rather than through a frame-ordered effect slot, so a `Dynamic` swap to a
     /// different scene renders the new content instead of the previous scene's.
     SceneView(Box<SceneViewNode>),
-    /// An embedded `GpuSurface` leaf owning its `EmbeddedGpuSurfaceRuntime`
-    /// directly (no cursor-bound slot), composited through an `Rc`-carrying layer.
-    GpuSurface(Box<GpuSurfaceNode>),
-    /// A `ViewEffect` leaf owning its `ViewEffectRuntime` and its captured child
-    /// node directly (no cursor-bound effect slot).
-    ViewEffect(Box<ViewEffectNode>),
-    /// An `AppliedFilter` wrapper owning its `AppliedFilterRuntime` (textures) and
-    /// recursing into its child node (no cursor-bound effect slot).
-    AppliedFilter(Box<AppliedFilterNode>),
     /// A reactive `Dynamic` host: holds the live `Dynamic` and rebuilds only its
     /// own child subtree when the content changes (incremental patch + relayout).
     /// This is the structural seam that keeps a content swap from resetting the
@@ -199,7 +189,6 @@ impl RenderNode {
             Self::Container(node) => Some(node.accessibility_identity.clone()),
             Self::Scroll(node) => Some(node.accessibility_identity.clone()),
             Self::SceneView(node) => Some(node.accessibility_identity.clone()),
-            Self::GpuSurface(node) => Some(node.accessibility_identity.clone()),
             Self::Collection(node) => Some(node.accessibility_identity.clone()),
             Self::LazyStack(node) => Some(node.accessibility_identity.clone()),
             Self::Retain(node) => node.child.accessibility_identity(),
@@ -208,8 +197,6 @@ impl RenderNode {
             Self::Scale(node) => node.child.accessibility_identity(),
             Self::Rotation(node) => node.child.accessibility_identity(),
             Self::Offset(node) => node.child.accessibility_identity(),
-            Self::AppliedFilter(node) => node.child.accessibility_identity(),
-            Self::ViewEffect(node) => node.child.borrow().accessibility_identity(),
             Self::Dynamic(node) => node.child.borrow().accessibility_identity(),
             Self::Color(_) => None,
         }

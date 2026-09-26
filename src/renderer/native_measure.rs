@@ -67,16 +67,67 @@ impl HydroNativeView for Native<MapConfig> {
     }
 }
 
-/// Reaching `WebView` on a build without `hydrolysis_macos_system_webview`
-/// means neither a `Hook<WebView>` engine realization nor the platform bridge
-/// is present — the backend has nothing to draw a page with.
-#[cfg(not(hydrolysis_macos_system_webview))]
+/// Hydrolysis bridges no web engine itself: reaching `WebView` means the
+/// application installed none, and the backend has nothing to draw a page with.
 pub(crate) fn unsupported_webview() -> ! {
     panic!(
         "WebView is unsupported on this Hydrolysis build because no web engine is bridged; \
-         link a browser engine crate (`waterui-browser-cef`, `waterui-browser-wpe`) or enable \
-         the `webview-system` and `winit` features on macOS"
+         link a browser engine crate (`waterui-browser-cef`, `waterui-browser-wpe`)"
     )
+}
+
+/// `cherenkov-gpu` at the pinned revision implements no `GpuContent`,
+/// `ShaderPaint` or `Filters` capability, so the views needing them have no
+/// realization on Hydrolysis.
+pub(crate) fn unsupported_gpu_capability(view: &str, capability: &str) -> ! {
+    panic!(
+        "{view} is unsupported on Hydrolysis because `cherenkov-gpu` implements no `{capability}` \
+         capability; render it through an engine whose backend does, or drop the view"
+    )
+}
+
+impl HydroNativeView for GpuContentView {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
+        unsupported_gpu_capability("GpuContentView", "GpuContent")
+    }
+}
+
+impl HydroNativeView for ShaderPaintView {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
+        unsupported_gpu_capability("ShaderPaintView", "ShaderPaint")
+    }
+}
+
+impl HydroNativeView for FilteredView {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
+        unsupported_gpu_capability("FilteredView", "Filters")
+    }
+}
+
+impl HydroNativeView for WebView {
+    fn intrinsic(
+        _state: &mut HydroState,
+        _view: &Self,
+        _env: &Environment,
+        _theme: &Rc<dyn WidgetTheme>,
+    ) -> LayoutSize {
+        unsupported_webview()
+    }
 }
 
 pub(crate) fn dimensions_for_native<V: HydroNativeView>(
@@ -118,12 +169,12 @@ macro_rules! hydro_native_view_types {
         $macro!(Native<PickerConfig>);
         $macro!(Native<Dynamic>);
         $macro!(Native<SystemIcon>);
-        $macro!(Native<GpuSurface>);
+        $macro!(GpuContentView);
         $macro!(Native<SceneView>);
-        $macro!(Native<ViewEffectErased>);
+        $macro!(ShaderPaintView);
+        $macro!(FilteredView);
         $macro!(Native<Color>);
-        $macro!(Native<ResolvedColor>);
-        $macro!(Native<ResolvedGradient>);
+        $macro!(Native<Gradient>);
         $macro!(Native<ResolvedShape>);
         $macro!(Native<ResolvedMorphShape>);
         $macro!(Native<MapConfig>);

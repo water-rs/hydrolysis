@@ -222,7 +222,7 @@ pub fn run(
         .map(waterui::inspector::InspectorRuntime::observe_signals);
 
     let (windows, _menu_bar, env) = app.into_parts();
-    let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+    let mut env = env;
     waterui::inspector::install(&mut env, inspector);
     let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
     let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
@@ -468,18 +468,18 @@ impl WinitRunner {
                 .create_window(attributes)
                 .expect("hydrolysis runner: failed to create winit window"),
         );
-        let (mut platform, gpu_context) = pollster::block_on(WinitWindow::new_with_shared_gpu(
+        let (mut platform, gpu_context) = WinitWindow::new_with_shared_gpu(
             native_window,
             self.gpu_context.as_ref(),
             super::window_requires_transparency(&window, &self.env),
-        ));
+        );
         if self.gpu_context.is_none() {
             self.gpu_context = Some(gpu_context);
         }
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&self.theme))
+            HydrolysisRenderer::new(Rc::clone(surface.engine()), Rc::clone(&self.theme))
         };
         super::seed_core(&mut renderer, &self.fonts);
         let mut runtime =

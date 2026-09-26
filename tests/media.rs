@@ -65,6 +65,7 @@ fn sample_video_url() -> Url {
 
 // Origin: waterui `components/multimedia/media/tests/e2e_semantics.rs`.
 #[waterui::test(theme = hydrolysis_m3::Material3::defaults(), viewport = (180, 140))]
+#[ignore = "motion playback needs waterui-video-gpu, which still targets the retired GpuView API"]
 fn live_photo_long_press_plays_motion_once_and_recovers(
     ui: UiBuilder<Styled<hydrolysis_m3::Material3>>,
 ) {

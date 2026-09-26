@@ -1,4 +1,5 @@
 use super::*;
+use std::num::NonZeroUsize;
 use crate::engine::WidgetTheme;
 use std::rc::Rc;
 use waterui_core::handler::BoxedAction;
@@ -17,8 +18,8 @@ pub(crate) fn table_header_cell_rect(
     x_offset: f64,
     width: f64,
     metrics: waterui_backend_core::widget::TableMetrics,
-) -> vello::kurbo::Rect {
-    vello::kurbo::Rect::new(
+) -> cherenkov::kurbo::Rect {
+    cherenkov::kurbo::Rect::new(
         origin_x + x_offset,
         origin_y,
         origin_x + x_offset + width,
@@ -33,9 +34,9 @@ pub(crate) fn table_data_cell_rect(
     width: f64,
     row_index: usize,
     metrics: waterui_backend_core::widget::TableMetrics,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     let y0 = origin_y + metrics.header_height + metrics.row_height * row_index as f64;
-    vello::kurbo::Rect::new(
+    cherenkov::kurbo::Rect::new(
         origin_x + x_offset,
         y0,
         origin_x + x_offset + width,
@@ -412,7 +413,7 @@ fn view_has_plain_alignment_dimensions(view: &AnyView) -> bool {
 impl HydrolysisRenderer {
     pub(crate) fn render_styled_text(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut crate::scene::Scene,
         ctx: RenderContext,
         styled: StyledStr,
         alignment: HorizontalAlignment,
@@ -423,7 +424,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn render_styled_text_limited(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut crate::scene::Scene,
         ctx: RenderContext,
         styled: StyledStr,
         alignment: HorizontalAlignment,
@@ -431,23 +432,24 @@ impl HydrolysisRenderer {
         tail: TailMark,
     ) {
         let input = resolve_text_layout_input(&styled, alignment, env);
-        let fragment = state.text.glyph_scene_with(
+        let text = Arc::clone(&state.text);
+        let fragment = text.glyph_scene_with(
             &input,
             Some(ctx.bounds.width() as f32),
             tail,
             |layout, effective, fragment| {
-                Self::encode_text_layout(fragment, layout, effective, tail.parts().0);
+                Self::encode_text_layout(state, fragment, layout, effective, tail.parts().0);
             },
         );
         scene.append(
             &fragment,
-            Some(ctx.transform * vello::kurbo::Affine::translate((ctx.bounds.x0, ctx.bounds.y0))),
+            Some(ctx.transform * cherenkov::kurbo::Affine::translate((ctx.bounds.x0, ctx.bounds.y0))),
         );
     }
 
     pub(crate) fn render_styled_text_single_line_centered(
         state: &mut HydroState,
-        scene: &mut vello::Scene,
+        scene: &mut crate::scene::Scene,
         ctx: RenderContext,
         styled: StyledStr,
         env: &Environment,
@@ -462,17 +464,18 @@ impl HydrolysisRenderer {
         let height = f64::from(metrics.line_height);
         let x = ((ctx.bounds.width() - width) * 0.5).max(0.0);
         let y = ((ctx.bounds.height() - height) * 0.5).max(0.0);
-        let fragment = state.text.glyph_scene_with(
+        let text = Arc::clone(&state.text);
+        let fragment = text.glyph_scene_with(
             &input,
             None,
             TailMark::Clip(1),
             |layout, effective, fragment| {
-                Self::encode_text_layout(fragment, layout, effective, Some(1));
+                Self::encode_text_layout(state, fragment, layout, effective, Some(1));
             },
         );
         scene.append(
             &fragment,
-            Some(ctx.transform * vello::kurbo::Affine::translate((x, y))),
+            Some(ctx.transform * cherenkov::kurbo::Affine::translate((x, y))),
         );
     }
 
@@ -480,7 +483,8 @@ impl HydrolysisRenderer {
     /// caller positions the result by appending it under a transform, which is
     /// what makes the encoded fragment reusable across frames.
     fn encode_text_layout(
-        scene: &mut vello::Scene,
+        state: &mut HydroState,
+        scene: &mut crate::scene::Scene,
         layout: &parley::Layout<[u8; 4]>,
         input: &ResolvedTextLayoutInput,
         max_lines: Option<usize>,
@@ -500,8 +504,9 @@ impl HydrolysisRenderer {
                 if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
                     let run = glyph_run.run();
                     let style = glyph_run.style();
-                    let brush = rgba8_to_peniko(style.brush);
-                    let normalized_coords = run.normalized_coords();
+                    let brush = rgba8_to_working(style.brush);
+                    let normalized_coords = run.normalized_coords().to_vec();
+                    let font = state.font_id(run.font());
 
                     let mut run_x = glyph_run.offset();
                     let run_y = glyph_run.baseline();
@@ -509,20 +514,23 @@ impl HydrolysisRenderer {
                         let x = run_x + glyph.x;
                         let y = run_y - glyph.y;
                         run_x += glyph.advance;
-                        vello::Glyph { id: glyph.id, x, y }
+                        cherenkov::Glyph {
+                            id: glyph.id,
+                            x,
+                            y,
+                            transform: None,
+                        }
                     });
 
-                    let glyph_run_builder = scene
-                        .draw_glyphs(run.font())
-                        .brush(brush)
-                        .font_size(run.font_size());
-                    if normalized_coords.is_empty() {
-                        glyph_run_builder.draw(vello::peniko::Fill::NonZero, glyphs);
-                    } else {
-                        glyph_run_builder
-                            .normalized_coords(normalized_coords)
-                            .draw(vello::peniko::Fill::NonZero, glyphs);
-                    }
+                    scene.draw_glyphs(
+                        cherenkov::kurbo::Affine::IDENTITY,
+                        font,
+                        run.font_size(),
+                        normalized_coords,
+                        cherenkov::GlyphStyle::Fill,
+                        brush,
+                        glyphs,
+                    );
                 }
             }
         }
@@ -537,7 +545,7 @@ impl HydrolysisRenderer {
     /// come from a ranged builder, which emits no inline boxes, so runs are
     /// the whole item sequence.
     fn encode_line_backgrounds(
-        scene: &mut vello::Scene,
+        scene: &mut crate::scene::Scene,
         line: &parley::Line<'_, [u8; 4]>,
         input: &ResolvedTextLayoutInput,
     ) {
@@ -572,7 +580,7 @@ impl HydrolysisRenderer {
     }
 
     fn fill_span_background(
-        scene: &mut vello::Scene,
+        scene: &mut crate::scene::Scene,
         start: f32,
         end: f32,
         top: f64,
@@ -580,11 +588,11 @@ impl HydrolysisRenderer {
         colour: [u8; 4],
     ) {
         scene.fill(
-            vello::peniko::Fill::NonZero,
-            vello::kurbo::Affine::IDENTITY,
-            rgba8_to_peniko(colour),
+            crate::scene::Fill::NonZero,
+            cherenkov::kurbo::Affine::IDENTITY,
+            rgba8_to_working(colour),
             None,
-            &vello::kurbo::Rect::new(f64::from(start), top, f64::from(end), bottom),
+            &cherenkov::kurbo::Rect::new(f64::from(start), top, f64::from(end), bottom),
         );
     }
 
@@ -814,21 +822,21 @@ pub(crate) fn tabs_content_proposal(
 }
 
 pub(crate) fn tabs_bar_and_content_rect(
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     style: NativeTabStyle,
     bar_extent: f64,
-) -> (vello::kurbo::Rect, vello::kurbo::Rect) {
+) -> (cherenkov::kurbo::Rect, cherenkov::kurbo::Rect) {
     match style {
         NativeTabStyle::Automatic | NativeTabStyle::TabBar => {
             let bar_height = bar_extent.min(bounds.height());
             (
-                vello::kurbo::Rect::new(
+                cherenkov::kurbo::Rect::new(
                     bounds.x0,
                     (bounds.y1 - bar_height).max(bounds.y0),
                     bounds.x1,
                     bounds.y1,
                 ),
-                vello::kurbo::Rect::new(
+                cherenkov::kurbo::Rect::new(
                     bounds.x0,
                     bounds.y0,
                     bounds.x1,
@@ -839,38 +847,38 @@ pub(crate) fn tabs_bar_and_content_rect(
         NativeTabStyle::Sidebar => {
             let bar_width = bar_extent.min(bounds.width());
             (
-                vello::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + bar_width, bounds.y1),
-                vello::kurbo::Rect::new(bounds.x0 + bar_width, bounds.y0, bounds.x1, bounds.y1),
+                cherenkov::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + bar_width, bounds.y1),
+                cherenkov::kurbo::Rect::new(bounds.x0 + bar_width, bounds.y0, bounds.x1, bounds.y1),
             )
         }
     }
 }
 
 pub(crate) fn tabs_button_rect(
-    bar_rect: vello::kurbo::Rect,
+    bar_rect: cherenkov::kurbo::Rect,
     tab_count: usize,
     index: usize,
     style: NativeTabStyle,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     match style {
         NativeTabStyle::Automatic | NativeTabStyle::TabBar => {
             let button_width = bar_rect.width() / tab_count as f64;
             let x0 = bar_rect.x0 + button_width * index as f64;
-            vello::kurbo::Rect::new(x0, bar_rect.y0, x0 + button_width, bar_rect.y1)
+            cherenkov::kurbo::Rect::new(x0, bar_rect.y0, x0 + button_width, bar_rect.y1)
         }
         NativeTabStyle::Sidebar => {
             let button_height = bar_rect.height() / tab_count as f64;
             let y0 = bar_rect.y0 + button_height * index as f64;
-            vello::kurbo::Rect::new(bar_rect.x0, y0, bar_rect.x1, y0 + button_height)
+            cherenkov::kurbo::Rect::new(bar_rect.x0, y0, bar_rect.x1, y0 + button_height)
         }
     }
 }
 
 pub(crate) fn navigation_back_button_rect(
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     metrics: waterui_backend_core::widget::NavigationMetrics,
-) -> vello::kurbo::Rect {
-    vello::kurbo::Rect::new(
+) -> cherenkov::kurbo::Rect {
+    cherenkov::kurbo::Rect::new(
         bounds.x0 + metrics.back_button_leading_inset,
         bounds.y0 + metrics.back_button_top_inset,
         bounds.x0 + metrics.back_button_leading_inset + metrics.back_button_size,
@@ -1528,7 +1536,7 @@ mod background_tests {
     /// background fills alike — read straight off the encoding. `0x44` is
     /// `vello_encoding`'s `DrawTag::COLOR`; each entry consumes
     /// `tag.info_size()` words of the draw-data stream.
-    fn solid_fill_colours(scene: &vello::Scene) -> Vec<u32> {
+    fn solid_fill_colours(scene: &crate::scene::Scene) -> Vec<u32> {
         let encoding = scene.encoding();
         let mut colours = Vec::new();
         let mut offset = 0usize;
@@ -1544,11 +1552,11 @@ mod background_tests {
     fn rendered_fill_colours(styled: StyledStr, width: f64) -> Vec<u32> {
         let env = test_environment();
         let mut state = HydroState::default();
-        let mut scene = vello::Scene::new();
+        let mut scene = crate::scene::Scene::new();
         let ctx = RenderContext::with_transforms(
-            vello::kurbo::Rect::new(0.0, 0.0, width, 200.0),
-            vello::kurbo::Affine::IDENTITY,
-            vello::kurbo::Affine::IDENTITY,
+            cherenkov::kurbo::Rect::new(0.0, 0.0, width, 200.0),
+            cherenkov::kurbo::Affine::IDENTITY,
+            cherenkov::kurbo::Affine::IDENTITY,
         );
         HydrolysisRenderer::render_styled_text_limited(
             &mut state,

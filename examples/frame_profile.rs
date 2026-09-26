@@ -1,7 +1,7 @@
 //! Headless frame-pipeline profiler for Hydrolysis.
 //!
 //! Renders representative WaterUI scenes through the real retained-tree →
-//! layout → `vello::Scene` → compositor pipeline offscreen — no window, no
+//! layout → `crate::scene::Scene` → compositor pipeline offscreen — no window, no
 //! display — and writes one JSON document per scene with per-frame stage
 //! records plus p50/p90/p99 per stage. GPU stages come from wgpu timestamp
 //! queries and stay `null` where the adapter lacks `TIMESTAMP_QUERY`.
@@ -30,7 +30,7 @@ use hydrolysis_m3::{
 use serde::Serialize;
 use waterui::Binding;
 use waterui::ViewExt as _;
-use waterui::animation::Animation;
+use waterui::animation::{Animation, Curve};
 use waterui::component::text;
 use waterui_chart::{BarChart, DataPoint};
 use waterui_core::SignalExt as _;
@@ -255,10 +255,10 @@ fn animated(gpu: &OffscreenGpuContext) -> (HeadlessRuntime, FrameDriver) {
         let rotation = rotation.clone();
         let offset_x = offset_x.clone();
         runtime_on(gpu, move || {
-            let animated_opacity = opacity.with(Animation::ease_in_out(Duration::from_millis(400)));
+            let animated_opacity = opacity.with(Animation::Curve(Curve::ease_in_out(Duration::from_millis(400))));
             let animated_scale = scale.with(Animation::spring(250.0, 18.0));
             let animated_rotation =
-                rotation.with(Animation::ease_in_out(Duration::from_millis(400)));
+                rotation.with(Animation::Curve(Curve::ease_in_out(Duration::from_millis(400))));
             let animated_x = offset_x.with(Animation::spring(200.0, 20.0));
             AnyView::new(vstack((
                 text("Animated page"),

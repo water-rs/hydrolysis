@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use waterui::animation::Animation;
+use waterui::animation::{Animation, Curve};
 use waterui::{Binding, SignalExt as _, ViewExt as _};
 use waterui_core::AnyView;
 use waterui_core::handler::AnyViewBuilder;
@@ -63,7 +63,7 @@ fn padding_list() -> impl waterui::View {
 fn opacity_at_root(value: &Binding<f32>) -> AnyView {
     let animated = value
         .clone()
-        .with(Animation::linear(Duration::from_millis(1_000)));
+        .with(Animation::Curve(Curve::linear(Duration::from_millis(1_000))));
     AnyView::new(vstack((
         ().size(120.0, 120.0).opacity(animated),
         ().size(360.0, 200.0),
@@ -76,7 +76,7 @@ fn opacity_at_root(value: &Binding<f32>) -> AnyView {
 fn opacity_in_scroll(value: &Binding<f32>) -> AnyView {
     let animated = value
         .clone()
-        .with(Animation::linear(Duration::from_millis(1_000)));
+        .with(Animation::Curve(Curve::linear(Duration::from_millis(1_000))));
     let header = ().size(120.0, 120.0).opacity(animated);
     AnyView::new(scroll(vstack((header, padding_list()))))
 }
@@ -87,7 +87,7 @@ fn opacity_in_scroll(value: &Binding<f32>) -> AnyView {
 fn transform_at_root(value: &Binding<f32>) -> AnyView {
     let animated = value
         .clone()
-        .with(Animation::linear(Duration::from_millis(1_000)));
+        .with(Animation::Curve(Curve::linear(Duration::from_millis(1_000))));
     AnyView::new(vstack((
         ().size(80.0, 80.0).scale(animated.clone(), animated),
         ().size(360.0, 200.0),
@@ -100,7 +100,7 @@ fn transform_at_root(value: &Binding<f32>) -> AnyView {
 fn transform_in_scroll(value: &Binding<f32>) -> AnyView {
     let animated = value
         .clone()
-        .with(Animation::linear(Duration::from_millis(1_000)));
+        .with(Animation::Curve(Curve::linear(Duration::from_millis(1_000))));
     let header = ().size(80.0, 80.0).scale(animated.clone(), animated);
     AnyView::new(scroll(vstack((header, padding_list()))))
 }
@@ -502,7 +502,7 @@ fn steady_state_transform_animation_retains_the_tree() {
         let value = value.clone();
         let place_calls = Rc::clone(&place_calls);
         AnyViewBuilder::<AnyView>::new(move || {
-            let animated = value.with(Animation::linear(Duration::from_millis(1_000)));
+            let animated = value.with(Animation::Curve(Curve::linear(Duration::from_millis(1_000))));
             AnyView::new(FixedContainer::new(
                 CountingLayout {
                     inner: ZStackLayout::default(),
@@ -617,7 +617,7 @@ fn reactive_bg_collection(selected: &Binding<u32>) -> AnyView {
             .computed();
         AnyView::new(().size(120.0, 40.0).background(signal_color(background)))
     });
-    let collection = collection_transition(collection, Animation::linear(Duration::from_millis(1)));
+    let collection = collection_transition(collection, Animation::Curve(Curve::linear(Duration::from_millis(1))));
     let height = selected.clone().map(|s| 40.0 + s as f32 * 30.0);
     let sizer = Frame::new(()).width(80.0).height(height);
     AnyView::new(vstack((sizer, collection)))
@@ -692,7 +692,7 @@ fn transition_color_stack(list: &List<SelfId<u64>>) -> AnyView {
     });
     AnyView::new(collection_transition(
         collection,
-        Animation::linear(Duration::from_millis(1_000)),
+        Animation::Curve(Curve::linear(Duration::from_millis(1_000))),
     ))
 }
 

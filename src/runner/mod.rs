@@ -70,8 +70,6 @@ use crate::env::{parse_bool_env, parse_positive_u64_env};
 use crate::platform::{InputEvent, KeyState, PlatformWindow};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::platform::{OffscreenGpuContext, OffscreenWindow};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::readback::readback_texture_rgba8;
 use crate::renderer::{HydrolysisRenderer, HydrolysisWindowOrigin, KeyDelivery};
 use crate::renderer::{HydrolysisTextContextMenuMode, PopupWindowManager};
 use crate::time::Instant;
@@ -129,8 +127,6 @@ fn install_native_component_hooks(env: &mut Environment) {
     crate::localization::install(env);
     // The only web engine this backend knows about is the platform's own: a
     // browser engine an application links installs its realization itself.
-    #[cfg(hydrolysis_macos_system_webview)]
-    crate::widgets::platform::webview::install_controller(env);
     env.insert(Hook::new(|_env: &Environment, config: TableConfig| {
         Native::new(config)
     }));
@@ -175,7 +171,7 @@ pub fn run(app: App, style: impl crate::Style) {
     // executor installed just above.
     waterui_locale::start_system_locale_listener();
     let (windows, _menu_bar, env) = app.into_parts();
-    let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+    let mut env = env;
     waterui::inspector::install(&mut env, inspector);
     let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
     let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
@@ -198,12 +194,12 @@ pub fn run(app: App, style: impl crate::Style) {
         let frame = crate::platform::validated_window_frame(window.frame.snapshot());
         let width = frame.width().max(1.0) as u32;
         let height = frame.height().max(1.0) as u32;
-        let mut platform = OffscreenWindow::new(width, height, wgpu::TextureFormat::Rgba8Unorm)
+        let mut platform = OffscreenWindow::new(width, height)
             .with_scale_factor(offscreen_scale_factor());
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
+            HydrolysisRenderer::new(Rc::clone(surface.engine()), Rc::clone(&theme))
         };
         seed_core(&mut renderer, &fonts);
         let mut runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);

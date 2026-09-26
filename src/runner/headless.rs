@@ -15,12 +15,11 @@ pub(super) struct HeadlessPlatformWindow {
 #[cfg(not(target_arch = "wasm32"))]
 impl HeadlessPlatformWindow {
     #[cfg(test)]
-    pub(super) fn new_for_tests(width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
+    pub(super) fn new_for_tests(width: u32, height: u32) -> Self {
         Self::on_context(
             OffscreenGpuContext::new_for_tests_blocking(),
             width,
             height,
-            format,
         )
     }
 
@@ -28,10 +27,9 @@ impl HeadlessPlatformWindow {
         gpu: OffscreenGpuContext,
         width: u32,
         height: u32,
-        format: wgpu::TextureFormat,
     ) -> Self {
         Self {
-            inner: OffscreenWindow::on_context(gpu, width, height, format),
+            inner: OffscreenWindow::on_context(gpu, width, height),
             pending_events: VecDeque::new(),
             redraw_requested: Cell::new(false),
         }
@@ -194,7 +192,7 @@ impl HeadlessRuntime {
         style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
-            pollster::block_on(OffscreenGpuContext::new()),
+            OffscreenGpuContext::new(),
             env,
             default_window(content),
             width,
@@ -223,7 +221,7 @@ impl HeadlessRuntime {
         style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
-            pollster::block_on(OffscreenGpuContext::new()),
+            OffscreenGpuContext::new(),
             env,
             window,
             width,
@@ -336,7 +334,7 @@ impl HeadlessRuntime {
         let inspector_probe = inspector
             .as_ref()
             .map(waterui::inspector::InspectorRuntime::runtime_probe);
-        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        let mut env = env;
         waterui::inspector::install(&mut env, inspector);
         let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
         install_native_component_hooks(&mut env);
@@ -377,13 +375,11 @@ impl HeadlessRuntime {
         let mut platform = HeadlessPlatformWindow::on_context(
             gpu.clone(),
             width.max(1),
-            height.max(1),
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
+            height.max(1));
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
+            HydrolysisRenderer::new(Rc::clone(surface.engine()), Rc::clone(&theme))
         };
         super::seed_core(&mut renderer, &fonts);
 
@@ -417,13 +413,11 @@ impl HeadlessRuntime {
         let mut platform = HeadlessPlatformWindow::on_context(
             self.gpu.clone(),
             width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
+            height);
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&self.theme))
+            HydrolysisRenderer::new(Rc::clone(surface.engine()), Rc::clone(&self.theme))
         };
         super::seed_core(&mut renderer, &self.fonts);
         RuntimeWindow::new(

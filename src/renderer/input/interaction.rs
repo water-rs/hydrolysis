@@ -58,7 +58,7 @@ pub(crate) struct InteractionFocus {
 }
 
 pub(crate) struct WidgetInteractionInput {
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
     pub(crate) hovered: bool,
     pub(crate) focus: Option<InteractionFocus>,
     /// The widget is disabled: inherited hover/press state is dropped and the
@@ -104,7 +104,7 @@ impl InteractionEngine {
     pub(crate) fn begin_press(
         &mut self,
         slot: &PressSlot,
-        origin: vello::kurbo::Point,
+        origin: cherenkov::kurbo::Point,
         now: Instant,
     ) {
         if let Some(handles) = self
@@ -237,7 +237,7 @@ impl InteractionEngine {
                 if wave_visible {
                     motion.press_grow.clone()
                 } else {
-                    Animation::linear(Duration::ZERO)
+                    Animation::Curve(Curve::linear(Duration::ZERO))
                 },
                 now,
             );
@@ -298,7 +298,7 @@ pub(crate) struct HoverSlot {
 
 pub(crate) fn local_interaction_state(
     mut state: WidgetInteractionState,
-    hit_transform: vello::kurbo::Affine,
+    hit_transform: cherenkov::kurbo::Affine,
 ) -> WidgetInteractionState {
     let inverse = hit_transform.inverse();
     state.press_waves.map_origins(|origin| inverse * origin);
@@ -329,7 +329,7 @@ mod tests {
     use crate::time::Instant;
     use core::time::Duration;
     use std::rc::Rc;
-    use waterui::animation::Animation;
+    use waterui::animation::{Animation, Curve};
     use waterui_backend_core::widget::InteractionMotion;
 
     fn motion() -> InteractionMotion {
@@ -338,13 +338,13 @@ mod tests {
             focus_opacity: 0.12,
             pressed_opacity: 0.12,
             dragged_opacity: 0.16,
-            hover_enter: Animation::linear(Duration::from_millis(15)),
-            hover_exit: Animation::linear(Duration::from_millis(15)),
-            focus_enter: Animation::linear(Duration::from_millis(15)),
-            focus_exit: Animation::linear(Duration::from_millis(15)),
-            press_fade_in: Animation::linear(Duration::from_millis(15)),
-            press_fade_out: Animation::linear(Duration::from_millis(120)),
-            press_grow: Animation::linear(Duration::from_millis(225)),
+            hover_enter: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            hover_exit: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            focus_enter: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            focus_exit: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            press_fade_in: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            press_fade_out: Animation::Curve(Curve::linear(Duration::from_millis(120))),
+            press_grow: Animation::Curve(Curve::linear(Duration::from_millis(225))),
             minimum_press_duration: Duration::from_millis(75),
             touch_delay: Duration::from_millis(0),
         }
@@ -356,7 +356,7 @@ mod tests {
             controller.bind_scalar_target(
                 AnimationKey::renderer_local_scalar(key),
                 0.0,
-                Animation::linear(Duration::ZERO),
+                Animation::Curve(Curve::linear(Duration::ZERO)),
                 now,
             )
         };
@@ -372,7 +372,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = cherenkov::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -398,7 +398,7 @@ mod tests {
             };
 
         let (_, slot, _) = bind(&mut engine, &mut controller, started);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, cherenkov::kurbo::Point::new(10.0, 10.0), started);
 
         // Release after the grow completed (test grow: 225ms linear); the
         // minimum press duration (75ms) has elapsed, so the release applies
@@ -436,7 +436,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = cherenkov::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -462,7 +462,7 @@ mod tests {
             };
 
         let (_, slot, _) = bind(&mut engine, &mut controller, started);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, cherenkov::kurbo::Point::new(10.0, 10.0), started);
 
         // Quick tap: released long before the grow (225ms) finishes.
         engine.clear_all_presses(started + Duration::from_millis(40));
@@ -470,7 +470,7 @@ mod tests {
         // Re-press at a different point while the first wave is mid-flight.
         let repressed = started + Duration::from_millis(100);
         let (_, slot, _) = bind(&mut engine, &mut controller, repressed);
-        engine.begin_press(&slot, vello::kurbo::Point::new(80.0, 30.0), repressed);
+        engine.begin_press(&slot, cherenkov::kurbo::Point::new(80.0, 30.0), repressed);
 
         // Both waves are visible: the released first wave keeps its own grow
         // progress and origin while the fresh wave starts over from zero.
@@ -480,12 +480,12 @@ mod tests {
         assert_eq!(waves.len(), 2, "both press waves must be visible");
         assert_eq!(
             waves[0].origin,
-            Some(vello::kurbo::Point::new(10.0, 10.0)),
+            Some(cherenkov::kurbo::Point::new(10.0, 10.0)),
             "the older wave keeps the first press origin"
         );
         assert_eq!(
             waves[1].origin,
-            Some(vello::kurbo::Point::new(80.0, 30.0)),
+            Some(cherenkov::kurbo::Point::new(80.0, 30.0)),
             "the newest wave grows from the second press origin"
         );
         assert!(
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(waves.len(), 1, "the first wave must have faded out alone");
         assert_eq!(
             waves[0].origin,
-            Some(vello::kurbo::Point::new(80.0, 30.0)),
+            Some(cherenkov::kurbo::Point::new(80.0, 30.0)),
             "the held second wave must survive"
         );
         assert!(
@@ -517,7 +517,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = cherenkov::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -548,7 +548,7 @@ mod tests {
         // Hovered and mid-press, then the widget becomes disabled: the
         // sampled state comes to rest immediately and carries the flag.
         let (_, slot, _) = bind(&mut engine, &mut controller, started, true, false);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, cherenkov::kurbo::Point::new(10.0, 10.0), started);
 
         let disabled_at = started + Duration::from_millis(50);
         let (state, _, _) = bind(&mut engine, &mut controller, disabled_at, true, true);
@@ -577,7 +577,7 @@ mod tests {
     fn released_press_stays_visually_pressed_until_minimum_duration() {
         let started = Instant::now();
         let handles = handles(started);
-        handles.begin_press(vello::kurbo::Point::new(4.0, 5.0), started);
+        handles.begin_press(cherenkov::kurbo::Point::new(4.0, 5.0), started);
         assert!(handles.release(started + Duration::from_millis(10)));
 
         assert!(handles.visually_pressed(started + Duration::from_millis(20)));

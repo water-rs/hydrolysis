@@ -104,7 +104,7 @@ pub(crate) fn graphics_dimensions_from_proposal(proposal: ProposalSize) -> ViewD
 
 /// Measures a retained gradient leaf: a gradient fills the proposed bounds.
 pub(crate) fn measure_gradient_node(
-    _gradient: &ResolvedGradient,
+    _gradient: &Gradient,
     proposal: ProposalSize,
     _state: &mut HydroState,
     _env: &Environment,
@@ -117,7 +117,7 @@ pub(crate) fn measure_gradient_node(
 /// fills the gradient. The payload is fully resolved data (no signal), so no watch.
 pub(crate) fn render_gradient_node(
     ctx: &mut WidgetRenderContext<'_>,
-    gradient: &Rc<RefCell<ResolvedGradient>>,
+    gradient: &Rc<RefCell<Gradient>>,
     env: &Environment,
 ) {
     let hidden = env
@@ -132,17 +132,19 @@ pub(crate) fn render_gradient_node(
 
 pub(crate) fn render_gradient_parts(
     ctx: &mut WidgetRenderContext<'_>,
-    gradient: &Rc<RefCell<ResolvedGradient>>,
+    gradient: &Rc<RefCell<Gradient>>,
     _env: &Environment,
 ) {
     let bounds = ctx.bounds;
-    let brush = resolved_gradient_to_brush(&gradient.borrow(), bounds);
     let transform = ctx.transform;
+    let gradient = gradient.borrow();
+    let paint_transform = cherenkov::kurbo::Affine::translate((bounds.x0, bounds.y0))
+        * Gradient::transform_to(bounds.width() as f32, bounds.height() as f32);
     ctx.renderer_mut().scene.fill(
-        vello::peniko::Fill::NonZero,
+        crate::scene::Fill::NonZero,
         transform,
-        &brush,
-        None,
+        gradient.paint(),
+        Some(paint_transform),
         &bounds,
     );
 }
@@ -188,11 +190,11 @@ pub(crate) fn render_shape_parts(
             resolved.fill.clone(),
         )
     };
-    let fill = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&fill_signal));
+    let fill = ctx.renderer_mut().read_signal(&fill_signal);
     let transform = ctx.transform;
     ctx.renderer_mut()
         .scene
-        .fill(vello::peniko::Fill::NonZero, transform, fill, None, &path);
+        .fill(crate::scene::Fill::NonZero, transform, fill, None, &path);
 }
 
 /// Measures a retained morph-shape leaf: a morph shape fills the proposed bounds.
@@ -248,12 +250,12 @@ pub(crate) fn render_morph_shape_parts(
         let fill = renderer.read_signal(&resolved.fill);
         (
             resolved_morph_shape_to_path(&resolved, progress, bounds),
-            resolved_color_to_peniko(fill),
+            fill,
         )
     };
     renderer
         .scene
-        .fill(vello::peniko::Fill::NonZero, transform, fill, None, &path);
+        .fill(crate::scene::Fill::NonZero, transform, fill, None, &path);
 }
 
 /// Emits a string leaf's accessibility node from its content. Shared by the

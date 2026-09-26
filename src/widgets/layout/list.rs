@@ -33,12 +33,11 @@ use waterui_text::Text;
 
 use crate::platform::Modifiers;
 use crate::renderer::lazy::VirtualExtentIndex;
-use crate::renderer::resolved_color_to_peniko;
 use crate::widgets::draw_scroll_indicators;
 use nami::watcher::BoxWatcherGuard;
 use nami::{Computed, Signal, SignalExt as _};
 use waterui::theme::color;
-use waterui_backend_core::widget::{Brush, DrawContext as _};
+use cherenkov::Draw as _;
 use waterui_core::resolve::Resolvable as _;
 
 /// The stable per-row id used to key the retained content sub-view cache, matching
@@ -703,7 +702,7 @@ fn register_section_chrome_node(
     semantic_key: i64,
     label: Text,
     is_header: bool,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     env: &Environment,
 ) -> Option<AccessibilityNodeId> {
     let role = if is_header {
@@ -783,7 +782,7 @@ pub(crate) fn list_accessibility(
         }
     }
     let _rendered = ctx.is_some();
-    let viewport = ctx.map_or(vello::kurbo::Rect::ZERO, |ctx| ctx.bounds);
+    let viewport = ctx.map_or(cherenkov::kurbo::Rect::ZERO, |ctx| ctx.bounds);
     // The rendered scroll domain is the measured extent; the semantic one is
     // the row count — with a zero viewport every row is scrollable to.
     let content_height = state
@@ -859,7 +858,7 @@ pub(crate) fn list_accessibility(
             } else {
                 0.0
             };
-            let slot_rect = vello::kurbo::Rect::new(viewport.x0, y, viewport.x1, y + slot_height);
+            let slot_rect = cherenkov::kurbo::Rect::new(viewport.x0, y, viewport.x1, y + slot_height);
             y += slot_height;
             if _rendered && (slot_rect.y1 <= viewport.y0 || slot_rect.y0 >= viewport.y1) {
                 continue;
@@ -869,7 +868,7 @@ pub(crate) fn list_accessibility(
             // The chrome a row owns is not part of the row: a section title is
             // its own node, and the row's bounds are the band left between the
             // header and the footer — the same split the draw pass makes.
-            let row_rect = vello::kurbo::Rect::new(
+            let row_rect = cherenkov::kurbo::Rect::new(
                 slot_rect.x0,
                 slot_rect.y0 + header_height,
                 slot_rect.x1,
@@ -881,7 +880,7 @@ pub(crate) fn list_accessibility(
                 .unwrap_or_else(|| panic!("hydrolysis list row {index} has no stable identity"));
             let key_base = row_a11y_key_base(row_id);
             if let Some(header) = chrome.header.clone() {
-                let header_rect = vello::kurbo::Rect::new(
+                let header_rect = cherenkov::kurbo::Rect::new(
                     slot_rect.x0 + list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y0,
                     slot_rect.x1 - list_metrics.map_or(0.0, |m| m.horizontal_inset),
@@ -997,7 +996,7 @@ pub(crate) fn list_accessibility(
                 }
             }
             if let Some(footer) = chrome.footer.clone() {
-                let footer_rect = vello::kurbo::Rect::new(
+                let footer_rect = cherenkov::kurbo::Rect::new(
                     slot_rect.x0 + list_metrics.map_or(0.0, |m| m.horizontal_inset),
                     slot_rect.y1 - footer_height,
                     slot_rect.x1 - list_metrics.map_or(0.0, |m| m.horizontal_inset),
@@ -1272,7 +1271,7 @@ pub(crate) fn render_list_parts(
         let swipe_dx = state.borrow().swipe_offset_for(row_id);
         // Where the row's slot is (the gap it occupies in the list), before the
         // row itself is displaced sideways by a swipe.
-        let slot_rect = vello::kurbo::Rect::new(
+        let slot_rect = cherenkov::kurbo::Rect::new(
             viewport.x0,
             resting_y + reorder_dy,
             viewport.x1,
@@ -1286,7 +1285,7 @@ pub(crate) fn render_list_parts(
         // The slot covers the section chrome this row owns; the row itself is
         // the band left between that header and footer, and only that band
         // swipes — a section title is not part of the row that carries it.
-        let row_slot = vello::kurbo::Rect::new(
+        let row_slot = cherenkov::kurbo::Rect::new(
             slot_rect.x0,
             slot_rect.y0 + header_height,
             slot_rect.x1,
@@ -1310,7 +1309,7 @@ pub(crate) fn render_list_parts(
         // Everything the row draws — its background, controls and content —
         // rides the swipe displacement; only the revealed dismiss background
         // stays anchored to the slot.
-        let row_rect = row_slot + vello::kurbo::Vec2::new(swipe_dx, 0.0);
+        let row_rect = row_slot + cherenkov::kurbo::Vec2::new(swipe_dx, 0.0);
         let selected = state
             .borrow()
             .row_selection
@@ -1325,24 +1324,22 @@ pub(crate) fn render_list_parts(
         // `SelectionForeground` against it (see `selection_themed` in the list
         // component), so the pair has to come from the same place.
         let selection_fill = selected.then(|| {
-            resolved_color_to_peniko(
-                ctx.renderer_mut()
-                    .read_signal(&color::SelectionContainer.resolve(&row_env).computed()),
-            )
+            ctx.renderer_mut()
+                .read_signal(&color::SelectionContainer.resolve(&row_env).computed())
         });
         {
             let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_list_row_background(&mut draw, row_rect, index % 2 == 1);
             if let Some(fill) = selection_fill {
-                draw.fill_rect(row_rect, &Brush::Solid(fill));
+                draw.fill(row_rect, fill);
             }
             if lifted_id == Some(row_id) {
                 theme.draw_list_row_lifted(&mut draw, row_rect, REORDER_LIFT_ELEVATION);
             }
         }
         if let Some(header) = chrome.header.clone() {
-            let header_rect = vello::kurbo::Rect::new(
+            let header_rect = cherenkov::kurbo::Rect::new(
                 slot_rect.x0 + list_metrics.horizontal_inset,
                 slot_rect.y0,
                 slot_rect.x1 - list_metrics.horizontal_inset,
@@ -1351,7 +1348,7 @@ pub(crate) fn render_list_parts(
             draw_section_label(ctx, header, header_rect, true, &row_env);
         }
         if let Some(footer) = chrome.footer.clone() {
-            let footer_rect = vello::kurbo::Rect::new(
+            let footer_rect = cherenkov::kurbo::Rect::new(
                 slot_rect.x0 + list_metrics.horizontal_inset,
                 slot_rect.y1 - footer_height,
                 slot_rect.x1 - list_metrics.horizontal_inset,
@@ -1447,7 +1444,7 @@ pub(crate) fn render_list_parts(
             let control_width = list_metrics.move_control_width;
             let vertical_inset = list_metrics.trailing_control_vertical_inset;
             let control_height = (row_height - vertical_inset * 2.0).max(vertical_inset * 2.0);
-            let control_rect = vello::kurbo::Rect::new(
+            let control_rect = cherenkov::kurbo::Rect::new(
                 trailing_x - control_width,
                 row_rect.y0 + vertical_inset,
                 trailing_x,
@@ -1466,13 +1463,13 @@ pub(crate) fn render_list_parts(
                 control_rect,
                 &row_env,
             );
-            let up_rect = vello::kurbo::Rect::new(
+            let up_rect = cherenkov::kurbo::Rect::new(
                 control_rect.x0,
                 control_rect.y0,
                 control_rect.x1,
                 control_rect.y0 + control_rect.height() / 2.0,
             );
-            let down_rect = vello::kurbo::Rect::new(
+            let down_rect = cherenkov::kurbo::Rect::new(
                 control_rect.x0,
                 control_rect.y0 + control_rect.height() / 2.0,
                 control_rect.x1,
@@ -1550,7 +1547,7 @@ pub(crate) fn render_list_parts(
         }
 
         if editing && deletable && has_delete {
-            let delete_rect = vello::kurbo::Rect::new(
+            let delete_rect = cherenkov::kurbo::Rect::new(
                 trailing_x - list_metrics.delete_control_width,
                 row_rect.y0 + list_metrics.trailing_control_vertical_inset,
                 trailing_x,
@@ -1645,7 +1642,7 @@ pub(crate) fn render_list_parts(
         }
 
         {
-            let separator = vello::kurbo::Rect::new(
+            let separator = cherenkov::kurbo::Rect::new(
                 row_rect.x0 + list_metrics.divider_leading_inset,
                 row_rect.y1 - 1.0,
                 row_rect.x1 - list_metrics.divider_trailing_inset,
@@ -1735,7 +1732,7 @@ fn register_row_gesture(
     state: &Rc<RefCell<ListRenderState>>,
     group: usize,
     row_id: ListItemId,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     slot: RowGestureSlot,
     build: impl FnOnce() -> (Gesture, BoxedAction<()>),
 ) {
@@ -1771,7 +1768,7 @@ fn register_row_swipe_gesture(
     group: usize,
     row_id: ListItemId,
     binding: Rc<Cell<RowBinding>>,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     row_env: &Environment,
 ) {
     let owner = Rc::clone(state);
@@ -1839,7 +1836,7 @@ fn register_row_reorder_gesture(
     group: usize,
     row_id: ListItemId,
     binding: Rc<Cell<RowBinding>>,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     row_env: &Environment,
 ) {
     let owner = Rc::clone(state);
@@ -1972,7 +1969,7 @@ impl RowGestures {
 fn draw_section_label(
     ctx: &mut WidgetRenderContext<'_>,
     label: Text,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     is_header: bool,
     env: &Environment,
 ) {
@@ -2007,12 +2004,12 @@ fn section_chrome_text(label: Text, is_header: bool) -> Text {
 }
 
 fn list_content_rect(
-    row_rect: vello::kurbo::Rect,
+    row_rect: cherenkov::kurbo::Rect,
     metrics: waterui_backend_core::widget::ListMetrics,
     insets: Option<&waterui_layout::padding::EdgeInsets>,
     content_size: waterui_core::layout::Size,
     env: &Environment,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     // Rows propose their full inset width to the content; horizontal
     // alignment belongs to the content itself (composite items cannot be
     // statically classified as stretching, and interactive rows must keep a
@@ -2041,7 +2038,7 @@ fn list_content_rect(
     let available_height = (row_rect.height() - vertical_insets).max(0.0);
     let height = f64::from(content_size.height).min(available_height);
     let y0 = row_rect.y0 + (row_rect.height() - height) * 0.5;
-    vello::kurbo::Rect::new(x0, y0, x1, y0 + height)
+    cherenkov::kurbo::Rect::new(x0, y0, x1, y0 + height)
 }
 
 /// Emits a retained list's accessibility tree for the semantic walk — the same

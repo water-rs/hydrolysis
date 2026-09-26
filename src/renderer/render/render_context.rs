@@ -1,5 +1,4 @@
 use super::{HydrolysisRenderer, TailMark};
-use crate::engine::vello_backend::VelloDrawContext;
 use crate::renderer::HydroState;
 use crate::renderer::navigation::{
     NavigationCapturedScene, NavigationTransitionFrame, draw_navigation_transition,
@@ -13,9 +12,9 @@ use waterui_text::styled::StyledStr;
 /// Render context passed to handlers.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderContext {
-    pub transform: vello::kurbo::Affine,
-    pub hit_transform: vello::kurbo::Affine,
-    pub bounds: vello::kurbo::Rect,
+    pub transform: cherenkov::kurbo::Affine,
+    pub hit_transform: cherenkov::kurbo::Affine,
+    pub bounds: cherenkov::kurbo::Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,25 +31,71 @@ pub(crate) enum HydrolysisTextContextMenuMode {
 
 pub(crate) struct WidgetRenderContext<'a> {
     renderer: &'a mut HydrolysisRenderer,
-    pub transform: vello::kurbo::Affine,
-    pub hit_transform: vello::kurbo::Affine,
-    pub bounds: vello::kurbo::Rect,
+    pub transform: cherenkov::kurbo::Affine,
+    pub hit_transform: cherenkov::kurbo::Affine,
+    pub bounds: cherenkov::kurbo::Rect,
+}
+
+/// A theme recording that is appended to the frame scene when dropped.
+pub(crate) struct ThemeDraw<'a> {
+    recorder: cherenkov::Recorder,
+    scene: &'a mut crate::scene::Scene,
+    transform: cherenkov::kurbo::Affine,
+}
+
+impl<'a> ThemeDraw<'a> {
+    /// Records into `scene` under `transform` when dropped.
+    pub(crate) fn new(scene: &'a mut crate::scene::Scene, transform: cherenkov::kurbo::Affine) -> Self {
+        Self {
+            recorder: cherenkov::Recorder::new(),
+            scene,
+            transform,
+        }
+    }
+}
+
+impl core::ops::Deref for ThemeDraw<'_> {
+    type Target = cherenkov::Recorder;
+
+    fn deref(&self) -> &cherenkov::Recorder {
+        &self.recorder
+    }
+}
+
+impl core::ops::DerefMut for ThemeDraw<'_> {
+    fn deref_mut(&mut self) -> &mut cherenkov::Recorder {
+        &mut self.recorder
+    }
+}
+
+impl Drop for ThemeDraw<'_> {
+    fn drop(&mut self) {
+        let picture = core::mem::take(&mut self.recorder).finish().into_picture();
+        self.scene.draw_picture(self.transform, picture);
+    }
 }
 
 /// An explicit offer from a native widget-owned content region.
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn bounded_proposal(bounds: vello::kurbo::Rect) -> waterui_core::layout::ProposalSize {
+pub(crate) fn bounded_proposal(bounds: cherenkov::kurbo::Rect) -> waterui_core::layout::ProposalSize {
     waterui_core::layout::ProposalSize::new(
         Some(bounds.width() as f32),
         Some(bounds.height() as f32),
     )
 }
 
+impl HydrolysisRenderer {
+    /// Records theme drawing in `ctx`'s coordinate space into the frame scene.
+    pub(crate) fn draw_context(&mut self, ctx: RenderContext) -> ThemeDraw<'_> {
+        ThemeDraw::new(self.scene_mut(), ctx.transform)
+    }
+}
+
 impl RenderContext {
     pub(crate) fn with_transforms(
-        bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
-        hit_transform: vello::kurbo::Affine,
+        bounds: cherenkov::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
+        hit_transform: cherenkov::kurbo::Affine,
     ) -> Self {
         Self {
             transform,
@@ -60,7 +105,7 @@ impl RenderContext {
     }
 
     #[must_use]
-    pub fn child(&self, transform: vello::kurbo::Affine, bounds: vello::kurbo::Rect) -> Self {
+    pub fn child(&self, transform: cherenkov::kurbo::Affine, bounds: cherenkov::kurbo::Rect) -> Self {
         Self {
             transform: self.transform * transform,
             hit_transform: self.hit_transform * transform,
@@ -69,10 +114,10 @@ impl RenderContext {
     }
 
     #[must_use]
-    pub(crate) fn with_identity_transforms(&self, bounds: vello::kurbo::Rect) -> Self {
+    pub(crate) fn with_identity_transforms(&self, bounds: cherenkov::kurbo::Rect) -> Self {
         Self {
-            transform: vello::kurbo::Affine::IDENTITY,
-            hit_transform: vello::kurbo::Affine::IDENTITY,
+            transform: cherenkov::kurbo::Affine::IDENTITY,
+            hit_transform: cherenkov::kurbo::Affine::IDENTITY,
             bounds,
         }
     }
@@ -100,8 +145,8 @@ impl<'a> WidgetRenderContext<'a> {
 
     pub(crate) fn child(
         &self,
-        transform: vello::kurbo::Affine,
-        bounds: vello::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
+        bounds: cherenkov::kurbo::Rect,
     ) -> RenderContext {
         self.render_context().child(transform, bounds)
     }
@@ -110,15 +155,17 @@ impl<'a> WidgetRenderContext<'a> {
         self.renderer
     }
 
-    pub(crate) fn draw_context(&mut self) -> VelloDrawContext<'_> {
-        self.renderer.draw_context(self.render_context())
+    /// Records theme drawing in this context's coordinate space; the
+    /// recording lands in the frame scene when the guard drops.
+    pub(crate) fn draw_context(&mut self) -> ThemeDraw<'_> {
+        ThemeDraw::new(self.renderer.scene_mut(), self.transform)
     }
 
     pub(crate) fn state_mut(&mut self) -> &mut HydroState {
         &mut self.renderer.state
     }
 
-    pub(crate) fn push_layer_rect(&mut self, alpha: f32, clip: vello::kurbo::Rect) {
+    pub(crate) fn push_layer_rect(&mut self, alpha: f32, clip: cherenkov::kurbo::Rect) {
         self.renderer.push_layer_rect(alpha, self.transform, clip);
     }
 
@@ -131,7 +178,7 @@ impl<'a> WidgetRenderContext<'a> {
         styled: StyledStr,
         alignment: HorizontalAlignment,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: cherenkov::kurbo::Rect,
     ) {
         self.render_styled_text_limited(styled, alignment, env, bounds, None);
     }
@@ -141,12 +188,12 @@ impl<'a> WidgetRenderContext<'a> {
         styled: StyledStr,
         alignment: HorizontalAlignment,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: cherenkov::kurbo::Rect,
         max_lines: Option<usize>,
     ) {
         let child_ctx = self.child(
-            vello::kurbo::Affine::translate((bounds.x0, bounds.y0)),
-            vello::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
+            cherenkov::kurbo::Affine::translate((bounds.x0, bounds.y0)),
+            cherenkov::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
         );
         let renderer = self.renderer_mut();
         let (state, scene) = renderer.state_and_scene_mut();
@@ -165,11 +212,11 @@ impl<'a> WidgetRenderContext<'a> {
         &mut self,
         styled: StyledStr,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: cherenkov::kurbo::Rect,
     ) {
         let child_ctx = self.child(
-            vello::kurbo::Affine::translate((bounds.x0, bounds.y0)),
-            vello::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
+            cherenkov::kurbo::Affine::translate((bounds.x0, bounds.y0)),
+            cherenkov::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
         );
         let renderer = self.renderer_mut();
         let (state, scene) = renderer.state_and_scene_mut();
@@ -178,7 +225,7 @@ impl<'a> WidgetRenderContext<'a> {
         );
     }
 
-    pub(crate) fn append_scene(&mut self, scene: &vello::Scene) {
+    pub(crate) fn append_scene(&mut self, scene: &crate::scene::Scene) {
         self.renderer
             .scene_mut()
             .append(scene, Some(self.transform));

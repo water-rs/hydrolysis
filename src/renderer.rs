@@ -10,7 +10,6 @@
 //! - [`retained`]: retained scene — replayable draws, `Dynamic` placements,
 //!   reactive patching, scroll caches, window-frame capture/replay
 //! - [`signals`]: signal watching and animated-value sampling
-//! - [`effects`]: applied filters, view effects, embedded GPU surfaces
 //! - [`views`] / [`metadata`]: raw view and metadata handlers
 //! - [`bindings`]: hit-test/gesture/text-input/scroll bindings and queries
 //! - [`input`] / [`lifecycle`] / [`navigation`] / [`accessibility`] /
@@ -20,11 +19,7 @@
 #[cfg(feature = "accessibility")]
 mod accessibility;
 mod bindings;
-mod color;
-mod effects;
 mod frame;
-#[cfg(feature = "frame-profile")]
-mod gpu_profile;
 mod identity;
 mod input;
 mod interaction_layers;
@@ -34,25 +29,18 @@ mod native_measure;
 mod navigation;
 mod render;
 mod retained;
-mod scene_ingest;
 mod signals;
 #[cfg(test)]
 pub(crate) mod tests;
 mod tree;
 mod views;
 
-pub(crate) use effects::*;
 pub(crate) use frame::*;
 #[cfg(feature = "frame-profile")]
-pub(crate) use gpu_profile::GpuFrameProfiler;
-#[cfg(feature = "frame-profile")]
-pub use gpu_profile::{FrameStageTimes, GpuIdentity};
+pub use frame::FrameStageTimes;
 pub(crate) use identity::*;
 pub(crate) use native_measure::*;
 pub(crate) use retained::*;
-pub(crate) use scene_ingest::CheckedScene2D;
-#[cfg(test)]
-pub(crate) use scene_ingest::assert_well_formed_image;
 pub(crate) use tree::*;
 pub(crate) use views::*;
 pub(crate) use waterui_backend_core::frame_signals::FrameSignals;
@@ -60,21 +48,18 @@ pub(crate) use waterui_backend_core::frame_signals::FrameSignals;
 #[cfg(feature = "accessibility")]
 use accessibility::*;
 use core::f64::consts::TAU;
-use core::num::NonZeroUsize;
 use core::time::Duration;
 pub(crate) use input::*;
 pub(crate) use interaction_layers::*;
 pub(crate) use lifecycle::lazy;
 pub(crate) use lifecycle::*;
 pub(crate) use navigation::*;
-pub use render::HydrolysisRenderTarget;
 pub(crate) use render::WidgetRenderContext;
 pub(crate) use render::*;
 pub(crate) use render::{
     anchor_point, circle_arc_path, estimate_layout_intrinsic, gesture_group_identity,
-    normalize_layout_view, normalize_view_for_render, path_commands_to_path,
-    resolved_color_to_peniko, resolved_gradient_to_brush, resolved_morph_shape_to_path,
-    resolved_shape_to_path, transformed_rect,
+    normalize_layout_view, normalize_view_for_render, resolved_morph_shape_to_path,
+    resolved_shape_to_path, transformed_rect, unit_path_to_path,
 };
 use rustc_hash::FxHashSet;
 use std::borrow::Cow;
@@ -102,7 +87,7 @@ use waterui::accessibility::{
     AccessibilityChildren, AccessibilityHidden, AccessibilityIdentifier, AccessibilityLabel,
     AccessibilityRole, AccessibilityState, AccessibilityStateSignal,
 };
-use waterui::animation::Animation;
+use waterui::animation::{Animation, Curve};
 use waterui::background::{Background, MaterialBackground};
 use waterui::border::Border;
 use waterui::component::badge::BadgeConfig;
@@ -153,19 +138,9 @@ use waterui_form::picker::PickerConfig;
 use waterui_form::picker::color::ColorPickerConfig;
 use waterui_form::picker::date::DatePickerConfig;
 use waterui_form::secure::{Secure as FormSecure, SecureFieldConfig};
-use waterui_graphics::color::{Color, ResolvedColor};
+use waterui_graphics::color::{Color, WorkingColor};
 
-use shaderloom::WgslModuleCache;
-use waterui_graphics::filter_view::{EffectContext, EffectInput, EffectOutput};
-use waterui_graphics::gpu_surface::GestureState;
-use waterui_graphics::view_effect::{
-    ViewEffectContext, ViewEffectErased, ViewEffectInput, ViewEffectOutput,
-};
-use waterui_graphics::{
-    AppliedFilter, GpuContext, GpuFrame, GpuSurface, GradientType, PointerState, RedrawHandle,
-    ResolvedGradient, ResolvedGradientStop, SceneEngine, SceneView, SharedSceneRenderer,
-    VelloScene2D,
-};
+use waterui_graphics::{FilteredView, Gradient, GpuContentView, SceneView, ShaderPaintView};
 
 use waterui_icon::SystemIcon;
 use waterui_layout::container::{FixedContainer, LazyContainer};
@@ -175,7 +150,7 @@ use waterui_layout::scroll::Axis as ScrollAxis;
 use waterui_layout::scroll::ScrollView;
 use waterui_layout::spacer::Spacer;
 use waterui_map::MapConfig;
-use waterui_shape::{ClipShape, PathCommand, ResolvedMorphShape, ResolvedShape, ShapeKind};
+use waterui_shape::{ClipShape, ResolvedMorphShape, ResolvedShape, ShapeKind};
 use waterui_text::font::FontWeight as TextFontWeight;
 use waterui_text::styled::{Style as TextStyle, StyledStr};
 use waterui_text::{Text, TextConfig};
@@ -184,7 +159,6 @@ use waterui_webview::WebView;
 use crate::animation::{AnimatedScalarHandle, AnimationController, AnimationKey};
 use crate::engine::{
     RadioIndicatorState, RadioSelectionMotion, TextCaretMotion, TextContextMenuMetrics,
-    vello_backend::VelloDrawContext,
 };
 use crate::gesture::GestureEngine;
 use crate::platform::{
@@ -250,20 +224,6 @@ pub struct SemanticCore {
     lifecycle: LifecycleState,
     animation_controller: AnimationController,
     frame_instant: Instant,
-    /// Retained render-tree GPU surfaces (`GpuSurfaceNode`-owned runtimes),
-    /// registered at node build time. Polled by
-    /// [`HydrolysisRenderer::poll_gpu_surface_redraw_handles`] for off-thread
-    /// redraw requests; dead entries (node dropped on a Dynamic swap) are pruned
-    /// by strong count.
-    node_gpu_surfaces: Vec<Rc<RefCell<EmbeddedGpuSurfaceRuntime>>>,
-    /// Retained render-tree view effects, registered for exact async setup when
-    /// Hydrolysis itself is hosted inside a `GpuSurface`.
-    node_view_effects: Vec<Weak<RefCell<ViewEffectRuntime>>>,
-    /// Retained render-tree applied filters (`AppliedFilterNode`-owned runtimes),
-    /// registered at node build time. Refreshed by
-    /// [`HydrolysisRenderer::refresh_active_applied_filters`] on redraw-only
-    /// frames; dead entries are pruned by strong count.
-    node_applied_filters: Vec<Rc<RefCell<AppliedFilterRuntime>>>,
     pub(crate) lazy: LazyState,
     pub(crate) navigation: NavigationState,
     #[cfg(feature = "accessibility")]
@@ -292,62 +252,58 @@ pub struct SemanticCore {
     semantic_walk: bool,
 }
 
-/// Core hydrolysis renderer state: a [`SemanticCore`] plus the GPU-side scene,
-/// compositor and surface state the layout/encode pass needs.
+/// Core hydrolysis renderer state: a [`SemanticCore`] plus the Cherenkov
+/// engine, the frame's scene recording and the surface state the
+/// layout/encode pass needs.
 pub struct HydrolysisRenderer {
     core: SemanticCore,
     /// The widget theme the runtime's style supplies to layout and encode.
     /// Never installed into the environment: build and patch cannot reach it.
     theme: Rc<dyn crate::engine::WidgetTheme>,
-    vello_renderer: vello::Renderer,
-    scene: vello::Scene,
-    transient_scene: Option<vello::Scene>,
-    compositor: Compositor,
-    window_bounds: vello::kurbo::Rect,
+    /// The engine every surface this renderer draws on was created from; owns
+    /// the device and the fonts and images the frames name.
+    engine: Rc<cherenkov::Engine<cherenkov_gpu::Gpu>>,
+    /// Engine font handles by parley font identity.
+    scene: crate::scene::Scene,
+    transient_scene: Option<crate::scene::Scene>,
+    /// The clip layers open in `scene`, outermost first.
+    active_scene_layers: Vec<ActiveSceneLayer>,
+    /// Whole-scene pictures recorded this frame and not yet shown: one per
+    /// `flush_scene_layer`, in order.
+    frame_pictures: Vec<cherenkov::Picture>,
+    /// Whether the scene was re-recorded since the last presented frame; a
+    /// redraw without one keeps the root layer's retained picture.
+    frame_recorded: bool,
+    /// The layer above the scene that shows the per-frame text-input overlay
+    /// (caret and selection), created on the first frame that needs it.
+    overlay_layer: Option<cherenkov::Layer>,
+    /// How many segments the last taken frame picture was assembled from.
+    frame_picture_count: u32,
+    window_bounds: cherenkov::kurbo::Rect,
     /// The transform the window's root content is flushed under: logical layout
-    /// units onto the target's physical pixel grid. Stored alongside
-    /// [`Self::window_bounds`] because the pair is what says where the viewport
-    /// is in device pixels, which is what
-    /// [`HydrolysisRenderer::push_gpu_surface_layer`] tests a full-window GPU
-    /// surface against.
-    window_root_transform: vello::kurbo::Affine,
-    /// Wake target supplied when this renderer itself is hosted by a
-    /// `GpuSurface`. Async setup and renderer-owned redraws from nested surfaces
-    /// use it to wake the parent host without polling frames.
-    host_redraw_handle: Option<RedrawHandle>,
-    /// Module cache for shaders that embedded GPU surfaces, view effects and
-    /// filters assemble at runtime. Shared so identical WGSL compiles once.
-    shader_cache: Arc<WgslModuleCache>,
-    /// The scene renderer embedded GPU surfaces share, for the same reason: its
-    /// pipelines belong to the device rather than to any one scene.
-    scene_renderer: Arc<SharedSceneRenderer>,
+    /// units onto the target's physical pixel grid.
+    window_root_transform: cherenkov::kurbo::Affine,
     frame_clip_layers: u32,
     frame_max_clip_depth: u32,
-    /// Whether this frame's window pass was handed straight to a GPU surface
-    /// instead of being composited. Recorded by
-    /// [`HydrolysisRenderer::render_scene_to_surface`] as it decides, so the
-    /// frame report says what happened rather than what was eligible.
-    frame_direct_gpu_surfaces: u32,
-    frame_applied_filter_count: u32,
-    frame_applied_filter_capture: Duration,
-    frame_applied_filter_effect: Duration,
-    /// The per-frame atlas every filtered subtree is captured through.
-    subtree_captures: SubtreeCaptures,
     navigation_captures: Vec<NavigationSceneCapture>,
-    /// CPU stage times accumulated by `flush_window_tree`, plus the GPU spans
-    /// the render pass resolves; drained per pump by `take_frame_stage_times`.
+    /// CPU stage times accumulated by `flush_window_tree`, plus the GPU span
+    /// the engine reports; drained per pump by `take_frame_stage_times`.
     /// `pub(crate)` so the runner's readback timing can add its stage in.
     #[cfg(feature = "frame-profile")]
     pub(crate) frame_stage_times: FrameStageTimes,
-    /// Timestamp-query state for the frame's GPU spans; `None` when the device
-    /// lacks `TIMESTAMP_QUERY` — GPU stages then report absent, never a guess.
-    #[cfg(feature = "frame-profile")]
-    gpu_profiler: Option<GpuFrameProfiler>,
     /// Digest of the last layout pass's placed bounds; the frame-profile
     /// example compares it across runs to prove a change left layout output
     /// byte-identical.
     #[cfg(feature = "frame-profile")]
     last_layout_signature: Option<u64>,
+}
+
+impl HydrolysisRenderer {
+    /// The engine's resource minter, for content that records fonts, images
+    /// and shaders against the engine this renderer draws with.
+    pub(crate) fn engine_resources(&self) -> Rc<cherenkov::Engine<cherenkov_gpu::Gpu>> {
+        Rc::clone(&self.engine)
+    }
 }
 
 impl core::ops::Deref for HydrolysisRenderer {
@@ -370,9 +326,9 @@ const TEXT_SELECTION_MULTI_CLICK_DISTANCE: f64 = 6.0;
 const TEXT_CONTEXT_MENU_WINDOW_TITLE: &str = "";
 
 impl SemanticCore {
-    pub(crate) fn new(frame_instant: Instant) -> Self {
+    pub(crate) fn new(frame_instant: Instant, engine: Option<Rc<crate::platform::Engine>>) -> Self {
         Self {
-            state: HydroState::default(),
+            state: HydroState::new(engine),
             hit_test: HitTestState::default(),
             gesture_engine: GestureEngine::default(),
             gesture_group_ids: BTreeMap::new(),
@@ -385,9 +341,6 @@ impl SemanticCore {
             lifecycle: LifecycleState::default(),
             animation_controller: AnimationController::default(),
             frame_instant,
-            node_gpu_surfaces: Vec::new(),
-            node_view_effects: Vec::new(),
-            node_applied_filters: Vec::new(),
             lazy: LazyState::default(),
             navigation: NavigationState::default(),
             #[cfg(feature = "accessibility")]
@@ -437,91 +390,41 @@ impl SemanticCore {
     }
 }
 
-/// Pipeline-init thread count for a `vello::Renderer` on `backend`.
-///
-/// wgpu-hal's GLES device serialises every shader compile through one context
-/// lock with a ~1 s timeout, so handing Vello a parallel init pool on GL
-/// deadlocks under CPU load — a worker times out, panics, and poisons the
-/// renderer pool. GL therefore gets a single init thread; Vulkan, Metal and
-/// DX12 compile pipelines concurrently and keep full parallelism.
-pub(crate) fn vello_init_threads(backend: wgpu::Backend) -> Option<NonZeroUsize> {
-    match backend {
-        wgpu::Backend::Gl => Some(NonZeroUsize::MIN),
-        _ => std::thread::available_parallelism().ok(),
-    }
-}
-
 impl HydrolysisRenderer {
-    /// A renderer for `device`, which `adapter` produced, drawing with `theme`.
-    ///
-    /// The adapter is not a formality: the scene renderer that embedded GPU
-    /// surfaces share is built for the engine `adapter` can actually run, and
-    /// an adapter without indirect execution aborts inside wgpu rather than
-    /// degrading when asked to run the classic compute pipeline.
+    /// A renderer drawing on surfaces of `engine` with `theme`.
     #[must_use]
     pub fn new(
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
+        engine: Rc<cherenkov::Engine<cherenkov_gpu::Gpu>>,
         theme: Rc<dyn crate::engine::WidgetTheme>,
     ) -> Self {
-        Self::new_with_options(
-            adapter,
-            device,
-            theme,
-            vello::RendererOptions {
-                use_cpu: false,
-                antialiasing_support: vello::AaSupport::area_only(),
-                num_init_threads: vello_init_threads(adapter.get_info().backend),
-                pipeline_cache: None,
-            },
-        )
-    }
-
-    /// As [`Self::new`], with the window renderer's Vello options spelled out.
-    #[must_use]
-    #[cfg_attr(
-        target_arch = "wasm32",
-        expect(
-            clippy::arc_with_non_send_sync,
-            reason = "`SharedSceneRenderer` and `WgslModuleCache` own wgpu handles, which the WebGPU backend makes neither `Send` nor `Sync` because they are JS objects. The renderer is shared by reference count on every target and is `Send + Sync` on all of them but this one, so the storage type is `Arc` everywhere rather than `Rc` here and `Arc` elsewhere."
-        )
-    )]
-    pub fn new_with_options(
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        theme: Rc<dyn crate::engine::WidgetTheme>,
-        options: vello::RendererOptions,
-    ) -> Self {
-        let vello_renderer =
-            vello::Renderer::new(device, options).expect("failed to create hydrolysis renderer");
         let frame_instant = Instant::now();
         Self {
-            core: SemanticCore::new(frame_instant),
+            core: SemanticCore::new(frame_instant, Some(Rc::clone(&engine))),
             theme,
-            vello_renderer,
-            scene: vello::Scene::new(),
+            engine,
+            scene: crate::scene::Scene::new(),
             transient_scene: None,
-            compositor: Compositor::default(),
-            window_bounds: vello::kurbo::Rect::ZERO,
-            window_root_transform: vello::kurbo::Affine::IDENTITY,
-            host_redraw_handle: None,
-            shader_cache: Arc::new(WgslModuleCache::new()),
-            scene_renderer: Arc::new(SharedSceneRenderer::new(SceneEngine::for_adapter(adapter))),
+            active_scene_layers: Vec::new(),
+            frame_pictures: Vec::new(),
+            frame_recorded: false,
+            overlay_layer: None,
+            frame_picture_count: 0,
+            window_bounds: cherenkov::kurbo::Rect::ZERO,
+            window_root_transform: cherenkov::kurbo::Affine::IDENTITY,
             frame_clip_layers: 0,
             frame_max_clip_depth: 0,
-            frame_direct_gpu_surfaces: 0,
-            frame_applied_filter_count: 0,
-            frame_applied_filter_capture: Duration::ZERO,
-            frame_applied_filter_effect: Duration::ZERO,
-            subtree_captures: SubtreeCaptures::default(),
             navigation_captures: Vec::new(),
             #[cfg(feature = "frame-profile")]
             frame_stage_times: FrameStageTimes::default(),
             #[cfg(feature = "frame-profile")]
-            gpu_profiler: GpuFrameProfiler::new(device),
-            #[cfg(feature = "frame-profile")]
             last_layout_signature: None,
         }
+    }
+
+    /// The engine this renderer's surfaces belong to.
+    #[must_use]
+    pub fn engine(&self) -> &Rc<cherenkov::Engine<cherenkov_gpu::Gpu>> {
+        &self.engine
     }
 
     /// The widget theme layout and encode draw with. Returned as a cloned
@@ -553,4 +456,5 @@ impl HydrolysisRenderer {
 pub use render::HydroState;
 use render::HydroSubview;
 pub use render::RenderContext;
+pub(crate) use render::ThemeDraw;
 pub(crate) use render::{HydrolysisTextContextMenuMode, HydrolysisWindowOrigin};

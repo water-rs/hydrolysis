@@ -45,7 +45,7 @@ impl_widget_behavior!(
     ; a11y: crate::widgets::nav::tabs::emit_tabs_accessibility
 );
 impl_widget_behavior!(
-    ResolvedGradient,
+    Gradient,
     crate::renderer::render_gradient_node,
     crate::renderer::measure_gradient_node
     ; a11y: crate::renderer::views::emit_graphics_leaf_accessibility
@@ -61,12 +61,6 @@ impl_widget_behavior!(
     crate::renderer::render_morph_shape_node,
     crate::renderer::measure_morph_shape_node
     ; a11y: crate::renderer::views::emit_graphics_leaf_accessibility
-);
-#[cfg(hydrolysis_macos_system_webview)]
-impl_widget_behavior!(
-    crate::widgets::platform::webview::WebViewRenderState,
-    crate::widgets::platform::webview::render_webview_node,
-    crate::widgets::platform::webview::measure_webview_node
 );
 impl_widget_behavior!(
     Spacer,
@@ -200,7 +194,7 @@ impl RenderNode {
     /// behind an `Rc<RefCell<…>>` and re-fill it every flush at the current bounds.
     /// The payload carries no signal, so nothing is watched; the gradient stretches
     /// to fill the proposal (`StretchAxis::Both`, read from the payload).
-    pub(super) fn build_gradient(gradient: ResolvedGradient, env: &Environment) -> RenderNode {
+    pub(super) fn build_gradient(gradient: Gradient, env: &Environment) -> RenderNode {
         let stretch = waterui_core::NativeView::stretch_axis(&gradient);
         let gradient = Rc::new(RefCell::new(gradient));
         Self::build_widget(gradient, stretch, env)
@@ -228,26 +222,8 @@ impl RenderNode {
         Self::build_widget(shape, stretch, env)
     }
 
-    /// Build a persistent webview node for the platform bridge: retain the
-    /// semantic `WebView` and its `MacSystemWebViewHandle` so the AppKit view
-    /// host keeps drawing it across flushes. Stretches to fill the proposal.
-    #[cfg(hydrolysis_macos_system_webview)]
-    pub(super) fn build_webview(
-        webview: WebView,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        use crate::widgets::platform::webview::WebViewRenderState;
-        let stretch = waterui_core::View::stretch_axis(&webview);
-        let mut state = WebViewRenderState::from_view(webview, env);
-        state.prebuild(renderer, env);
-        let state = Rc::new(RefCell::new(state));
-        Self::build_widget(state, stretch, env)
-    }
-
     /// Without the platform bridge a `WebView` reaching the backend has no
     /// engine to draw it — a missing realization, not a drawable stand-in.
-    #[cfg(not(hydrolysis_macos_system_webview))]
     pub(super) fn build_webview(
         _webview: WebView,
         _env: &Environment,

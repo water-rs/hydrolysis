@@ -13,12 +13,12 @@
 
 use waterui::{
     Environment, Plugin,
-    color::{ResolvedColor, Srgb},
+    color::Srgb,
     theme::{ColorScheme, ColorSettings, FontSettings, Theme},
 };
 
-fn color(rgb: u32) -> ResolvedColor {
-    ResolvedColor::from_srgb(Srgb::from_u32(rgb))
+fn color(rgb: u32) -> cherenkov::WorkingColor {
+    Srgb::from_u32(rgb).resolve()
 }
 
 /// Assembles the runtime environment's theme tokens in precedence order:

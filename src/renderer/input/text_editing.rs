@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine::DrawContext;
+use cherenkov::Draw as _;
 use unicode_segmentation::UnicodeSegmentation;
 use waterui_controls::button::button;
 
@@ -118,7 +118,7 @@ pub(crate) struct TextSelectionSlot {
 #[derive(Debug, Clone)]
 pub(crate) struct TextSelectionClickState {
     pub(crate) target: InteractionKey,
-    pub(crate) point: vello::kurbo::Point,
+    pub(crate) point: cherenkov::kurbo::Point,
     pub(crate) at: Instant,
     pub(crate) count: u8,
 }
@@ -143,10 +143,10 @@ pub(crate) struct ActiveTextSelectionDrag {
 pub(crate) struct TextInputTarget {
     pub(crate) interaction_key: InteractionKey,
     pub(crate) modal: bool,
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) cursor_area: vello::kurbo::Rect,
-    pub(crate) text_bounds: vello::kurbo::Rect,
-    pub(crate) text_clip_bounds: vello::kurbo::Rect,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
+    pub(crate) cursor_area: cherenkov::kurbo::Rect,
+    pub(crate) text_bounds: cherenkov::kurbo::Rect,
+    pub(crate) text_clip_bounds: cherenkov::kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
     pub(crate) purpose: TextInputPurpose,
@@ -165,10 +165,10 @@ pub(crate) struct TextInputTarget {
 pub(crate) struct TextInputTargetRegistration {
     pub(crate) interaction_key: InteractionKey,
     pub(crate) modal: bool,
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) cursor_area: vello::kurbo::Rect,
-    pub(crate) text_bounds: vello::kurbo::Rect,
-    pub(crate) text_clip_bounds: vello::kurbo::Rect,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
+    pub(crate) cursor_area: cherenkov::kurbo::Rect,
+    pub(crate) text_bounds: cherenkov::kurbo::Rect,
+    pub(crate) text_clip_bounds: cherenkov::kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
     pub(crate) purpose: TextInputPurpose,
@@ -211,13 +211,13 @@ pub(crate) enum TextContextMenuEntry {
 
 #[derive(Clone)]
 pub(crate) struct TextContextMenuOverlayRow {
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
     pub(crate) entry: TextContextMenuEntry,
 }
 
 #[derive(Clone)]
 pub(crate) struct TextContextMenuOverlay {
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
     pub(crate) rows: Vec<TextContextMenuOverlayRow>,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
@@ -691,11 +691,11 @@ pub(crate) fn text_context_menu_size(
 }
 
 pub(crate) fn text_context_menu_overlay_bounds(
-    anchor: vello::kurbo::Point,
+    anchor: cherenkov::kurbo::Point,
     entries: &[TextContextMenuEntry],
-    window_bounds: vello::kurbo::Rect,
+    window_bounds: cherenkov::kurbo::Rect,
     metrics: TextContextMenuMetrics,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     let (width, height) = text_context_menu_size(entries, metrics);
     let preferred_x = anchor.x;
     let preferred_y = anchor.y;
@@ -725,7 +725,7 @@ pub(crate) fn text_context_menu_overlay_bounds(
     if y0 + height > window_bounds.y1 {
         y0 = window_bounds.y1 - height;
     }
-    vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
+    cherenkov::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
 }
 
 pub(crate) fn execute_text_context_menu_action(
@@ -843,14 +843,14 @@ impl HydrolysisRenderer {
     pub(crate) fn prepare_transient_text_input_overlay(
         &mut self,
         _env: &Environment,
-        transform: vello::kurbo::Affine,
+        transform: cherenkov::kurbo::Affine,
     ) {
         let focused = self.text_editing.focused_index();
         let menu_target = self.active_text_context_menu_target();
-        let mut scene = vello::Scene::new();
+        let mut scene = crate::scene::Scene::new();
         let theme = self.theme();
         {
-            let mut draw = VelloDrawContext::with_root_transform(&mut scene, transform);
+            let mut draw = crate::renderer::ThemeDraw::new(&mut scene, transform);
             for (index, target) in self.text_editing.text_input_targets.iter().enumerate() {
                 if target.content_alpha <= 0.0 {
                     continue;
@@ -860,30 +860,44 @@ impl HydrolysisRenderer {
                     continue;
                 }
                 let selection = refreshed_target_selection(target);
-                draw.push_layer(target.content_alpha, Some(&target.text_clip_bounds));
-                if selection.is_collapsed() {
-                    if focused == Some(index) {
-                        let caret_opacity = self.text_caret_opacity(self.frame_instant());
-                        if caret_opacity > 0.0 {
-                            draw.fill_rect(
-                                target.cursor_area,
-                                &theme.input_caret_brush(caret_opacity),
-                            );
-                        }
-                    }
+                let caret = if selection.is_collapsed() {
+                    let caret_opacity = if focused == Some(index) {
+                        self.text_caret_opacity(self.frame_instant())
+                    } else {
+                        0.0
+                    };
+                    (caret_opacity > 0.0).then(|| theme.input_caret_brush(caret_opacity))
                 } else {
-                    let selection_brush = theme.input_selection_brush();
-                    for (rect, _) in selection.geometry(&target.layout) {
-                        let highlight = vello::kurbo::Rect::new(
-                            target.text_bounds.x0 + rect.x0,
-                            target.text_bounds.y0 + rect.y0,
-                            target.text_bounds.x0 + rect.x1,
-                            target.text_bounds.y0 + rect.y1,
-                        );
-                        draw.fill_rect(highlight, &selection_brush);
-                    }
-                }
-                draw.pop_layer();
+                    None
+                };
+                let highlights: Vec<cherenkov::kurbo::Rect> = if selection.is_collapsed() {
+                    Vec::new()
+                } else {
+                    selection
+                        .geometry(&target.layout)
+                        .into_iter()
+                        .map(|(rect, _)| {
+                            cherenkov::kurbo::Rect::new(
+                                target.text_bounds.x0 + rect.x0,
+                                target.text_bounds.y0 + rect.y0,
+                                target.text_bounds.x0 + rect.x1,
+                                target.text_bounds.y0 + rect.y1,
+                            )
+                        })
+                        .collect()
+                };
+                let selection_brush = theme.input_selection_brush();
+                let group = cherenkov::Group::new().opacity(target.content_alpha);
+                draw.group(group, |draw| {
+                    draw.clip(target.text_clip_bounds, |draw| {
+                        if let Some(caret) = caret {
+                            draw.fill(target.cursor_area, caret);
+                        }
+                        for highlight in highlights {
+                            draw.fill(highlight, selection_brush.clone());
+                        }
+                    });
+                });
             }
         }
         self.transient_scene = Some(scene);
@@ -1137,7 +1151,7 @@ impl HydrolysisRenderer {
     pub(crate) fn render_active_text_context_menu_overlay(
         &mut self,
         env: &Environment,
-        transform: vello::kurbo::Affine,
+        transform: cherenkov::kurbo::Affine,
     ) {
         let Some(ActiveTextContextMenu::Overlay { overlay, .. }) =
             self.text_editing.active_text_context_menu.clone()
@@ -1148,7 +1162,7 @@ impl HydrolysisRenderer {
         let theme = self.theme();
         let metrics = theme.text_context_menu_metrics();
         {
-            let mut draw = VelloDrawContext::with_root_transform(&mut self.scene, transform);
+            let mut draw = crate::renderer::ThemeDraw::new(&mut self.scene, transform);
             theme.draw_text_context_menu_panel(&mut draw, overlay.bounds);
         }
         for (index, row) in overlay.rows.iter().enumerate() {
@@ -1161,13 +1175,13 @@ impl HydrolysisRenderer {
                 && !matches!(row.entry, TextContextMenuEntry::Divider)
                 && !next_is_divider
             {
-                let separator = vello::kurbo::Rect::new(
+                let separator = cherenkov::kurbo::Rect::new(
                     row.bounds.x0 + metrics.separator_horizontal_inset,
                     row.bounds.y1 - metrics.separator_thickness,
                     row.bounds.x1 - metrics.separator_horizontal_inset,
                     row.bounds.y1,
                 );
-                let mut draw = VelloDrawContext::with_root_transform(&mut self.scene, transform);
+                let mut draw = crate::renderer::ThemeDraw::new(&mut self.scene, transform);
                 theme.draw_text_context_menu_separator(&mut draw, separator);
             }
 
@@ -1180,12 +1194,12 @@ impl HydrolysisRenderer {
                     );
                     let ctx = RenderContext {
                         transform,
-                        hit_transform: vello::kurbo::Affine::IDENTITY,
+                        hit_transform: cherenkov::kurbo::Affine::IDENTITY,
                         bounds: overlay.bounds,
                     }
                     .child(
-                        vello::kurbo::Affine::translate((text_rect.x0, text_rect.y0)),
-                        vello::kurbo::Rect::new(0.0, 0.0, text_rect.width(), text_rect.height()),
+                        cherenkov::kurbo::Affine::translate((text_rect.x0, text_rect.y0)),
+                        cherenkov::kurbo::Rect::new(0.0, 0.0, text_rect.width(), text_rect.height()),
                     );
                     let (state, scene) = self.state_and_scene_mut();
                     Self::render_styled_text(
@@ -1198,7 +1212,7 @@ impl HydrolysisRenderer {
                     );
                 }
                 TextContextMenuEntry::Divider => {
-                    let separator = vello::kurbo::Rect::new(
+                    let separator = cherenkov::kurbo::Rect::new(
                         row.bounds.x0 + metrics.separator_horizontal_inset,
                         row.bounds.y0 + row.bounds.height() * 0.5
                             - metrics.separator_thickness * 0.5,
@@ -1208,7 +1222,7 @@ impl HydrolysisRenderer {
                             + metrics.separator_thickness * 0.5,
                     );
                     let mut draw =
-                        VelloDrawContext::with_root_transform(&mut self.scene, transform);
+                        crate::renderer::ThemeDraw::new(&mut self.scene, transform);
                     theme.draw_text_context_menu_separator(&mut draw, separator);
                 }
             }
@@ -1219,7 +1233,7 @@ impl HydrolysisRenderer {
 impl SemanticCore {
     pub(crate) fn handle_text_context_menu_overlay_pointer_down(
         &mut self,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
     ) -> bool {
         let Some(ActiveTextContextMenu::Overlay { overlay, .. }) =
             self.text_editing.active_text_context_menu.clone()
@@ -1266,7 +1280,7 @@ impl SemanticCore {
 
     pub(crate) fn text_selection_index_from_point(
         target: &TextInputTarget,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
     ) -> usize {
         let local_x = (point.x - target.text_bounds.x0) as f32;
         let local_y = (point.y - target.text_bounds.y0) as f32;
@@ -1279,7 +1293,7 @@ impl SemanticCore {
 
     pub(crate) fn text_selection_range_from_point_with_click_count(
         target: &TextInputTarget,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         click_count: u8,
     ) -> (usize, usize) {
         let local_x = (point.x - target.text_bounds.x0) as f32;
@@ -1307,7 +1321,7 @@ impl SemanticCore {
     pub(crate) fn next_text_selection_click_count(
         &mut self,
         target_index: usize,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         at: Instant,
     ) -> u8 {
         let target = self
@@ -1342,7 +1356,7 @@ impl SemanticCore {
     pub(crate) fn apply_text_selection_click_gesture(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         click_count: u8,
     ) -> Option<(usize, usize, bool)> {
         let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
@@ -1369,7 +1383,7 @@ impl SemanticCore {
     pub(crate) fn update_text_selection_drag(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
     ) -> bool {
         let Some(drag) = self.text_editing.active_text_selection_drag.clone() else {
             return false;
@@ -1419,7 +1433,7 @@ impl SemanticCore {
     pub(crate) fn update_text_selection_from_pointer(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         extend: bool,
     ) -> bool {
         let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
@@ -1605,7 +1619,7 @@ impl HydrolysisRenderer {
     pub(crate) fn show_text_context_menu(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: cherenkov::kurbo::Point,
         env: &Environment,
     ) -> bool {
         let Some(target) = self
@@ -1642,7 +1656,7 @@ impl HydrolysisRenderer {
             for (index, entry) in entries.into_iter().enumerate() {
                 let y0 = bounds.y0 + metrics.row_height * index as f64;
                 let row_bounds =
-                    vello::kurbo::Rect::new(bounds.x0, y0, bounds.x1, y0 + metrics.row_height);
+                    cherenkov::kurbo::Rect::new(bounds.x0, y0, bounds.x1, y0 + metrics.row_height);
                 rows.push(TextContextMenuOverlayRow {
                     bounds: row_bounds,
                     entry,

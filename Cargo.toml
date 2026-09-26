@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/water-rs/hydrolysis"
 description = "GPU-required self-drawn backend for WaterUI"
-keywords = ["ui", "graphics", "gpu", "waterui", "vello"]
+keywords = ["ui", "graphics", "gpu", "waterui", "cherenkov"]
 categories = ["gui", "graphics"]
 
 [dependencies]
@@ -24,7 +24,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nami = "=0.11.1"
 waterui-graphics = { version = "0.5.0", default-features = false, features = ["gpu"] }
-shaderloom = "0.1.2"
 # `font-collection` for the one `parley` collection this runner builds and
 # installs into the environment; the faces come from the resource loader and
 # the system source `parley/system` provides, so `system-fonts` is not needed.
@@ -39,7 +38,8 @@ waterui-form = "0.5.0"
 waterui-backend-core = { version = "0.5.0", default-features = false, features = ["widgets", "gestures"] }
 waterkit-clipboard = "0.1.1"
 waterui-locale = "0.5.0"
-vello = "0.9"
+cherenkov = { git = "https://github.com/water-rs/cherenkov", rev = "ef46abff2e13514ce407d917af8dfb7facede174" }
+cherenkov-gpu = { git = "https://github.com/water-rs/cherenkov", rev = "ef46abff2e13514ce407d917af8dfb7facede174" }
 # `complex-scripts` ships the ICU4X segmentation dictionaries (CJ plus the
 # Southeast-Asian scripts) inside the one parley build: this runner owns the
 # `LayoutContext`, and without them its word segmenter logs `No segmentation
@@ -66,7 +66,6 @@ accesskit_winit = { version = "0.34.0", optional = true }
 
 [build-dependencies]
 cfg_aliases = "0.2.2"
-shaderloom = { version = "0.1.2", features = ["build"] }
 
 # Termination signals for the windowed desktop runner. No windowing system
 # delivers SIGINT/SIGTERM/SIGHUP (or the Windows console close events) to winit,
@@ -79,9 +78,6 @@ ctrlc = { version = "3.5", features = ["termination"], optional = true }
 # platform/macos_display_link.rs). All of these are already in winit's own
 # dependency graph.
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = { version = "0.6", optional = true }
-cookie = { version = "0.18", optional = true }
-futures = { version = "0.3", default-features = false, features = ["std", "async-await"], optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, features = [
     "NSAnimation",
@@ -115,31 +111,6 @@ objc2-quartz-core = { version = "0.3", optional = true, features = [
     "CAShapeLayer",
     "objc2-core-graphics",
 ] }
-objc2-web-kit = { version = "0.3.2", optional = true, default-features = false, features = [
-    "std",
-    "block2",
-    "objc2-app-kit",
-    "objc2-core-foundation",
-    "WKBackForwardList",
-    "WKContentWorld",
-    "WKFrameInfo",
-    "WKSecurityOrigin",
-    "WKHTTPCookieStore",
-    "WKNavigation",
-    "WKNavigationAction",
-    "WKNavigationDelegate",
-    "WKNavigationResponse",
-    "WKScriptMessage",
-    "WKScriptMessageHandler",
-    "WKURLSchemeHandler",
-    "WKURLSchemeTask",
-    "WKUserContentController",
-    "WKUserScript",
-    "WKWebView",
-    "WKWebViewConfiguration",
-    "WKWebsiteDataStore",
-] }
-serde_json = { version = "1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The web runner fetches its fonts while the GPU device comes up; `join!` and
@@ -195,7 +166,7 @@ serde_json = "1"
 toml = "1.1"
 jiff = { version = "0.2", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-waterui = { version = "0.5.0", default-features = false, features = ["flow-markdown", "gpu", "snackbar", "video-gpu"] }
+waterui = { version = "0.5.0", default-features = false, features = ["flow-markdown", "gpu", "snackbar"] }
 base64 = "0.22"
 executor-core = { version = "0.7.1", features = ["std", "async-executor"] }
 tiny_http = "0.12"
@@ -210,13 +181,6 @@ tracing-log = "0.2"
 # the real pipeline.
 waterui-icons-lucide = "0.5.1"
 waterui-chart = "0.3.0"
-
-# `WKWebView` is `MainThreadOnly` and libtest runs tests on worker threads, so
-# the macOS real-engine suite owns its `main` and pumps the main run loop.
-[[test]]
-name = "real_engine_macos"
-harness = false
-required-features = ["webview-system", "winit"]
 
 # The headless frame-pipeline profiler: representative scenes rendered
 # offscreen through the real pipeline, one JSON document per scene.
@@ -234,15 +198,6 @@ testing = []
 # exercise a software adapter for bring-up on a host without a GPU.
 frame-profile = ["testing"]
 inspector-signals = ["waterui/inspector-signals"]
-# The platform's own web engine, bridged as a native subview. Every other engine
-# is a crate the application links and installs; this backend never names one.
-webview-system = [
-    "dep:block2",
-    "dep:cookie",
-    "dep:futures",
-    "dep:objc2-web-kit",
-    "dep:serde_json",
-]
 winit = [
     "accessibility",
     "dep:winit",
@@ -264,18 +219,13 @@ web = [
 ]
 
 [package.metadata.cargo-machete]
-ignored = ["cfg_aliases", "shaderloom"]
+ignored = ["cfg_aliases"]
 
 # Third-party forks the framework itself patches; a registry dependency does
 # not carry its own patch table, so they are repeated here so this graph
 # resolves the same sources as water-rs/waterui `dev`.
 [patch.crates-io]
 xcb = { git = "https://github.com/rust-x-bindings/rust-xcb", rev = "ae3b2cd080e78173223038ccbebdc644eaf4a9ad" }
-vello = { git = "https://github.com/lexoliu/vello", rev = "7f5e1ca5769a96dc4404b812e7fa0351499cd2c4" }
-vello_hybrid = { git = "https://github.com/lexoliu/vello", rev = "a01e5039c290fa869e0f6f3708e621056740f49b" }
-vello_common = { git = "https://github.com/lexoliu/vello", rev = "a01e5039c290fa869e0f6f3708e621056740f49b" }
-vello_sparse_shaders = { git = "https://github.com/lexoliu/vello", rev = "a01e5039c290fa869e0f6f3708e621056740f49b" }
-glifo = { git = "https://github.com/lexoliu/vello", rev = "a01e5039c290fa869e0f6f3708e621056740f49b" }
 
 # `waterui-testing` depends on this backend at the 0.5.0-wave requirement
 # `0.3.0`, which is this package; a registry copy would be pre-freeze code
@@ -303,8 +253,8 @@ hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "29c8
 # Migrated framework crates pinned to waterui's devin/chore/nami-snapshot
 # branch head so the graph resolves a single nami Signal trait; waterkit
 # rides the same-wave migration head for its VA-API gating.
-nami = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
-nami-core = { git = "https://github.com/water-rs/nami", rev = "5dc2d92e4ee9a236afdf71aaf4ef5b26a6990425" }
+nami = { git = "https://github.com/water-rs/nami", rev = "6908aac816de14ee5aff23bfffd7d2b109d08fea" }
+nami-core = { git = "https://github.com/water-rs/nami", rev = "6908aac816de14ee5aff23bfffd7d2b109d08fea" }
 waterui-assets = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }
 waterui-assets-core = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }
 waterui-assets-macros = { git = "https://github.com/water-rs/waterui", rev = "b956632e0c4808707b9ab0e1d59e8af09c63fe8d" }

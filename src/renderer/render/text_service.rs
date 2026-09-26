@@ -61,7 +61,7 @@ pub(crate) struct TextMeasureService {
     /// flush cost. A fragment is encoded once at the local origin and appended
     /// under the frame's transform, so a scrolled or animated frame pays one
     /// encoding copy per text instead of a full glyph-run walk.
-    scene_cache: Mutex<LruCache<TextSceneCacheKey, Arc<vello::Scene>>>,
+    scene_cache: Mutex<LruCache<TextSceneCacheKey, Arc<crate::scene::Scene>>>,
 }
 
 /// Cache identity for an encoded glyph scene: the shaped layout it draws plus
@@ -247,8 +247,8 @@ impl TextMeasureService {
         input: &ResolvedTextLayoutInput,
         max_width: Option<f32>,
         tail: TailMark,
-        encode: impl FnOnce(&parley::Layout<[u8; 4]>, &ResolvedTextLayoutInput, &mut vello::Scene),
-    ) -> Arc<vello::Scene> {
+        encode: impl FnOnce(&parley::Layout<[u8; 4]>, &ResolvedTextLayoutInput, &mut crate::scene::Scene),
+    ) -> Arc<crate::scene::Scene> {
         let (max_lines, tail_ellipsis) = tail.parts();
         let key = TextSceneCacheKey {
             layout: input.cache_key(max_width),
@@ -268,7 +268,7 @@ impl TextMeasureService {
         } else {
             (self.shape(input, max_width), None)
         };
-        let mut scene = vello::Scene::new();
+        let mut scene = crate::scene::Scene::new();
         encode(&layout, respelled.as_ref().unwrap_or(input), &mut scene);
         let scene = Arc::new(scene);
         self.scene_cache
@@ -480,11 +480,11 @@ fn resolve_text_style(style: &TextStyle, env: &Environment) -> ResolvedTextStyle
         foreground: style
             .foreground
             .clone()
-            .map(|color| resolved_color_to_rgba8(color.resolve(env).snapshot())),
+            .map(|color| working_color_to_rgba8(color.resolve(env).snapshot())),
         background: style
             .background
             .clone()
-            .map(|color| resolved_color_to_rgba8(color.resolve(env).snapshot())),
+            .map(|color| working_color_to_rgba8(color.resolve(env).snapshot())),
         italic: style.italic,
         underline: style.underline,
         strikethrough: style.strikethrough,
@@ -496,7 +496,7 @@ fn default_text_brush(env: &Environment) -> [u8; 4] {
         || Color::srgb(0, 0, 0).resolve(env).snapshot(),
         |signal| signal.snapshot(),
     );
-    resolved_color_to_rgba8(color)
+    working_color_to_rgba8(color)
 }
 
 fn build_parley_layout(

@@ -64,17 +64,9 @@ impl RenderNode {
                 }
                 changed
             }
-            // A ViewEffect and an AppliedFilter wrap a child render node whose
-            // reactive descendants must keep patching, so the walk recurses into
-            // them (the effect itself owns its runtime, with no structural patch).
-            RenderNode::ViewEffect(node) => node.child.borrow_mut().patch(renderer),
-            RenderNode::AppliedFilter(node) => node.child.patch(renderer),
             RenderNode::Color(_)
             | RenderNode::Text(_)
             | RenderNode::SceneView(_)
-            // A GpuSurface owns its runtime and re-renders every flush; like a
-            // self-drawn scene it has no structural patch.
-            | RenderNode::GpuSurface(_)
             // A widget leaf re-dispatches from its live config every flush, so it
             // needs no structural patch.
             | RenderNode::Widget(_) => false,
@@ -120,14 +112,9 @@ impl RenderNode {
                 }
             }
             RenderNode::Scroll(node) => node.child.collect_dynamic_identities_into(out),
-            RenderNode::ViewEffect(node) => {
-                node.child.borrow().collect_dynamic_identities_into(out);
-            }
-            RenderNode::AppliedFilter(node) => node.child.collect_dynamic_identities_into(out),
             RenderNode::Color(_)
             | RenderNode::Text(_)
             | RenderNode::SceneView(_)
-            | RenderNode::GpuSurface(_)
             | RenderNode::Widget(_) => {}
             RenderNode::LazyStack(node) => node
                 .item_cache
@@ -165,8 +152,6 @@ impl RenderNode {
                 }
                 dirty
             }
-            RenderNode::ViewEffect(node) => node.child.borrow_mut().take_layout_dirty(),
-            RenderNode::AppliedFilter(node) => node.child.take_layout_dirty(),
             RenderNode::Collection(node) => node
                 .entries
                 .iter_mut()
@@ -175,7 +160,6 @@ impl RenderNode {
             RenderNode::Color(_)
             | RenderNode::Text(_)
             | RenderNode::SceneView(_)
-            | RenderNode::GpuSurface(_)
             | RenderNode::Widget(_) => false,
         }
     }
@@ -358,9 +342,9 @@ impl HydrolysisRenderer {
         &mut self,
         content: AnyView,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
-        hit_transform: vello::kurbo::Affine,
+        bounds: cherenkov::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
+        hit_transform: cherenkov::kurbo::Affine,
     ) {
         let _flush_span = tracing::debug_span!("hydrolysis_capture_window_tree").entered();
         let size = Size::new(bounds.width() as f32, bounds.height() as f32);
@@ -397,7 +381,6 @@ impl HydrolysisRenderer {
             #[cfg(feature = "frame-profile")]
             let encode_started_at = Instant::now();
             tree.flush(self, ctx, env);
-            self.flush_subtree_captures(0);
             #[cfg(feature = "frame-profile")]
             {
                 self.frame_stage_times.encode += encode_started_at.elapsed();
@@ -423,7 +406,6 @@ impl HydrolysisRenderer {
         #[cfg(feature = "frame-profile")]
         let encode_started_at = Instant::now();
         node.flush(self, ctx, env);
-        self.flush_subtree_captures(0);
         #[cfg(feature = "frame-profile")]
         {
             self.frame_stage_times.encode += encode_started_at.elapsed();
@@ -438,9 +420,9 @@ impl HydrolysisRenderer {
     pub fn flush_window_tree(
         &mut self,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
-        hit_transform: vello::kurbo::Affine,
+        bounds: cherenkov::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
+        hit_transform: cherenkov::kurbo::Affine,
     ) -> bool {
         let Some(mut tree) = self.render_tree.take() else {
             return false;
@@ -494,14 +476,11 @@ impl HydrolysisRenderer {
         let encode_started_at = Instant::now();
         let ctx = RenderContext::with_transforms(bounds, transform, hit_transform);
         tree.flush(self, ctx, env);
-        // Every filtered subtree captured during the flush is rendered and
-        // filtered now, before the scene that draws their outputs is.
-        self.flush_subtree_captures(0);
         // The overlay-mode text context menu re-encodes with the frame it floats
         // over; drawing it only on the one-time build path would leave it visible
         // for a single frame.
         self.render_active_text_context_menu_overlay(env, transform);
-        self.flush_vello_scene_layer();
+        self.flush_scene_layer();
         drop(_encode_span);
         #[cfg(feature = "frame-profile")]
         {

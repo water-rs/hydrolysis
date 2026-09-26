@@ -13,35 +13,7 @@ impl HydrolysisRenderer {
         value: &ClipShape,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
-        // Resolve from the structured kind, exactly as a fill of the same shape
-        // does, and fall back to the unit-space commands only for a custom path.
-        // The commands are normalized per axis, so resolving them against a
-        // non-square rect makes every circular corner elliptical.
-        let clip_path = shape_kind_path(value.kind(), ctx.bounds)
-            .unwrap_or_else(|| path_commands_to_path(value.commands(), ctx.bounds));
-        if let Some(regular_clip) = kind_clip_shape(value.kind(), ctx.bounds)
-            .or_else(|| regular_clip_shape(value.commands(), ctx.bounds))
-        {
-            match regular_clip {
-                RegularClipShape::Rect(rect) => {
-                    renderer.push_layer_rect(1.0, ctx.transform, rect);
-                }
-                RegularClipShape::RoundedRect {
-                    rect,
-                    corner_width,
-                    corner_height,
-                } => renderer.push_layer_rounded_rect(
-                    1.0,
-                    ctx.transform,
-                    clip_path,
-                    rect,
-                    corner_width,
-                    corner_height,
-                ),
-            }
-        } else {
-            renderer.push_layer_path(1.0, ctx.transform, clip_path);
-        }
+        renderer.push_layer_shape(1.0, ctx.transform, value.resolve(ctx.bounds));
         render_content(renderer);
         renderer.pop_layer();
     }
@@ -63,13 +35,13 @@ impl HydrolysisRenderer {
             return;
         }
 
-        let brush = resolved_color_to_peniko(border.color.resolve(env).snapshot());
+        let brush = border.color.resolve(env).snapshot();
         let width = f64::from(border.width);
 
         if border.edges.all() && border.corner_radius > 0.0 {
             let rounded =
-                vello::kurbo::RoundedRect::from_rect(ctx.bounds, f64::from(border.corner_radius));
-            let stroke = vello::kurbo::Stroke::new(width);
+                cherenkov::kurbo::RoundedRect::from_rect(ctx.bounds, f64::from(border.corner_radius));
+            let stroke = cherenkov::kurbo::Stroke::new(width);
             renderer
                 .scene
                 .stroke(&stroke, ctx.transform, brush, None, &rounded);
@@ -77,14 +49,14 @@ impl HydrolysisRenderer {
         }
 
         if border.edges.top {
-            let top = vello::kurbo::Rect::new(
+            let top = cherenkov::kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y0,
                 ctx.bounds.x1,
                 ctx.bounds.y0 + width,
             );
             renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
+                crate::scene::Fill::NonZero,
                 ctx.transform,
                 brush,
                 None,
@@ -92,14 +64,14 @@ impl HydrolysisRenderer {
             );
         }
         if border.edges.bottom {
-            let bottom = vello::kurbo::Rect::new(
+            let bottom = cherenkov::kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y1 - width,
                 ctx.bounds.x1,
                 ctx.bounds.y1,
             );
             renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
+                crate::scene::Fill::NonZero,
                 ctx.transform,
                 brush,
                 None,
@@ -107,14 +79,14 @@ impl HydrolysisRenderer {
             );
         }
         if border.edges.leading {
-            let leading = vello::kurbo::Rect::new(
+            let leading = cherenkov::kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y0,
                 ctx.bounds.x0 + width,
                 ctx.bounds.y1,
             );
             renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
+                crate::scene::Fill::NonZero,
                 ctx.transform,
                 brush,
                 None,
@@ -122,14 +94,14 @@ impl HydrolysisRenderer {
             );
         }
         if border.edges.trailing {
-            let trailing = vello::kurbo::Rect::new(
+            let trailing = cherenkov::kurbo::Rect::new(
                 ctx.bounds.x1 - width,
                 ctx.bounds.y0,
                 ctx.bounds.x1,
                 ctx.bounds.y1,
             );
             renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
+                crate::scene::Fill::NonZero,
                 ctx.transform,
                 brush,
                 None,
@@ -152,13 +124,13 @@ impl HydrolysisRenderer {
         let corner_radius = f64::from(shadow.corner_radius.max(0.0));
         let offset_x = f64::from(shadow.offset.x);
         let offset_y = f64::from(shadow.offset.y);
-        let shadow_rect = vello::kurbo::Rect::new(
+        let shadow_rect = cherenkov::kurbo::Rect::new(
             ctx.bounds.x0 + offset_x,
             ctx.bounds.y0 + offset_y,
             ctx.bounds.x1 + offset_x,
             ctx.bounds.y1 + offset_y,
         );
-        let shadow_color = resolved_color_to_peniko(shadow.color.resolve(env).snapshot());
+        let shadow_color = shadow.color.resolve(env).snapshot();
 
         renderer.scene.draw_blurred_rounded_rect(
             ctx.transform,
@@ -380,17 +352,19 @@ impl HydrolysisRenderer {
             Self::render_gesture_content(renderer, env, render_content);
 
             let color_signal = style.state_layer_color.resolve(env);
-            let color = resolved_color_to_peniko(renderer.read_signal(&color_signal));
+            let color = renderer.read_signal(&color_signal);
             let interaction = local_interaction_state(interaction, ctx.hit_transform);
             let theme = renderer.theme();
-            let mut draw = renderer.draw_context(ctx);
-            theme.draw_interaction_state_layer(
-                &mut draw,
-                style.state_layer_bounds(ctx.bounds),
-                style.state_layer_radii,
-                color,
-                interaction,
-            );
+            {
+                let mut draw = renderer.draw_context(ctx);
+                theme.draw_interaction_state_layer(
+                    &mut draw,
+                    style.state_layer_bounds(ctx.bounds),
+                    style.state_layer_radii,
+                    color,
+                    interaction,
+                );
+            }
 
             if !disabled {
                 renderer.register_interactive_pointer_target_with_keyboard(
@@ -581,405 +555,5 @@ impl HydrolysisRenderer {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
         renderer.register_drop_destination_handles(bounds, handles, env);
         render_content(renderer);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum RegularClipShape {
-    Rect(vello::kurbo::Rect),
-    RoundedRect {
-        rect: vello::kurbo::Rect,
-        corner_width: f64,
-        corner_height: f64,
-    },
-}
-
-/// The fast rounded-rect/rect clip for a structured shape kind.
-///
-/// A normalized radius resolves against the shorter side, so corners stay
-/// circular and a fully-rounded shape is a stadium rather than an ellipse.
-fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
-    let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let rounded = |corner: f64| {
-        Some(RegularClipShape::RoundedRect {
-            rect: bounds,
-            corner_width: corner,
-            corner_height: corner,
-        })
-    };
-    let uniform = |radius: f32| rounded(f64::from(radius.clamp(0.0, 0.5)) * min_side);
-    // A fixed radius is already a length in points; only the
-    // half-shorter-side ceiling applies.
-    let fixed = |radius: f32| rounded(f64::from(radius.max(0.0)).min(min_side / 2.0));
-    match kind {
-        ShapeKind::Rect => Some(RegularClipShape::Rect(bounds)),
-        ShapeKind::RoundedRect { corner_radius } => uniform(corner_radius),
-        ShapeKind::FixedRoundedRect { corner_radius } => fixed(corner_radius),
-        ShapeKind::Capsule => uniform(0.5),
-        // A circle is *inscribed* in the bounds, so only a square one is a
-        // rounded rect: elsewhere `uniform(0.5)` describes a stadium filling
-        // the bounds, which is what a capsule is and what a circle is not. The
-        // fill path builds a real `kurbo::Circle`, and a clip that disagreed
-        // with its own fill is the bug this guard closes.
-        ShapeKind::Circle if bounds.width() == bounds.height() => uniform(0.5),
-        // An ellipse is not a rounded rect, a non-square circle is not either,
-        // and uneven corners need the path mask; all stay on the general route.
-        ShapeKind::Circle
-        | ShapeKind::Ellipse
-        | ShapeKind::UnevenRoundedRect { .. }
-        | ShapeKind::FixedUnevenRoundedRect { .. }
-        | ShapeKind::CustomPath => None,
-    }
-}
-
-#[cfg(test)]
-mod clip_shape_tests {
-    use super::{RegularClipShape, ShapeKind, kind_clip_shape};
-    use vello::kurbo::Rect;
-
-    /// A square circle is exactly a rounded rect whose corner is half the
-    /// side, so the fast clip is allowed to take it.
-    #[test]
-    fn a_square_circle_takes_the_rounded_rect_fast_path() {
-        let bounds = Rect::new(0.0, 0.0, 100.0, 100.0);
-        let clip = kind_clip_shape(ShapeKind::Circle, bounds);
-        assert!(
-            matches!(
-                clip,
-                Some(RegularClipShape::RoundedRect {
-                    corner_width,
-                    corner_height,
-                    ..
-                }) if (corner_width - 50.0).abs() < f64::EPSILON
-                    && (corner_height - 50.0).abs() < f64::EPSILON
-            ),
-            "a square circle should clip as a rounded rect with a half-side corner, got {clip:?}"
-        );
-    }
-
-    /// On a wider-than-tall rect the same shortcut would describe a stadium,
-    /// which is a capsule and not the inscribed circle the fill draws.
-    #[test]
-    fn a_non_square_circle_does_not_take_the_fast_path() {
-        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
-        assert!(
-            kind_clip_shape(ShapeKind::Circle, bounds).is_none(),
-            "a non-square circle must fall through to the path mask so the clip \
-             matches the inscribed circle the fill builds"
-        );
-    }
-
-    /// A capsule *is* the stadium, on any aspect ratio.
-    #[test]
-    fn a_capsule_takes_the_fast_path_at_any_aspect_ratio() {
-        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
-        assert!(matches!(
-            kind_clip_shape(ShapeKind::Capsule, bounds),
-            Some(RegularClipShape::RoundedRect { .. })
-        ));
-    }
-
-    /// A fixed radius is a length in points: 12 stays 12 on a wide bar, and
-    /// only the half-shorter-side ceiling cuts it down.
-    #[test]
-    fn a_fixed_radius_clips_at_its_own_length_up_to_the_ceiling() {
-        let wide = Rect::new(0.0, 0.0, 200.0, 50.0);
-        assert!(matches!(
-            kind_clip_shape(
-                ShapeKind::FixedRoundedRect {
-                    corner_radius: 12.0
-                },
-                wide
-            ),
-            Some(RegularClipShape::RoundedRect {
-                corner_width,
-                corner_height,
-                ..
-            }) if (corner_width - 12.0).abs() < f64::EPSILON
-                && (corner_height - 12.0).abs() < f64::EPSILON
-        ));
-        assert!(matches!(
-            kind_clip_shape(
-                ShapeKind::FixedRoundedRect {
-                    corner_radius: 40.0
-                },
-                wide
-            ),
-            Some(RegularClipShape::RoundedRect {
-                corner_width,
-                corner_height,
-                ..
-            }) if (corner_width - 25.0).abs() < f64::EPSILON
-                && (corner_height - 25.0).abs() < f64::EPSILON
-        ));
-    }
-
-    /// Per-corner radii cannot be a uniform `RoundedRect` clip.
-    #[test]
-    fn a_fixed_uneven_kind_stays_on_the_path_mask() {
-        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
-        assert!(
-            kind_clip_shape(
-                ShapeKind::FixedUnevenRoundedRect {
-                    top_left: 0.0,
-                    top_right: 16.0,
-                    bottom_left: 0.0,
-                    bottom_right: 16.0,
-                },
-                bounds
-            )
-            .is_none()
-        );
-    }
-}
-
-fn regular_clip_shape(
-    commands: &[PathCommand],
-    bounds: vello::kurbo::Rect,
-) -> Option<RegularClipShape> {
-    regular_rect(commands, bounds).or_else(|| regular_rounded_rect(commands, bounds))
-}
-
-fn regular_rect(commands: &[PathCommand], bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
-    let [
-        PathCommand::MoveTo { x: x0, y: y0 },
-        PathCommand::LineTo { x: x1, y: top_y },
-        PathCommand::LineTo { x: right_x, y: y1 },
-        PathCommand::LineTo {
-            x: left_x,
-            y: bottom_y,
-        },
-        PathCommand::Close,
-    ] = commands
-    else {
-        return None;
-    };
-    if !approx_eq(*y0, *top_y)
-        || !approx_eq(*x1, *right_x)
-        || !approx_eq(*y1, *bottom_y)
-        || !approx_eq(*x0, *left_x)
-        || !valid_rect(*x0, *y0, *x1, *y1)
-    {
-        return None;
-    }
-    Some(RegularClipShape::Rect(resolve_normalized_rect(
-        *x0, *y0, *x1, *y1, bounds,
-    )))
-}
-
-#[allow(clippy::too_many_lines)]
-fn regular_rounded_rect(
-    commands: &[PathCommand],
-    bounds: vello::kurbo::Rect,
-) -> Option<RegularClipShape> {
-    let [
-        PathCommand::MoveTo { x: start_x, y: y0 },
-        PathCommand::LineTo {
-            x: top_end_x,
-            y: top_y,
-        },
-        PathCommand::Arc {
-            cx: top_right_cx,
-            cy: top_right_cy,
-            rx,
-            ry,
-            start: top_right_start,
-            sweep: top_right_sweep,
-        },
-        PathCommand::LineTo {
-            x: x1,
-            y: right_end_y,
-        },
-        PathCommand::Arc {
-            cx: bottom_right_cx,
-            cy: bottom_right_cy,
-            rx: bottom_right_rx,
-            ry: bottom_right_ry,
-            start: bottom_right_start,
-            sweep: bottom_right_sweep,
-        },
-        PathCommand::LineTo {
-            x: bottom_end_x,
-            y: y1,
-        },
-        PathCommand::Arc {
-            cx: bottom_left_cx,
-            cy: bottom_left_cy,
-            rx: bottom_left_rx,
-            ry: bottom_left_ry,
-            start: bottom_left_start,
-            sweep: bottom_left_sweep,
-        },
-        PathCommand::LineTo {
-            x: x0,
-            y: left_end_y,
-        },
-        PathCommand::Arc {
-            cx: top_left_cx,
-            cy: top_left_cy,
-            rx: top_left_rx,
-            ry: top_left_ry,
-            start: top_left_start,
-            sweep: top_left_sweep,
-        },
-        PathCommand::Close,
-    ] = commands
-    else {
-        return None;
-    };
-
-    let quarter_turn = core::f32::consts::FRAC_PI_2;
-    let uniform_radii = [*bottom_right_rx, *bottom_left_rx, *top_left_rx]
-        .into_iter()
-        .all(|radius| approx_eq(radius, *rx))
-        && [*bottom_right_ry, *bottom_left_ry, *top_left_ry]
-            .into_iter()
-            .all(|radius| approx_eq(radius, *ry));
-    let geometry_matches = approx_eq(*top_y, *y0)
-        && approx_eq(*start_x, *x0 + *rx)
-        && approx_eq(*top_end_x, *x1 - *rx)
-        && approx_eq(*top_right_cx, *x1 - *rx)
-        && approx_eq(*top_right_cy, *y0 + *ry)
-        && approx_eq(*right_end_y, *y1 - *ry)
-        && approx_eq(*bottom_right_cx, *x1 - *rx)
-        && approx_eq(*bottom_right_cy, *y1 - *ry)
-        && approx_eq(*bottom_end_x, *x0 + *rx)
-        && approx_eq(*bottom_left_cx, *x0 + *rx)
-        && approx_eq(*bottom_left_cy, *y1 - *ry)
-        && approx_eq(*left_end_y, *y0 + *ry)
-        && approx_eq(*top_left_cx, *x0 + *rx)
-        && approx_eq(*top_left_cy, *y0 + *ry);
-    let angles_match = approx_eq(*top_right_start, -quarter_turn)
-        && approx_eq(*top_right_sweep, quarter_turn)
-        && approx_eq(*bottom_right_start, 0.0)
-        && approx_eq(*bottom_right_sweep, quarter_turn)
-        && approx_eq(*bottom_left_start, quarter_turn)
-        && approx_eq(*bottom_left_sweep, quarter_turn)
-        && approx_eq(*top_left_start, core::f32::consts::PI)
-        && approx_eq(*top_left_sweep, quarter_turn);
-    if !uniform_radii
-        || !geometry_matches
-        || !angles_match
-        || !valid_rect(*x0, *y0, *x1, *y1)
-        || !rx.is_finite()
-        || !ry.is_finite()
-        || *rx < 0.0
-        || *ry < 0.0
-    {
-        return None;
-    }
-
-    // A normalized corner radius resolves against the shorter side, so the corner
-    // stays circular on a non-square rect. Scaling each axis by its own extent
-    // instead turns every rounded-rect *clip* into an ellipse while the identical
-    // shape *fills* as a rounded rect, because the fill route (`rounded_rect_path`)
-    // already resolves against `min_side`. The two must agree.
-    let min_side = bounds.width().min(bounds.height()).max(0.0);
-    Some(RegularClipShape::RoundedRect {
-        rect: resolve_normalized_rect(*x0, *y0, *x1, *y1, bounds),
-        corner_width: f64::from(*rx) * min_side,
-        corner_height: f64::from(*ry) * min_side,
-    })
-}
-
-fn resolve_normalized_rect(
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    bounds: vello::kurbo::Rect,
-) -> vello::kurbo::Rect {
-    vello::kurbo::Rect::new(
-        f64::from(x0) * bounds.width(),
-        f64::from(y0) * bounds.height(),
-        f64::from(x1) * bounds.width(),
-        f64::from(y1) * bounds.height(),
-    )
-}
-
-fn valid_rect(x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
-    [x0, y0, x1, y1].into_iter().all(f32::is_finite) && x0 <= x1 && y0 <= y1
-}
-
-fn approx_eq(left: f32, right: f32) -> bool {
-    (left - right).abs() <= f32::EPSILON * 64.0
-}
-
-#[cfg(test)]
-mod regular_clip_tests {
-    use waterui_shape::{Path, Rectangle, RoundedRectangle, Shape as _, UnevenRoundedRectangle};
-
-    use super::*;
-
-    const BOUNDS: vello::kurbo::Rect = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 100.0);
-
-    #[test]
-    fn recognizes_axis_aligned_rectangle() {
-        assert_eq!(
-            regular_clip_shape(&Rectangle.path(), BOUNDS),
-            Some(RegularClipShape::Rect(BOUNDS))
-        );
-    }
-
-    /// A normalized corner radius resolves against the shorter side, so the
-    /// corners stay circular on a non-square rect and a clip matches the fill of
-    /// the same shape. Resolving each axis against its own extent produced
-    /// elliptical corners — a fully-rounded clip came out as an ellipse instead
-    /// of a pill.
-    #[test]
-    fn uniform_rounded_rectangle_clip_keeps_circular_corners() {
-        let Some(RegularClipShape::RoundedRect {
-            rect,
-            corner_width,
-            corner_height,
-        }) = regular_clip_shape(&RoundedRectangle::new(0.1).path(), BOUNDS)
-        else {
-            panic!("uniform rounded rectangle must use the regular clip route");
-        };
-        let min_side = BOUNDS.width().min(BOUNDS.height());
-        assert_eq!(rect, BOUNDS);
-        assert!((corner_width - 0.1 * min_side).abs() < 1.0e-5);
-        assert!(
-            (corner_width - corner_height).abs() < 1.0e-5,
-            "a uniform rounded rectangle must clip with circular corners, got \
-             {corner_width}x{corner_height} on a {}x{} rect",
-            BOUNDS.width(),
-            BOUNDS.height()
-        );
-    }
-
-    /// The fully-rounded case: a clip at the maximum normalized radius is a
-    /// stadium whose caps are half the shorter side, not an ellipse.
-    #[test]
-    fn fully_rounded_clip_is_a_stadium_not_an_ellipse() {
-        let Some(RegularClipShape::RoundedRect {
-            corner_width,
-            corner_height,
-            ..
-        }) = regular_clip_shape(&RoundedRectangle::new(0.5).path(), BOUNDS)
-        else {
-            panic!("a fully-rounded rectangle must use the regular clip route");
-        };
-        let cap = BOUNDS.width().min(BOUNDS.height()) / 2.0;
-        assert!((corner_width - cap).abs() < 1.0e-5);
-        assert!((corner_height - cap).abs() < 1.0e-5);
-    }
-
-    #[test]
-    fn leaves_uneven_and_custom_paths_on_the_path_mask_route() {
-        assert_eq!(
-            regular_clip_shape(
-                &UnevenRoundedRectangle::new(0.1, 0.2, 0.3, 0.4).path(),
-                BOUNDS,
-            ),
-            None
-        );
-        let triangle = Path::new()
-            .move_to(0.5, 0.0)
-            .line_to(1.0, 1.0)
-            .line_to(0.0, 1.0)
-            .close();
-        let triangle_commands: Vec<_> = triangle.path().collect();
-        assert_eq!(regular_clip_shape(&triangle_commands, BOUNDS), None);
     }
 }

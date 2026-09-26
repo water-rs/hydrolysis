@@ -425,30 +425,30 @@ pub(crate) fn render_tabs_parts(
 }
 
 fn tabs_label_rect(
-    button_rect: vello::kurbo::Rect,
+    button_rect: cherenkov::kurbo::Rect,
     label_size: waterui_core::layout::Size,
     metrics: waterui_backend_core::widget::TabsMetrics,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     let max_width = (button_rect.width() - metrics.button_horizontal_inset * 2.0).max(0.0);
     let width = f64::from(label_size.width).min(max_width);
     let height = f64::from(label_size.height).min(button_rect.height());
     let x0 = button_rect.x0 + (button_rect.width() - width) * 0.5;
     let y0 = button_rect.y0 + (button_rect.height() - height) * 0.5;
-    vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
+    cherenkov::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
 }
 
 fn tabs_active_indicator_rect(
-    button_rect: vello::kurbo::Rect,
+    button_rect: cherenkov::kurbo::Rect,
     style: NativeTabStyle,
     thickness: f64,
     label_extent: f64,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     match style {
         NativeTabStyle::Automatic | NativeTabStyle::TabBar => {
             let width = label_extent.clamp(0.0, button_rect.width());
             let x0 = button_rect.x0 + (button_rect.width() - width) * 0.5;
             let x1 = x0 + width;
-            vello::kurbo::Rect::new(
+            cherenkov::kurbo::Rect::new(
                 x0,
                 button_rect.y0,
                 x1,
@@ -458,7 +458,7 @@ fn tabs_active_indicator_rect(
         NativeTabStyle::Sidebar => {
             let height = label_extent.clamp(0.0, button_rect.height());
             let y0 = button_rect.y0 + (button_rect.height() - height) * 0.5;
-            vello::kurbo::Rect::new(
+            cherenkov::kurbo::Rect::new(
                 (button_rect.x1 - thickness).max(button_rect.x0),
                 y0,
                 button_rect.x1,

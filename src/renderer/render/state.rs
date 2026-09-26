@@ -1,6 +1,37 @@
 use super::*;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
-use waterui_graphics::DeviceLoss;
+
+/// Engine font handles by the identity of the parley font blob they were
+/// registered from. Registered once per font face and kept for the
+/// renderer's lifetime: glyph runs name fonts by engine id.
+#[derive(Default)]
+pub(crate) struct FontCache {
+    fonts: HashMap<(u64, u32), cherenkov::Font>,
+}
+
+impl FontCache {
+    pub(crate) fn font(
+        &mut self,
+        engine: &crate::platform::Engine,
+        font: &parley::FontData,
+    ) -> cherenkov::FontId {
+        let key = (font.data.id(), font.index);
+        self.fonts
+            .entry(key)
+            .or_insert_with(|| {
+                engine
+                    .font(cherenkov::FontSource {
+                        data: Arc::from(font.data.as_ref()),
+                        index: font.index,
+                    })
+                    .expect("hydrolysis: registering a shaped font with the engine failed")
+            })
+            .id()
+    }
+}
+
 
 /// Shared mutable state carried by the hydrolysis dispatcher.
 pub struct HydroState {
@@ -8,27 +39,42 @@ pub struct HydroState {
     /// measurement via `Arc`. See [`TextMeasureService`].
     pub(crate) text: Arc<TextMeasureService>,
     pub(crate) measurement: MeasurementCaches,
-    pub(crate) frame_adapter: Option<wgpu::Adapter>,
-    pub(crate) frame_device: Option<wgpu::Device>,
-    pub(crate) frame_queue: Option<wgpu::Queue>,
-    /// Reports this frame's device lost; taken when the device was opened.
-    pub(crate) frame_device_loss: Option<DeviceLoss>,
+    /// The engine glyph runs register their fonts with; `None` on a semantic
+    /// (non-drawing) runtime, where recording text is a programming error.
+    engine: Option<Rc<crate::platform::Engine>>,
+    fonts: FontCache,
 }
 
 impl Default for HydroState {
     fn default() -> Self {
-        Self {
-            text: Arc::new(TextMeasureService::new()),
-            measurement: MeasurementCaches::default(),
-            frame_adapter: None,
-            frame_device: None,
-            frame_queue: None,
-            frame_device_loss: None,
-        }
+        Self::new(None)
     }
 }
 
 impl HydroState {
+    pub(crate) fn new(engine: Option<Rc<crate::platform::Engine>>) -> Self {
+        Self {
+            text: Arc::new(TextMeasureService::new()),
+            measurement: MeasurementCaches::default(),
+            engine,
+            fonts: FontCache::default(),
+        }
+    }
+
+    /// The engine font id for a shaped parley font, registering it on first
+    /// use.
+    ///
+    /// # Panics
+    /// Panics on a runtime without an engine: only a drawing runtime records
+    /// glyph runs.
+    pub(crate) fn font_id(&mut self, font: &parley::FontData) -> cherenkov::FontId {
+        let engine = self
+            .engine
+            .as_ref()
+            .expect("hydrolysis: recording text requires a Cherenkov engine; this runtime has none");
+        self.fonts.font(engine, font)
+    }
+
     /// Mutable access to the registered fonts for startup font registration.
     ///
     /// Requires that no worker has cloned the [`TextMeasureService`] yet, which
@@ -40,48 +86,6 @@ impl HydroState {
                  before rendering",
             )
             .fonts_mut()
-    }
-
-    pub(crate) fn set_frame_resources(
-        &mut self,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        device_loss: &DeviceLoss,
-    ) {
-        self.frame_adapter = Some(adapter.clone());
-        self.frame_device = Some(device.clone());
-        self.frame_queue = Some(queue.clone());
-        self.frame_device_loss = Some(device_loss.clone());
-    }
-
-    pub(crate) fn clear_frame_resources(&mut self) {
-        self.frame_adapter = None;
-        self.frame_device = None;
-        self.frame_queue = None;
-        self.frame_device_loss = None;
-    }
-
-    pub(crate) fn frame_resources(&self) -> (&wgpu::Device, &wgpu::Queue) {
-        let device = self.frame_device.as_ref().unwrap_or_else(|| {
-            panic!("hydrolysis frame device is unavailable during AppliedFilter dispatch")
-        });
-        let queue = self.frame_queue.as_ref().unwrap_or_else(|| {
-            panic!("hydrolysis frame queue is unavailable during AppliedFilter dispatch")
-        });
-        (device, queue)
-    }
-
-    pub(crate) fn frame_adapter(&self) -> &wgpu::Adapter {
-        self.frame_adapter.as_ref().unwrap_or_else(|| {
-            panic!("hydrolysis frame adapter is unavailable during GPU subtree capture")
-        })
-    }
-
-    pub(crate) fn frame_device_loss(&self) -> &DeviceLoss {
-        self.frame_device_loss.as_ref().unwrap_or_else(|| {
-            panic!("hydrolysis frame device loss handle is unavailable during GPU subtree capture")
-        })
     }
 }
 

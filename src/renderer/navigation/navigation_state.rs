@@ -11,19 +11,19 @@ pub(crate) const ROOT_NAVIGATION_IDENTITY: u64 = 0;
 
 #[derive(Clone)]
 pub(crate) struct NavigationMatchedElement {
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) scene: vello::Scene,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
+    pub(crate) scene: crate::scene::Scene,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct NavigationCapturedScene {
-    pub(crate) scene: vello::Scene,
+    pub(crate) scene: crate::scene::Scene,
     pub(crate) sources: BTreeMap<Id, NavigationMatchedElement>,
     pub(crate) destinations: BTreeMap<Id, NavigationMatchedElement>,
 }
 
 impl NavigationCapturedScene {
-    pub(crate) fn composed(&self) -> vello::Scene {
+    pub(crate) fn composed(&self) -> crate::scene::Scene {
         let mut scene = self.scene.clone();
         for element in self.sources.values().chain(self.destinations.values()) {
             scene.append(&element.scene, None);
@@ -31,7 +31,7 @@ impl NavigationCapturedScene {
         scene
     }
 
-    pub(crate) fn composed_without(&self, source: bool, id: Id) -> vello::Scene {
+    pub(crate) fn composed_without(&self, source: bool, id: Id) -> crate::scene::Scene {
         let mut scene = self.scene.clone();
         for (element_id, element) in &self.sources {
             if !source || *element_id != id {
@@ -286,7 +286,7 @@ impl NavigationInteractivePop {
             } => {
                 let remaining = 1.0 - initial_progress;
                 let elapsed = now.saturating_duration_since(started_at).as_secs_f64();
-                let span = (motion.transition_duration.as_secs_f64() * remaining).max(f64::EPSILON);
+                let span = (motion.transition.duration.as_secs_f64() * remaining).max(f64::EPSILON);
                 let cycle = (elapsed / span).clamp(0.0, 1.0);
                 self.progress = initial_progress + remaining * eased_progress(cycle, motion);
                 (self.progress, self.progress >= 1.0, false)
@@ -297,7 +297,7 @@ impl NavigationInteractivePop {
             } => {
                 let elapsed = now.saturating_duration_since(started_at).as_secs_f64();
                 let span =
-                    (motion.transition_duration.as_secs_f64() * initial_progress).max(f64::EPSILON);
+                    (motion.transition.duration.as_secs_f64() * initial_progress).max(f64::EPSILON);
                 let cycle = (elapsed / span).clamp(0.0, 1.0);
                 self.progress = initial_progress * (1.0 - eased_progress(cycle, motion));
                 (self.progress, false, self.progress <= 0.0)
@@ -346,9 +346,7 @@ impl NavigationTransitionState {
 #[allow(clippy::cast_possible_truncation)]
 fn eased_progress(progress: f64, motion: NavigationMotion) -> f64 {
     f64::from(
-        motion
-            .transition_easing
-            .ease(progress as f32)
+        (cherenkov::curve_value(&motion.transition, progress) as f32)
             .clamp(0.0, 1.0),
     )
 }
@@ -736,7 +734,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn finish_navigation_scene_capture(
         &mut self,
-        scene: vello::Scene,
+        scene: crate::scene::Scene,
     ) -> NavigationCapturedScene {
         let capture = self
             .navigation_captures
@@ -769,8 +767,8 @@ impl HydrolysisRenderer {
         &mut self,
         source: bool,
         id: Id,
-        bounds: vello::kurbo::Rect,
-        scene: vello::Scene,
+        bounds: cherenkov::kurbo::Rect,
+        scene: crate::scene::Scene,
     ) {
         let capture = self
             .navigation_captures

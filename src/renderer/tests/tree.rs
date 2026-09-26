@@ -6,7 +6,7 @@ use core::cell::{Cell, RefCell};
 use nami::Computed;
 use nami::Signal as _;
 use std::rc::Rc;
-use vello::kurbo::{Affine, Rect};
+use cherenkov::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
 use waterui_controls::button::button;
 use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size};
@@ -1104,7 +1104,7 @@ fn lifecycle_hooks_fire_after_first_flush_and_on_drop() {
 fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     use core::time::Duration;
     use std::time::Instant;
-    use waterui::animation::Animation;
+    use waterui::animation::{Animation, Curve};
     use waterui::reactive::binding;
 
     let opacity = binding(0.0f32);
@@ -1112,7 +1112,7 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     let view = AnyView::new(
         ().size(40.0, 40.0)
             .on_appear(move || opacity_for_appear.set(1.0))
-            .opacity(opacity.with(Animation::linear(Duration::from_millis(250)))),
+            .opacity(opacity.with(Animation::Curve(Curve::linear(Duration::from_millis(250))))),
     );
 
     let env = test_environment();

@@ -3,14 +3,6 @@
 
 use super::*;
 
-pub(crate) struct ChildTextureTarget<'a> {
-    pub(crate) texture: &'a wgpu::Texture,
-    pub(crate) view: &'a wgpu::TextureView,
-    pub(crate) format: wgpu::TextureFormat,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-}
-
 impl RenderNode {
     /// Re-encode this subtree into the renderer's scene using the cached
     /// placements. Runs every frame.
@@ -22,9 +14,9 @@ impl RenderNode {
     ) {
         match self {
             RenderNode::Color(color) => {
-                let color = resolved_color_to_peniko(renderer.read_signal(&color.color));
+                let color = renderer.read_signal(&color.color);
                 renderer.scene_mut().fill(
-                    vello::peniko::Fill::NonZero,
+                    crate::scene::Fill::NonZero,
                     ctx.transform,
                     color,
                     None,
@@ -68,8 +60,8 @@ impl RenderNode {
                 renderer.pop_render_owner();
                 for (child, rect) in container.children.iter().zip(container.placed.iter()) {
                     let child_ctx = ctx.child(
-                        vello::kurbo::Affine::translate((f64::from(rect.x()), f64::from(rect.y()))),
-                        vello::kurbo::Rect::new(
+                        cherenkov::kurbo::Affine::translate((f64::from(rect.x()), f64::from(rect.y()))),
+                        cherenkov::kurbo::Rect::new(
                             0.0,
                             0.0,
                             f64::from(rect.width()),
@@ -104,12 +96,12 @@ impl RenderNode {
                     &node.value.y,
                     SCALE_Y_ANIMATION_KEY,
                 );
-                let transform = vello::kurbo::Affine::translate((center.x, center.y))
-                    * vello::kurbo::Affine::scale_non_uniform(
+                let transform = cherenkov::kurbo::Affine::translate((center.x, center.y))
+                    * cherenkov::kurbo::Affine::scale_non_uniform(
                         f64::from(scale_x),
                         f64::from(scale_y),
                     )
-                    * vello::kurbo::Affine::translate((-center.x, -center.y));
+                    * cherenkov::kurbo::Affine::translate((-center.x, -center.y));
                 node.child
                     .flush(renderer, ctx.child(transform, ctx.bounds), env);
             }
@@ -120,9 +112,9 @@ impl RenderNode {
                     ROTATION_ANIMATION_KEY,
                 ))
                 .to_radians();
-                let transform = vello::kurbo::Affine::translate((center.x, center.y))
-                    * vello::kurbo::Affine::rotate(radians)
-                    * vello::kurbo::Affine::translate((-center.x, -center.y));
+                let transform = cherenkov::kurbo::Affine::translate((center.x, center.y))
+                    * cherenkov::kurbo::Affine::rotate(radians)
+                    * cherenkov::kurbo::Affine::translate((-center.x, -center.y));
                 node.child
                     .flush(renderer, ctx.child(transform, ctx.bounds), env);
             }
@@ -136,7 +128,7 @@ impl RenderNode {
                     OFFSET_Y_ANIMATION_KEY,
                 );
                 let transform =
-                    vello::kurbo::Affine::translate((f64::from(offset_x), f64::from(offset_y)));
+                    cherenkov::kurbo::Affine::translate((f64::from(offset_x), f64::from(offset_y)));
                 node.child
                     .flush(renderer, ctx.child(transform, ctx.bounds), env);
             }
@@ -294,27 +286,25 @@ impl RenderNode {
                     wants_input,
                 );
                 renderer.pop_render_owner();
-                let mut scene = vello::Scene::new();
-                // Scope `scene2d` so its `&mut scene` borrow ends before `&scene` is
-                // appended below. `CheckedScene2D` validates every image brush at
-                // this ingest boundary — malformed `ImageData` rejected here would
-                // otherwise only fail inside wgpu's `write_texture`.
+                // The content records against the engine's own resources so the
+                // fonts, images and shaders it names are the ones the frame draws.
+                let resources: Rc<dyn waterui_graphics::SceneResources> =
+                    renderer.engine_resources();
+                let mut recorder = cherenkov::Recorder::new();
                 let needs_next = {
-                    let mut scene2d = VelloScene2D::new(&mut scene);
-                    let mut scene2d = crate::renderer::CheckedScene2D::new(&mut scene2d);
                     #[allow(clippy::cast_possible_truncation)]
-                    node.content.borrow_mut().build_scene(
-                        &mut scene2d,
+                    let mut scene = waterui_graphics::Scene::new(
+                        &mut recorder,
+                        &resources,
                         ctx.bounds.width() as f32,
                         ctx.bounds.height() as f32,
-                    )
+                    );
+                    node.content.borrow_mut().record(&mut scene)
                 };
-                renderer.scene_mut().append(
-                    &scene,
-                    Some(
-                        ctx.transform
-                            * vello::kurbo::Affine::translate((ctx.bounds.x0, ctx.bounds.y0)),
-                    ),
+                renderer.scene_mut().draw_picture(
+                    ctx.transform
+                        * cherenkov::kurbo::Affine::translate((ctx.bounds.x0, ctx.bounds.y0)),
+                    recorder.finish().into_picture(),
                 );
                 if needs_next {
                     renderer.request_refresh();
@@ -332,42 +322,12 @@ impl RenderNode {
                     );
                 }
             }
-            RenderNode::GpuSurface(node) => {
-                // The surface view's own name and content, read every flush —
-                // it is re-asked after each frame it draws.
-                let (content_label, content_value, wants_input) = {
-                    let runtime = node.runtime.borrow();
-                    (
-                        runtime.accessibility_label(),
-                        runtime.accessibility_value(),
-                        runtime.wants_input_events(),
-                    )
-                };
-                renderer.push_render_owner(&node.accessibility_identity);
-                let _focus_node = emit_graphics_image_accessibility(
-                    renderer,
-                    Some(ctx),
-                    env,
-                    content_label,
-                    content_value,
-                    wants_input,
-                );
-                renderer.pop_render_owner();
-                node.flush(
-                    renderer,
-                    ctx,
-                    #[cfg(feature = "accessibility")]
-                    _focus_node,
-                );
-            }
-            RenderNode::ViewEffect(node) => node.flush(renderer, ctx),
-            RenderNode::AppliedFilter(node) => node.flush(renderer, ctx),
             RenderNode::Scroll(node) => {
                 let Some(handle) = node.handle.borrow().clone() else {
                     return;
                 };
                 let metrics = handle.metrics();
-                let viewport_rect = vello::kurbo::Rect::new(
+                let viewport_rect = cherenkov::kurbo::Rect::new(
                     0.0,
                     0.0,
                     f64::from(node.viewport.width),
@@ -375,8 +335,8 @@ impl RenderNode {
                 );
                 renderer.push_layer_rect(1.0, ctx.transform, viewport_rect);
                 let scroll_offset =
-                    vello::kurbo::Affine::translate((-metrics.offset_x, -metrics.offset_y));
-                let content_bounds = vello::kurbo::Rect::new(
+                    cherenkov::kurbo::Affine::translate((-metrics.offset_x, -metrics.offset_y));
+                let content_bounds = cherenkov::kurbo::Rect::new(
                     0.0,
                     0.0,
                     f64::from(node.content_size.width),
@@ -389,7 +349,7 @@ impl RenderNode {
                 );
                 // Publish the visible window (in content coordinates) so a
                 // virtualized `LazyStack` child only builds the rows on screen.
-                let lazy_viewport = vello::kurbo::Rect::new(
+                let lazy_viewport = cherenkov::kurbo::Rect::new(
                     metrics.offset_x,
                     metrics.offset_y,
                     metrics.offset_x + f64::from(node.viewport.width),
@@ -574,46 +534,12 @@ impl RenderNode {
                     // so it is a focus-bookkeeping slot (keyboard traversal,
                     // `.focused`), not a hit rect.
                     renderer.register_surface_input_target(
-                        vello::kurbo::Rect::ZERO,
-                        vello::kurbo::Affine::IDENTITY,
+                        cherenkov::kurbo::Rect::ZERO,
+                        cherenkov::kurbo::Affine::IDENTITY,
                         Rc::clone(&node.content),
                         focus_node,
                     );
                 }
-            }
-            RenderNode::GpuSurface(node) => {
-                let (content_label, content_value, wants_input) = {
-                    let runtime = node.runtime.borrow();
-                    (
-                        runtime.accessibility_label(),
-                        runtime.accessibility_value(),
-                        runtime.wants_input_events(),
-                    )
-                };
-                renderer.push_accessibility_owner(&node.accessibility_identity);
-                let focus_node = emit_graphics_image_accessibility(
-                    renderer,
-                    None,
-                    env,
-                    content_label,
-                    content_value,
-                    wants_input,
-                );
-                renderer.pop_accessibility_owner();
-                if wants_input {
-                    renderer.register_surface_input_target(
-                        vello::kurbo::Rect::ZERO,
-                        vello::kurbo::Affine::IDENTITY,
-                        Rc::clone(&node.runtime),
-                        focus_node,
-                    );
-                }
-            }
-            RenderNode::ViewEffect(node) => {
-                node.child.borrow().emit_accessibility(renderer, &node.env);
-            }
-            RenderNode::AppliedFilter(node) => {
-                node.child.emit_accessibility(renderer, &node.env);
             }
             RenderNode::Scroll(node) => {
                 // The semantic scroll domain is unbounded — there is no layout
@@ -675,7 +601,7 @@ fn flush_navigation_transition_element(
         child.flush(renderer, ctx, env);
         return;
     }
-    let mut scene = vello::Scene::new();
+    let mut scene = crate::scene::Scene::new();
     core::mem::swap(renderer.scene_mut(), &mut scene);
     child.flush(renderer, ctx, env);
     core::mem::swap(renderer.scene_mut(), &mut scene);
@@ -685,77 +611,4 @@ fn flush_navigation_transition_element(
         transformed_rect(ctx.transform, ctx.bounds),
         scene,
     );
-}
-
-impl HydrolysisRenderer {
-    /// Render an already-laid-out child into an effect input texture in local
-    /// coordinates. The complete painter stream is isolated, including embedded
-    /// GPU surfaces, rather than capturing only the Vello scene.
-    pub(crate) fn render_child_node_to_texture(
-        &mut self,
-        child: &RenderNode,
-        ctx: RenderContext,
-        env: &Environment,
-        target: ChildTextureTarget<'_>,
-    ) {
-        let adapter = self.state().frame_adapter().clone();
-        let (device, queue) = {
-            let (device, queue) = self.state().frame_resources();
-            (device.clone(), queue.clone())
-        };
-        let device_loss = self.state().frame_device_loss().clone();
-        let parent_scene = core::mem::take(&mut self.scene);
-        let parent_render_layers = core::mem::take(&mut self.compositor.render_layers);
-        let parent_active_layers = core::mem::take(&mut self.compositor.active_scene_layers);
-        let parent_transient_scene = self.transient_scene.take();
-        // The captured subtree is flushed under identity transforms into a
-        // pixel-sized texture, so its viewport is that texture and its root
-        // transform is the identity — not the window's.
-        let parent_window_bounds = self.window_bounds;
-        let parent_window_root_transform = self.window_root_transform;
-        self.set_window_viewport(
-            vello::kurbo::Rect::new(0.0, 0.0, f64::from(target.width), f64::from(target.height)),
-            vello::kurbo::Affine::IDENTITY,
-        );
-
-        let local_ctx = ctx.with_identity_transforms(vello::kurbo::Rect::new(
-            0.0,
-            0.0,
-            f64::from(target.width),
-            f64::from(target.height),
-        ));
-        // Filters inside this subtree are captured one level deeper and flushed
-        // here, so their outputs exist before the subtree itself is rendered.
-        let depth = self.subtree_captures.depth;
-        self.subtree_captures.depth = depth + 1;
-        child.flush(self, local_ctx, env);
-        self.subtree_captures.depth = depth;
-        assert!(
-            self.compositor.active_scene_layers.is_empty(),
-            "hydrolysis GPU subtree capture left an unclosed scene layer"
-        );
-        self.flush_subtree_captures(depth + 1);
-        self.render_scene_to_texture(HydrolysisRenderTarget {
-            adapter: &adapter,
-            device: &device,
-            queue: &queue,
-            device_loss,
-            texture: Some(target.texture),
-            view: target.view,
-            format: target.format,
-            width: target.width,
-            height: target.height,
-            base_color: vello::peniko::Color::TRANSPARENT,
-        });
-        assert!(
-            self.compositor.active_scene_layers.is_empty(),
-            "hydrolysis GPU subtree compositor restored an active scene layer"
-        );
-
-        self.scene = parent_scene;
-        self.compositor.render_layers = parent_render_layers;
-        self.compositor.active_scene_layers = parent_active_layers;
-        self.transient_scene = parent_transient_scene;
-        self.set_window_viewport(parent_window_bounds, parent_window_root_transform);
-    }
 }

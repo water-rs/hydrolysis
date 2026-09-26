@@ -3,19 +3,28 @@
 
 use super::*;
 
-/// What one frame's window pass was made of.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RenderLayerStats {
-    /// Layers the compositor drew, which is every layer unless the window pass
-    /// was handed to a GPU surface outright.
-    pub(crate) composited_scene_layers: u32,
-    /// Composited layers that were Vello scenes.
-    pub(crate) vello_scene_layers: u32,
-    /// Composited layers that were embedded GPU surfaces.
-    pub(crate) gpu_surface_layers: u32,
-    /// GPU surfaces that rendered straight into the window's own target,
-    /// skipping the offscreen intermediate and the composite entirely.
-    pub(crate) direct_gpu_surfaces: u32,
+use std::collections::HashMap;
+use cherenkov::Draw;
+
+/// CPU and GPU stage times of one pumped frame, for the `frame_profile`
+/// example and the headless runner's frame report.
+#[cfg(feature = "frame-profile")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameStageTimes {
+    /// Reactive update / patch application.
+    pub update: Duration,
+    /// Layout of the retained tree.
+    pub layout: Duration,
+    /// Scene encoding: recording the retained tree into the frame picture and
+    /// committing it to the surface.
+    pub encode: Duration,
+    /// GPU time the engine reported for the frame, when timestamp queries are
+    /// enabled and the adapter supports them.
+    pub gpu: Option<Duration>,
+    /// Waiting for the engine to render the frame.
+    pub gpu_wait: Duration,
+    /// Offscreen readback of the rendered frame.
+    pub readback: Duration,
 }
 
 pub(crate) fn duration_micros_u64(duration: Duration) -> u64 {
@@ -23,13 +32,24 @@ pub(crate) fn duration_micros_u64(duration: Duration) -> u64 {
 }
 
 /// Whether a scene encodes any visible content.
-///
-/// `Encoding::is_empty` only checks the path stream; glyph runs are deferred
-/// resources that resolve to paths at render time, so a scene containing only
-/// text would otherwise read as empty and be dropped by the compositor.
-pub(crate) fn scene_has_content(scene: &vello::Scene) -> bool {
-    let encoding = scene.encoding();
-    !encoding.is_empty() || !encoding.resources.glyph_runs.is_empty()
+pub(crate) fn scene_has_content(scene: &crate::scene::Scene) -> bool {
+    scene.has_content()
+}
+
+/// A clip layer open in the frame scene. Re-pushed onto the fresh scene
+/// after a whole-scene flush so the retained walk's clip nesting survives the
+/// layer boundary.
+#[derive(Clone, Debug)]
+pub(crate) struct ActiveSceneLayer {
+    pub(crate) alpha: f32,
+    pub(crate) transform: cherenkov::kurbo::Affine,
+    pub(crate) shape: cherenkov::ShapeData,
+}
+
+impl ActiveSceneLayer {
+    fn push_to_scene(&self, scene: &mut crate::scene::Scene) {
+        scene.push_layer_shape(self.alpha, self.transform, self.shape.clone());
+    }
 }
 
 impl SemanticCore {
@@ -277,15 +297,10 @@ impl SemanticCore {
 impl HydrolysisRenderer {
     /// Records the window's logical bounds and the root transform that maps
     /// them onto the target's physical pixel grid.
-    ///
-    /// Both halves are needed together: the bounds alone say how big the window
-    /// is in layout units, and only the transform says which device pixels that
-    /// covers — which is the rectangle a full-window GPU surface has to match to
-    /// be rendered straight into the target.
     pub(crate) fn set_window_viewport(
         &mut self,
-        bounds: vello::kurbo::Rect,
-        root_transform: vello::kurbo::Affine,
+        bounds: cherenkov::kurbo::Rect,
+        root_transform: cherenkov::kurbo::Affine,
     ) {
         self.window_bounds = bounds;
         self.window_root_transform = root_transform;
@@ -293,37 +308,31 @@ impl HydrolysisRenderer {
 
     /// The window's viewport in physical pixels: where the root transform puts
     /// the window's logical bounds.
-    pub(crate) fn window_viewport(&self) -> vello::kurbo::Rect {
+    pub(crate) fn window_viewport(&self) -> cherenkov::kurbo::Rect {
         self.window_root_transform
             .transform_rect_bbox(self.window_bounds)
     }
 
-    pub(crate) fn state_and_scene_mut(&mut self) -> (&mut HydroState, &mut vello::Scene) {
+    pub(crate) fn state_and_scene_mut(&mut self) -> (&mut HydroState, &mut crate::scene::Scene) {
         (&mut self.core.state, &mut self.scene)
     }
 
     #[must_use]
-    pub fn scene(&self) -> &vello::Scene {
+    pub fn scene(&self) -> &crate::scene::Scene {
         &self.scene
     }
 
     pub fn reset_scene(&mut self) {
-        for image in self.compositor.active_filter_images.drain(..) {
-            self.vello_renderer.unregister_texture(image);
-        }
         self.hit_test.reset_scene();
         self.gesture_engine.clear_targets();
         self.text_editing.text_input_targets.clear();
         self.scene.reset();
-        self.compositor.render_layers.clear();
-        self.compositor.active_scene_layers.clear();
+        self.frame_pictures.clear();
+        self.frame_recorded = true;
+        self.active_scene_layers.clear();
         self.state.measurement.reset_counters();
         self.frame_clip_layers = 0;
         self.frame_max_clip_depth = 0;
-        self.frame_applied_filter_count = 0;
-        self.frame_applied_filter_capture = Duration::ZERO;
-        self.frame_applied_filter_effect = Duration::ZERO;
-        self.subtree_captures.begin_frame();
         #[cfg(feature = "accessibility")]
         self.accessibility.reset_scene();
     }
@@ -335,10 +344,6 @@ impl HydrolysisRenderer {
         self.state.measurement.begin_frame();
         self.frame_clip_layers = 0;
         self.frame_max_clip_depth = 0;
-        self.frame_applied_filter_count = 0;
-        self.frame_applied_filter_capture = Duration::ZERO;
-        self.frame_applied_filter_effect = Duration::ZERO;
-        self.subtree_captures.begin_frame();
         self.lifecycle.begin_rebuild_frame();
         self.hit_test.begin_rebuild_frame();
         self.gesture_group_ids.clear();
@@ -346,41 +351,32 @@ impl HydrolysisRenderer {
         self.animation_controller.begin_rebuild_frame();
         self.lazy.begin_rebuild_frame();
         self.navigation.begin_rebuild_frame();
-        self.compositor.render_layers.clear();
-        self.compositor.active_scene_layers.clear();
+        self.frame_pictures.clear();
+        self.frame_recorded = true;
+        self.active_scene_layers.clear();
         #[cfg(feature = "accessibility")]
         self.accessibility.begin_rebuild_frame();
     }
 
     pub(crate) fn begin_redraw_frame(&mut self) {
         // Clear the per-frame `stable_ptr`-keyed view-dimension cache, not just the
-        // counters: the refresh path now runs full layout every frame, so it measures
+        // counters: the refresh path runs full layout every frame, so it measures
         // `RetainedSubview`/widget content through that cache. Its keys are view heap
         // addresses, unique only within a frame (a freed view's address is reused next
         // frame), so a stale entry would otherwise be read as a different view's size.
-        // The persistent, content-keyed text-shaping cache is untouched and keeps full
-        // layout cheap.
         self.state.measurement.begin_frame();
         self.frame_clip_layers = 0;
         self.frame_max_clip_depth = 0;
-        self.frame_applied_filter_count = 0;
-        self.frame_applied_filter_capture = Duration::ZERO;
-        self.frame_applied_filter_effect = Duration::ZERO;
     }
 
     pub fn finish_rebuild_frame(&mut self) {
         assert!(
-            self.compositor.active_scene_layers.is_empty(),
+            self.active_scene_layers.is_empty(),
             "hydrolysis renderer: scene layer stack must be empty at end of rebuild (len={})",
-            self.compositor.active_scene_layers.len()
+            self.active_scene_layers.len()
         );
-        self.flush_vello_scene_layer();
+        self.flush_scene_layer();
         self.lifecycle.finish_rebuild_frame();
-        // Prune the measure-path `Dynamic` dimension cache down to the identities
-        // still present in the retained render tree. The cache is read by
-        // `measure_dynamic` when a `Dynamic` leaf is measured after its content was
-        // handed to a `DynamicHostNode`; the live `DynamicHostNode`s in `render_tree`
-        // are exactly the alive identities now that the dispatch path is gone.
         let live_dynamics = self
             .render_tree
             .as_ref()
@@ -403,108 +399,37 @@ impl HydrolysisRenderer {
         self.finalize_accessibility_tree_update();
     }
 
-    pub fn scene_mut(&mut self) -> &mut vello::Scene {
+    pub fn scene_mut(&mut self) -> &mut crate::scene::Scene {
         &mut self.scene
-    }
-
-    pub(crate) fn draw_context(&mut self, ctx: RenderContext) -> VelloDrawContext<'_> {
-        VelloDrawContext::with_root_transform(&mut self.scene, ctx.transform)
-    }
-
-    pub fn vello_renderer(&mut self) -> &mut vello::Renderer {
-        &mut self.vello_renderer
-    }
-
-    pub fn set_frame_resources(
-        &mut self,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        device_loss: &waterui_graphics::DeviceLoss,
-    ) {
-        self.state
-            .set_frame_resources(adapter, device, queue, device_loss);
-    }
-
-    pub fn clear_frame_resources(&mut self) {
-        self.state.clear_frame_resources();
     }
 
     pub(crate) fn push_layer_rect(
         &mut self,
         alpha: f32,
-        transform: vello::kurbo::Affine,
-        rect: vello::kurbo::Rect,
+        transform: cherenkov::kurbo::Affine,
+        rect: cherenkov::kurbo::Rect,
     ) {
-        self.record_clip_layer_push();
-        self.scene.push_layer(
-            vello::peniko::Fill::NonZero,
-            vello::peniko::BlendMode::default(),
-            alpha,
-            transform,
-            &rect,
-        );
-        self.compositor.active_scene_layers.push(ActiveSceneLayer {
-            alpha,
-            transform,
-            shape: LayerShape::Rect(rect),
-        });
+        self.push_layer_shape(alpha, transform, cherenkov::ShapeData::Rect(rect));
     }
 
-    pub(super) fn push_layer_path(
+    pub(crate) fn push_layer_shape(
         &mut self,
         alpha: f32,
-        transform: vello::kurbo::Affine,
-        path: vello::kurbo::BezPath,
+        transform: cherenkov::kurbo::Affine,
+        shape: cherenkov::ShapeData,
     ) {
         self.record_clip_layer_push();
-        self.scene.push_layer(
-            vello::peniko::Fill::NonZero,
-            vello::peniko::BlendMode::default(),
+        self.scene.push_layer_shape(alpha, transform, shape.clone());
+        self.active_scene_layers.push(ActiveSceneLayer {
             alpha,
             transform,
-            &path,
-        );
-        self.compositor.active_scene_layers.push(ActiveSceneLayer {
-            alpha,
-            transform,
-            shape: LayerShape::Path(path),
-        });
-    }
-
-    pub(super) fn push_layer_rounded_rect(
-        &mut self,
-        alpha: f32,
-        transform: vello::kurbo::Affine,
-        path: vello::kurbo::BezPath,
-        rect: vello::kurbo::Rect,
-        corner_width: f64,
-        corner_height: f64,
-    ) {
-        self.record_clip_layer_push();
-        self.scene.push_layer(
-            vello::peniko::Fill::NonZero,
-            vello::peniko::BlendMode::default(),
-            alpha,
-            transform,
-            &path,
-        );
-        self.compositor.active_scene_layers.push(ActiveSceneLayer {
-            alpha,
-            transform,
-            shape: LayerShape::RoundedRect {
-                path,
-                rect,
-                corner_width,
-                corner_height,
-            },
+            shape,
         });
     }
 
     pub(crate) fn pop_layer(&mut self) {
         self.scene.pop_layer();
-        self.compositor
-            .active_scene_layers
+        self.active_scene_layers
             .pop()
             .expect("hydrolysis renderer: pop_layer underflow");
     }
@@ -514,97 +439,125 @@ impl HydrolysisRenderer {
             .frame_clip_layers
             .checked_add(1)
             .expect("hydrolysis frame clip layer counter overflow");
-        let depth = u32::try_from(self.compositor.active_scene_layers.len() + 1)
+        let depth = u32::try_from(self.active_scene_layers.len() + 1)
             .expect("hydrolysis active scene layer depth exceeds u32");
         self.frame_max_clip_depth = self.frame_max_clip_depth.max(depth);
     }
 
-    pub(super) fn flush_vello_scene_layer(&mut self) {
+    /// Closes the frame scene into a picture: the open clip layers are popped,
+    /// the scene is recorded and queued for the frame, and the clip layers are
+    /// re-pushed onto the fresh scene so the retained walk continues inside
+    /// them.
+    pub(super) fn flush_scene_layer(&mut self) {
         assert!(
-            (self.scene.encoding().n_open_clips as usize)
-                == self.compositor.active_scene_layers.len(),
+            self.scene.open_layers() == self.active_scene_layers.len(),
             "hydrolysis renderer: scene clip count {} does not match tracked scene layers {}",
-            self.scene.encoding().n_open_clips,
-            self.compositor.active_scene_layers.len()
+            self.scene.open_layers(),
+            self.active_scene_layers.len()
         );
 
-        for _ in 0..self.compositor.active_scene_layers.len() {
+        for _ in 0..self.active_scene_layers.len() {
             self.scene.pop_layer();
         }
 
-        if !scene_has_content(&self.scene) {
-            for layer in &self.compositor.active_scene_layers {
-                layer.push_to_scene(&mut self.scene);
-            }
-            return;
+        if self.scene.has_content() {
+            let scene = core::mem::take(&mut self.scene);
+            self.frame_pictures.push(scene.to_picture());
+        } else {
+            self.scene.reset();
         }
-        let scene = core::mem::take(&mut self.scene);
-        self.compositor
-            .render_layers
-            .push(RenderLayer::Vello(scene));
 
-        for layer in &self.compositor.active_scene_layers {
+        for layer in &self.active_scene_layers {
             layer.push_to_scene(&mut self.scene);
         }
     }
 
-    #[cfg(hydrolysis_macos_system_webview)]
-    pub(crate) fn record_native_view_layer(
-        &mut self,
-        view: objc2::rc::Retained<objc2_web_kit::WKWebView>,
-        transform: vello::kurbo::Affine,
-        bounds: vello::kurbo::Rect,
-        occlusion: Rc<RefCell<Vec<vello::kurbo::Rect>>>,
-    ) {
-        self.flush_vello_scene_layer();
-        self.compositor
-            .render_layers
-            .push(RenderLayer::NativeView(NativeViewLayer {
-                view,
-                transform,
-                bounds,
-                active_layers: self.compositor.active_scene_layers.clone(),
-                occlusion,
-            }));
-    }
-
-    pub(crate) fn set_host_redraw_handle(&mut self, handle: RedrawHandle) {
-        self.host_redraw_handle = Some(handle);
-    }
-
-    pub(crate) fn render_layer_stats(&self) -> RenderLayerStats {
-        let scene_layers = u32::try_from(self.compositor.render_layers.len())
-            .expect("hydrolysis render layer count exceeds u32");
-        let vello_scene_layers = u32::try_from(
-            self.compositor
-                .render_layers
-                .iter()
-                .filter(|layer| matches!(layer, RenderLayer::Vello(_)))
-                .count(),
-        )
-        .expect("hydrolysis Vello scene layer count exceeds u32");
-        // What was rendered directly is recorded by the render pass itself, not
-        // re-derived from the layer's `direct_to_target` flag: that flag says
-        // the layer is eligible on geometry, structure and opacity, and the
-        // render pass adds the one condition only it can see — that the target
-        // already carries the format the view was set up for.
-        let direct_gpu_surfaces = self.frame_direct_gpu_surfaces;
-        let gpu_surface_layers = scene_layers
-            .checked_sub(vello_scene_layers)
-            .and_then(|count| count.checked_sub(direct_gpu_surfaces))
-            .expect("hydrolysis render layer count accounting underflow");
-        let composited_scene_layers = scene_layers
-            .checked_sub(direct_gpu_surfaces)
-            .expect("hydrolysis render layer count accounting underflow");
-        RenderLayerStats {
-            composited_scene_layers,
-            vello_scene_layers,
-            gpu_surface_layers,
-            direct_gpu_surfaces,
+    /// Takes the frame's whole-scene picture — every flushed segment appended
+    /// in order — or `None` when the scene was not re-recorded since the last
+    /// frame and the root layer keeps its retained picture.
+    pub(crate) fn take_frame_picture(&mut self) -> Option<cherenkov::Picture> {
+        if !self.frame_recorded {
+            return None;
         }
+        self.frame_recorded = false;
+        let pictures = core::mem::take(&mut self.frame_pictures);
+        self.frame_picture_count =
+            u32::try_from(pictures.len()).expect("frame picture count fits u32");
+        if pictures.len() == 1 {
+            return pictures.into_iter().next();
+        }
+        Some(cherenkov::Picture::record(|recorder| {
+            for picture in &pictures {
+                recorder.picture(picture, cherenkov::kurbo::Affine::IDENTITY);
+            }
+        }))
+    }
+
+    /// Installs the frame's whole-scene picture on `surface`'s root layer and
+    /// renders every surface of the engine at `now`.
+    ///
+    /// Returns when the engine next wants a frame; the runner folds it into
+    /// its pump. The pump keeps `Idle`/`Refresh`: a settled scene leaves the
+    /// engine idle and no frame is submitted until content changes.
+    ///
+    /// # Errors
+    /// The engine's render error; the runner maps it to a surface loss.
+    pub fn present_frame(
+        &mut self,
+        surface: &cherenkov::Surface<cherenkov_gpu::Gpu>,
+        clear_color: cherenkov::WorkingColor,
+        now: Instant,
+    ) -> Result<cherenkov::Next, cherenkov::RenderError> {
+        let picture = self.take_frame_picture();
+        let overlay = self
+            .transient_scene
+            .take()
+            .filter(crate::scene::Scene::has_content)
+            .map(|scene| scene.to_picture());
+        let attach_overlay = overlay.is_some() && self.overlay_layer.is_none();
+        let overlay_layer = self.overlay_layer.get_or_insert_with(|| surface.layer());
+        surface.clear_color(clear_color);
+        surface.update(|tx| {
+            if let Some(picture) = picture {
+                tx[surface.root()].content(picture);
+            }
+            if attach_overlay {
+                tx[surface.root()].push(overlay_layer);
+            }
+            match overlay {
+                Some(overlay) => tx[&*overlay_layer].content(overlay),
+                None => tx[&*overlay_layer].clear_content(),
+            };
+        });
+        #[cfg(feature = "frame-profile")]
+        let started = Instant::now();
+        let next = self.engine.render(cherenkov::FrameTime::at(now))?;
+        #[cfg(feature = "frame-profile")]
+        {
+            self.frame_stage_times.gpu_wait = started.elapsed();
+        }
+        Ok(next)
+    }
+
+    /// Segments in the last frame picture.
+    pub(crate) fn frame_picture_count(&self) -> u32 {
+        self.frame_picture_count
     }
 
     pub(crate) fn clip_layer_stats(&self) -> (u32, u32) {
         (self.frame_clip_layers, self.frame_max_clip_depth)
+    }
+
+    /// Drains the stage times accumulated since the last call.
+    #[cfg(feature = "frame-profile")]
+    pub fn take_frame_stage_times(&mut self) -> FrameStageTimes {
+        core::mem::take(&mut self.frame_stage_times)
+    }
+
+    /// Digest of the last layout pass's placed bounds.
+    #[cfg(feature = "frame-profile")]
+    #[must_use]
+    pub fn layout_signature(&self) -> Option<u64> {
+        self.last_layout_signature
     }
 }

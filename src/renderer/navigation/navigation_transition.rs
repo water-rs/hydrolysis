@@ -8,9 +8,9 @@ use waterui_backend_core::widget::NavigationMotion;
 use super::{NavigationCapturedScene, NavigationMatchedElement};
 
 pub(crate) struct NavigationTransitionFrame<'a> {
-    pub(crate) scene: &'a mut vello::Scene,
-    pub(crate) transform: vello::kurbo::Affine,
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) scene: &'a mut crate::scene::Scene,
+    pub(crate) transform: cherenkov::kurbo::Affine,
+    pub(crate) bounds: cherenkov::kurbo::Rect,
     pub(crate) style: AnyNavigationTransition,
     pub(crate) motion: NavigationMotion,
     pub(crate) direction: NavigationTransitionDirection,
@@ -163,12 +163,12 @@ fn draw_matched_navigation_transition(
 }
 
 fn interpolate_rect(
-    from: vello::kurbo::Rect,
-    to: vello::kurbo::Rect,
+    from: cherenkov::kurbo::Rect,
+    to: cherenkov::kurbo::Rect,
     progress: f64,
-) -> vello::kurbo::Rect {
+) -> cherenkov::kurbo::Rect {
     let interpolate = |from: f64, to: f64| from + (to - from) * progress;
-    vello::kurbo::Rect::new(
+    cherenkov::kurbo::Rect::new(
         interpolate(from.x0, to.x0),
         interpolate(from.y0, to.y0),
         interpolate(from.x1, to.x1),
@@ -177,24 +177,22 @@ fn interpolate_rect(
 }
 
 fn append_matched_element(
-    scene: &mut vello::Scene,
-    transform: vello::kurbo::Affine,
+    scene: &mut crate::scene::Scene,
+    transform: cherenkov::kurbo::Affine,
     element: &NavigationMatchedElement,
-    target: vello::kurbo::Rect,
+    target: cherenkov::kurbo::Rect,
     opacity: f32,
 ) {
     if opacity <= 0.0 {
         return;
     }
-    let local = vello::kurbo::Affine::translate((target.x0, target.y0))
-        * vello::kurbo::Affine::scale_non_uniform(
+    let local = cherenkov::kurbo::Affine::translate((target.x0, target.y0))
+        * cherenkov::kurbo::Affine::scale_non_uniform(
             target.width() / element.bounds.width(),
             target.height() / element.bounds.height(),
         )
-        * vello::kurbo::Affine::translate((-element.bounds.x0, -element.bounds.y0));
+        * cherenkov::kurbo::Affine::translate((-element.bounds.x0, -element.bounds.y0));
     scene.push_layer(
-        vello::peniko::Fill::NonZero,
-        vello::peniko::BlendMode::default(),
         opacity,
         transform,
         &target,
@@ -204,10 +202,10 @@ fn append_matched_element(
 }
 
 fn append_scene_with_opacity(
-    scene: &mut vello::Scene,
-    transform: vello::kurbo::Affine,
-    clip_bounds: vello::kurbo::Rect,
-    content: &vello::Scene,
+    scene: &mut crate::scene::Scene,
+    transform: cherenkov::kurbo::Affine,
+    clip_bounds: cherenkov::kurbo::Rect,
+    content: &crate::scene::Scene,
     opacity: f32,
 ) {
     append_scene_layer(
@@ -223,26 +221,24 @@ fn append_scene_with_opacity(
 }
 
 fn append_scene_layer(
-    scene: &mut vello::Scene,
-    transform: vello::kurbo::Affine,
-    clip_bounds: vello::kurbo::Rect,
-    content: &vello::Scene,
+    scene: &mut crate::scene::Scene,
+    transform: cherenkov::kurbo::Affine,
+    clip_bounds: cherenkov::kurbo::Rect,
+    content: &crate::scene::Scene,
     layer: NavigationTransitionLayer,
 ) {
     if layer.opacity <= 0.0 {
         return;
     }
     let center = clip_bounds.center();
-    let local = vello::kurbo::Affine::translate((
+    let local = cherenkov::kurbo::Affine::translate((
         f64::from(layer.offset_x) * clip_bounds.width(),
         f64::from(layer.offset_y) * clip_bounds.height(),
-    )) * vello::kurbo::Affine::translate((center.x, center.y))
-        * vello::kurbo::Affine::scale(f64::from(layer.scale))
-        * vello::kurbo::Affine::translate((-center.x, -center.y));
+    )) * cherenkov::kurbo::Affine::translate((center.x, center.y))
+        * cherenkov::kurbo::Affine::scale(f64::from(layer.scale))
+        * cherenkov::kurbo::Affine::translate((-center.x, -center.y));
     let transformed_bounds = local.transform_rect_bbox(clip_bounds);
     scene.push_layer(
-        vello::peniko::Fill::NonZero,
-        vello::peniko::BlendMode::default(),
         layer.opacity,
         transform,
         &transformed_bounds,

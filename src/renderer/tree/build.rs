@@ -21,14 +21,6 @@ impl RenderNode {
             }
             Err(view) => view,
         };
-        let view = match view.downcast::<Native<ResolvedColor>>() {
-            Ok(color) => {
-                return RenderNode::Color(ColorNode {
-                    color: Computed::constant((*color).into_inner()),
-                });
-            }
-            Err(view) => view,
-        };
         let view = match view.downcast::<Native<TextConfig>>() {
             Ok(text) => {
                 let config = (*text).into_inner();
@@ -492,30 +484,6 @@ impl RenderNode {
             }
             Err(view) => view,
         };
-        // GPU/effect leaves and wrappers: each owns its effect runtime directly
-        // (textures, setup state, redraw handle), so a reactive swap renders the
-        // new content and a per-frame re-flush re-binds the *same* runtime. Holding
-        // the runtime in a frame-ordered slot instead lets the ordering drift out of
-        // step with the tree and hand a leaf another leaf's runtime.
-        let view = match view.downcast::<Native<GpuSurface>>() {
-            Ok(surface) => {
-                return RenderNode::build_gpu_surface((*surface).into_inner(), env, renderer);
-            }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<Native<ViewEffectErased>>() {
-            Ok(effect) => {
-                return RenderNode::build_view_effect((*effect).into_inner(), env, renderer);
-            }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<Metadata<AppliedFilter>>() {
-            Ok(meta) => {
-                let Metadata { content, value } = *meta;
-                return RenderNode::build_applied_filter(value, content, env, renderer);
-            }
-            Err(view) => view,
-        };
         let view = match view.downcast::<Native<Dynamic>>() {
             Ok(dynamic) => {
                 return RenderNode::build_dynamic_host((*dynamic).into_inner(), env, renderer);
@@ -602,7 +570,7 @@ impl RenderNode {
             Ok(icon) => unsupported_system_icon(icon.as_inner()),
             Err(view) => view,
         };
-        let view = match view.downcast::<Native<ResolvedGradient>>() {
+        let view = match view.downcast::<Native<Gradient>>() {
             Ok(gradient) => return RenderNode::build_gradient((*gradient).into_inner(), env),
             Err(view) => view,
         };
@@ -864,62 +832,6 @@ impl RenderNode {
         RenderNode::SceneView(Box::new(SceneViewNode {
             accessibility_identity: Rc::new(()),
             content: Rc::new(RefCell::new(content)),
-        }))
-    }
-
-    /// Build an embedded `GpuSurface` node owning its
-    /// [`EmbeddedGpuSurfaceRuntime`] directly. The runtime is shared with the
-    /// renderer's node-surface registry so its off-thread redraw handle is polled
-    /// even on frames that do not re-flush the tree.
-    fn build_gpu_surface(
-        surface: GpuSurface,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        let runtime = Rc::new(RefCell::new(EmbeddedGpuSurfaceRuntime::new(surface, env)));
-        renderer.register_node_gpu_surface(Rc::clone(&runtime));
-        RenderNode::GpuSurface(Box::new(GpuSurfaceNode {
-            accessibility_identity: Rc::new(()),
-            runtime,
-        }))
-    }
-
-    /// Build a `ViewEffect` node owning its [`ViewEffectRuntime`] and building its
-    /// captured content as a persistent child [`RenderNode`] (recursed into, not
-    /// baked), so reactive descendants inside the effect stay live.
-    fn build_view_effect(
-        mut effect: ViewEffectErased,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        let content = effect.take_content();
-        let child = RenderNode::build(normalize_layout_view(content, env), env, renderer);
-        let runtime = Rc::new(RefCell::new(ViewEffectRuntime::new(effect)));
-        renderer.register_node_view_effect(Rc::clone(&runtime));
-        RenderNode::ViewEffect(Box::new(ViewEffectNode {
-            runtime,
-            child: RefCell::new(child),
-            env: env.clone(),
-        }))
-    }
-
-    /// Build an `AppliedFilter` node owning its [`AppliedFilterRuntime`]
-    /// (input/output textures) and building its wrapped content as a persistent
-    /// child [`RenderNode`]. The runtime is registered with the renderer so
-    /// animated filters refresh on redraw-only frames.
-    fn build_applied_filter(
-        filter: AppliedFilter,
-        content: AnyView,
-        env: &Environment,
-        renderer: &mut SemanticCore,
-    ) -> RenderNode {
-        let runtime = Rc::new(RefCell::new(AppliedFilterRuntime::new(filter)));
-        renderer.register_node_applied_filter(Rc::clone(&runtime));
-        let child = RenderNode::build(normalize_layout_view(content, env), env, renderer);
-        RenderNode::AppliedFilter(Box::new(AppliedFilterNode {
-            runtime,
-            child,
-            env: env.clone(),
         }))
     }
 

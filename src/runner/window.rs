@@ -53,18 +53,19 @@ pub(super) struct RuntimeWindow<P: PlatformWindow> {
         Option<waterui_core::layout::Size>,
         Option<waterui_core::layout::Size>,
     )>,
+    /// When the engine next wants a frame, from the last render: an
+    /// animation or a scroll bound to a layer property runs on the engine's
+    /// clock, and the pump wakes for it without a content change.
+    pub(super) engine_next: Option<cherenkov::Next>,
 }
 
 impl<P: PlatformWindow> RuntimeWindow<P> {
     pub(super) fn new(
         window: Window,
         platform: P,
-        mut renderer: HydrolysisRenderer,
+        renderer: HydrolysisRenderer,
         render_diagnostics_config: RenderDiagnosticsConfig,
     ) -> Self {
-        if let Some(handle) = platform.gpu_surface_redraw_handle() {
-            renderer.set_host_redraw_handle(handle);
-        }
         Self {
             window,
             platform,
@@ -74,6 +75,7 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
             render_diagnostics: RenderDiagnostics::new(render_diagnostics_config),
             refresh_rate_hz: None,
             applied_size_limits: None,
+            engine_next: None,
         }
     }
 
@@ -243,11 +245,11 @@ pub struct FramePhases {
     pub scene_dispatch: Duration,
     /// Time spent finalizing layout, interaction, and accessibility state after dispatch.
     pub scene_finish: Duration,
-    /// Time spent acquiring the target frame.
+    /// Time spent installing the frame's content on the surface.
     pub acquire: Duration,
-    /// Time spent submitting rendering work.
+    /// Time spent in the engine's render, presentation included.
     pub render: Duration,
-    /// Time spent presenting the frame.
+    /// Time spent reading the frame back for a headless snapshot.
     pub present: Duration,
     /// Time spent draining local executor work after rendering.
     pub executor_after: Duration,
@@ -262,27 +264,12 @@ pub struct FrameCounters {
     pub measurement_cache_hits: u32,
     /// Measurement cache misses in this frame.
     pub measurement_cache_misses: u32,
-    /// Number of compositor layers submitted for this frame.
+    /// Number of whole-scene picture segments the frame was assembled from.
     pub scene_layers: u32,
-    /// Number of Vello scene layers submitted for this frame.
-    pub vello_scene_layers: u32,
-    /// Number of embedded GPU surface layers submitted for this frame.
-    pub gpu_surface_layers: u32,
-    /// Number of GPU surfaces that rendered straight into the window's own
-    /// target this frame, skipping the offscreen intermediate and the
-    /// compositor pass. At most one: the path exists only for a surface that is
-    /// the window's whole content.
-    pub direct_gpu_surfaces: u32,
-    /// Number of Vello clip layers pushed while building this frame.
+    /// Number of clip layers pushed while building this frame.
     pub clip_layers: u32,
-    /// Maximum nested Vello clip depth while building this frame.
+    /// Maximum nested clip depth while building this frame.
     pub max_clip_depth: u32,
-    /// Number of AppliedFilter nodes dispatched in this frame.
-    pub applied_filter_count: u32,
-    /// Time spent capturing AppliedFilter input subtrees, in microseconds.
-    pub applied_filter_capture_us: u64,
-    /// Time spent running AppliedFilter GPU effects, in microseconds.
-    pub applied_filter_effect_us: u64,
     /// Whether this frame rendered to the target.
     pub rendered: bool,
     /// Whether this frame captured a CPU snapshot.
@@ -324,12 +311,12 @@ pub(super) fn schedule_redraw_or_refresh<P: PlatformWindow>(
     runtime.platform.request_redraw();
 }
 
-pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> vello::kurbo::Rect {
+pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> cherenkov::kurbo::Rect {
     assert!(
         scale_factor.is_finite() && scale_factor > 0.0,
         "hydrolysis runner: invalid scale factor {scale_factor}"
     );
-    vello::kurbo::Rect::new(
+    cherenkov::kurbo::Rect::new(
         0.0,
         0.0,
         f64::from(width) / scale_factor,
@@ -337,7 +324,7 @@ pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> vello
     )
 }
 
-pub(super) fn window_clear_color(window: &Window, env: &Environment) -> vello::peniko::Color {
+pub(super) fn window_clear_color(window: &Window, env: &Environment) -> cherenkov::WorkingColor {
     match &window.background {
         WindowBackground::Opaque => {
             resolve_window_clear_color(Color::new(theme::color::Background), env)
@@ -346,17 +333,15 @@ pub(super) fn window_clear_color(window: &Window, env: &Environment) -> vello::p
     }
 }
 
-pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vello::peniko::Color {
-    let resolved = color.resolve(env).snapshot();
-    let srgb = resolved.to_srgb_with_headroom();
-    vello::peniko::Color::new([srgb.red, srgb.green, srgb.blue, resolved.opacity])
+pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> cherenkov::WorkingColor {
+    color.resolve(env).snapshot()
 }
 
 #[cfg(feature = "winit")]
 pub(crate) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
     match &window.background {
         WindowBackground::Opaque => false,
-        WindowBackground::Color(color) => color.resolve(env).snapshot().opacity < 1.0,
+        WindowBackground::Color(color) => color.resolve(env).snapshot().components[3] < 1.0,
     }
 }
 
@@ -374,31 +359,6 @@ pub(super) fn render_window<P: PlatformWindow>(
     result.profile.counters.rendered
 }
 
-pub(super) const fn surface_error_requires_reconfigure(
-    error: crate::platform::SurfaceError,
-) -> bool {
-    matches!(
-        error,
-        crate::platform::SurfaceError::Lost | crate::platform::SurfaceError::Outdated
-    )
-}
-
-pub(super) fn acquire_surface_frame(
-    surface: &mut dyn crate::platform::SurfaceProvider,
-) -> Result<crate::platform::SurfaceFrame, crate::platform::SurfaceError> {
-    match surface.acquire() {
-        Err(error) if surface_error_requires_reconfigure(error) => {
-            // Lost/outdated means the swap chain itself is invalid. Reconfigure
-            // at the current physical size and retry once in this same frame so
-            // live resize does not expose a stale or empty buffer.
-            let (width, height) = surface.size();
-            surface.resize(width, height);
-            surface.acquire()
-        }
-        result => result,
-    }
-}
-
 /// Refreshes the retained window tree in place: apply pending `Dynamic` patches,
 /// re-read every reactive input, run full layout, and re-encode the scene. A
 /// geometry-static frame (animation, scroll, re-present) pays only re-encode.
@@ -411,10 +371,10 @@ fn refresh_window_scene<P: PlatformWindow>(
     let scale_factor = runtime.platform.scale_factor();
     let (width, height) = runtime.platform.surface().size();
     let bounds = create_bounds(width, height, scale_factor);
-    let transform = vello::kurbo::Affine::scale(scale_factor);
+    let transform = cherenkov::kurbo::Affine::scale(scale_factor);
     runtime
         .renderer
-        .flush_window_tree(env, bounds, transform, vello::kurbo::Affine::IDENTITY);
+        .flush_window_tree(env, bounds, transform, cherenkov::kurbo::Affine::IDENTITY);
     // An in-flight press/drag must follow the re-laid-out widget, and hover must be
     // re-evaluated at the pointer so a reflow that moved a widget under the cursor
     // updates its hover chrome.
@@ -437,8 +397,8 @@ fn refresh_window_scene<P: PlatformWindow>(
 fn build_window_scene<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
-    bounds: vello::kurbo::Rect,
-    root_transform: vello::kurbo::Affine,
+    bounds: cherenkov::kurbo::Rect,
+    root_transform: cherenkov::kurbo::Affine,
     drain_local_tasks: &mut dyn FnMut() -> bool,
     phases: &mut FramePhases,
 ) {
@@ -454,7 +414,7 @@ fn build_window_scene<P: PlatformWindow>(
         env,
         bounds,
         root_transform,
-        vello::kurbo::Affine::IDENTITY,
+        cherenkov::kurbo::Affine::IDENTITY,
     );
     runtime
         .renderer
@@ -483,13 +443,8 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let surface = runtime.platform.surface();
     let (width, height) = surface.size();
     let bounds = create_bounds(width, height, scale_factor);
-    let root_transform = vello::kurbo::Affine::scale(scale_factor);
-    runtime.renderer.set_frame_resources(
-        surface.adapter(),
-        surface.device(),
-        surface.queue(),
-        surface.device_loss(),
-    );
+    let root_transform = cherenkov::kurbo::Affine::scale(scale_factor);
+    let _ = surface;
 
     let pump_started_at = Instant::now();
     let mut phases = FramePhases::default();
@@ -603,12 +558,12 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
         let scale_factor = runtime.platform.scale_factor();
         let (width, height) = runtime.platform.surface().size();
         let bounds = create_bounds(width, height, scale_factor);
-        let transform = vello::kurbo::Affine::scale(scale_factor);
+        let transform = cherenkov::kurbo::Affine::scale(scale_factor);
         let flushed = runtime.renderer.flush_window_tree(
             env,
             bounds,
             transform,
-            vello::kurbo::Affine::IDENTITY,
+            cherenkov::kurbo::Affine::IDENTITY,
         );
         assert!(
             flushed,
@@ -621,7 +576,6 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
 
     let rebuilt = pump_window_scene(runtime, env, &mut || false).built;
     apply_window_size_limits(runtime, env);
-    runtime.renderer.clear_frame_resources();
     runtime
         .platform
         .sync_text_input_state(runtime.renderer.focused_text_input_state());
@@ -637,71 +591,40 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
 }
 
 struct SurfaceRenderResult {
-    acquire: Duration,
+    install: Duration,
     render: Duration,
-    present: Duration,
+    readback: Duration,
+    next: cherenkov::Next,
     snapshot: Option<HeadlessSnapshot>,
 }
 
+/// Puts the frame's whole-scene picture on the surface's root layer, renders
+/// through the engine, and reads the pixels back when a snapshot is wanted.
 fn render_to_surface(
     renderer: &mut HydrolysisRenderer,
-    surface: &mut dyn crate::platform::SurfaceProvider,
-    clear_color: vello::peniko::Color,
+    surface: &dyn crate::platform::SurfaceProvider,
+    clear_color: cherenkov::WorkingColor,
     capture_snapshot: bool,
-    render: impl FnOnce(&mut HydrolysisRenderer, crate::renderer::HydrolysisRenderTarget<'_>, bool),
+    now: Instant,
 ) -> Result<SurfaceRenderResult, crate::platform::SurfaceError> {
     let (width, height) = surface.size();
-    let format = surface.format();
-    let premultiply_alpha = surface.premultiply_alpha();
-    let acquire_started_at = Instant::now();
-    let frame = acquire_surface_frame(surface)?;
-    let acquire = acquire_started_at.elapsed();
+    let install_started_at = Instant::now();
     let render_started_at = Instant::now();
-    render(
-        renderer,
-        crate::renderer::HydrolysisRenderTarget {
-            adapter: surface.adapter(),
-            device: surface.device(),
-            queue: surface.queue(),
-            device_loss: surface.device_loss().clone(),
-            texture: Some(frame.texture()),
-            view: frame.view(),
-            format,
-            width,
-            height,
-            base_color: clear_color,
-        },
-        premultiply_alpha,
-    );
+    let next = renderer
+        .present_frame(surface.surface(), clear_color, now)
+        .map_err(|error| match error {
+            cherenkov::RenderError::DeviceLost => crate::platform::SurfaceError::Lost,
+            other => panic!("hydrolysis surface render failed: {other}"),
+        })?;
     let render = render_started_at.elapsed();
-    #[cfg(feature = "frame-profile")]
-    {
-        // The timestamp resolve blocks until the frame's submits finish — the
-        // headless frame's "present wait", kept separate from the CPU submit
-        // time `render` measures.
-        renderer.finish_gpu_frame_profile(surface.device(), surface.queue());
-    }
+    let install = install_started_at.elapsed() - render;
+    let readback_started_at = Instant::now();
     #[cfg(not(target_arch = "wasm32"))]
-    let snapshot = {
-        #[cfg(feature = "frame-profile")]
-        let readback_started_at = Instant::now();
-        let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
-            width,
-            height,
-            rgba8: readback_texture_rgba8(
-                surface.device(),
-                surface.queue(),
-                frame.texture(),
-                width,
-                height,
-            ),
-        });
-        #[cfg(feature = "frame-profile")]
-        {
-            renderer.frame_stage_times.readback += readback_started_at.elapsed();
-        }
-        snapshot
-    };
+    let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
+        width,
+        height,
+        rgba8: crate::readback::readback_rgba8(surface.surface()),
+    });
     #[cfg(target_arch = "wasm32")]
     let snapshot = {
         assert!(
@@ -710,13 +633,16 @@ fn render_to_surface(
         );
         None
     };
-    let present_started_at = Instant::now();
-    surface.present(frame);
-    let present = present_started_at.elapsed();
+    let readback = readback_started_at.elapsed();
+    #[cfg(feature = "frame-profile")]
+    {
+        renderer.frame_stage_times.readback += readback;
+    }
     Ok(SurfaceRenderResult {
-        acquire,
+        install,
         render,
-        present,
+        readback,
+        next,
         snapshot,
     })
 }
@@ -734,6 +660,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     runtime
         .renderer
         .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
+    let frame_now = runtime.renderer.frame_instant();
     let mut snapshot = None;
     let mut rebuilt = false;
     let profile;
@@ -756,132 +683,30 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         apply_window_size_limits(runtime, env);
         let clear_color = window_clear_color(&runtime.window, env);
 
-        let root_transform = vello::kurbo::Affine::scale(runtime.platform.scale_factor());
-        #[cfg(hydrolysis_macos_system_webview)]
-        let (width, height) = runtime.platform.surface().size();
-        // The redraw-only filter refresh exists for frames that present without
-        // re-flushing the tree (an animated filter while the scene is idle). Any
-        // flush already ran every filter through its node, so refreshing again
-        // here would execute animated filters twice per frame.
+        let root_transform = cherenkov::kurbo::Affine::scale(runtime.platform.scale_factor());
         if !pump_outcome.flushed {
             runtime.renderer.begin_redraw_frame();
-            let surface = runtime.platform.surface();
-            runtime
-                .renderer
-                .refresh_active_applied_filters(surface.device(), surface.queue());
         }
         runtime
             .renderer
             .prepare_transient_text_input_overlay(env, root_transform);
 
-        #[cfg(hydrolysis_macos_system_webview)]
-        let mut hybrid_composition = runtime.renderer.take_hybrid_composition();
-
-        #[cfg(hydrolysis_macos_system_webview)]
-        let render_result = if let Some(composition) = hybrid_composition.as_mut() {
-            assert!(
-                !capture_snapshot,
-                "Hydrolysis cannot capture native WKWebView pixels through GPU readback"
-            );
-            let platform = (&mut runtime.platform as &mut dyn std::any::Any)
-                .downcast_mut::<crate::platform::WinitWindow>()
-                .expect("Hydrolysis native WebView composition requires a winit window");
-            platform.sync_hybrid_composition(&composition.native_views, width, height);
-
-            let segment_count = composition.segments.len();
-            let mut totals = SurfaceRenderResult {
-                acquire: Duration::ZERO,
-                render: Duration::ZERO,
-                present: Duration::ZERO,
-                snapshot: None,
-            };
-            let mut result = Ok(());
-            for (index, segment) in composition.segments.iter_mut().enumerate() {
-                let transient_scene = (index + 1 == segment_count)
-                    .then(|| composition.transient_scene.take())
-                    .flatten();
-                let surface = if index == 0 {
-                    platform.surface()
-                } else {
-                    platform.hybrid_overlay_surface(index - 1)
-                };
-                let segment_clear_color = if index == 0 {
-                    clear_color
-                } else {
-                    vello::peniko::Color::TRANSPARENT
-                };
-                match render_to_surface(
-                    &mut runtime.renderer,
-                    surface,
-                    segment_clear_color,
-                    false,
-                    |renderer, target, premultiply_alpha| {
-                        renderer.render_hybrid_segment_to_surface(
-                            segment,
-                            transient_scene,
-                            target,
-                            premultiply_alpha,
-                        );
-                    },
-                ) {
-                    Ok(rendered) => {
-                        totals.acquire += rendered.acquire;
-                        totals.render += rendered.render;
-                        totals.present += rendered.present;
-                    }
-                    Err(error) => {
-                        result = Err(error);
-                        break;
-                    }
-                }
-            }
-            composition.transient_scene.take();
-            result.map(|()| totals)
-        } else {
-            if let Some(platform) = (&mut runtime.platform as &mut dyn std::any::Any)
-                .downcast_mut::<crate::platform::WinitWindow>()
-            {
-                platform.clear_hybrid_composition();
-            }
-            render_to_surface(
-                &mut runtime.renderer,
-                runtime.platform.surface(),
-                clear_color,
-                capture_snapshot,
-                HydrolysisRenderer::render_scene_to_surface_with_alpha_mode,
-            )
-        };
-
-        #[cfg(not(hydrolysis_macos_system_webview))]
         let render_result = render_to_surface(
             &mut runtime.renderer,
             runtime.platform.surface(),
             clear_color,
             capture_snapshot,
-            HydrolysisRenderer::render_scene_to_surface_with_alpha_mode,
+            frame_now,
         );
-
-        #[cfg(hydrolysis_macos_system_webview)]
-        if let Some(composition) = hybrid_composition.take() {
-            runtime.renderer.restore_hybrid_composition(composition);
-        }
 
         let rendered = match render_result {
             Ok(rendered) => rendered,
-            Err(
-                crate::platform::SurfaceError::Lost
-                | crate::platform::SurfaceError::Outdated
-                | crate::platform::SurfaceError::Timeout
-                | crate::platform::SurfaceError::Occluded,
-            ) => {
+            Err(crate::platform::SurfaceError::Lost) => {
                 runtime.request_refresh();
                 runtime.platform.request_redraw();
                 let (measurement_cache_hits, measurement_cache_misses) =
                     runtime.renderer.measurement_cache_stats();
-                let layer_stats = runtime.renderer.render_layer_stats();
                 let (clip_layers, max_clip_depth) = runtime.renderer.clip_layer_stats();
-                let (applied_filter_count, applied_filter_capture_us, applied_filter_effect_us) =
-                    runtime.renderer.applied_filter_stats();
                 return RenderWindowResult {
                     rebuilt,
                     snapshot,
@@ -899,15 +724,9 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                             rebuild_iterations: u32::from(pump_outcome.built),
                             measurement_cache_hits,
                             measurement_cache_misses,
-                            scene_layers: layer_stats.composited_scene_layers,
-                            vello_scene_layers: layer_stats.vello_scene_layers,
-                            gpu_surface_layers: layer_stats.gpu_surface_layers,
-                            direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
+                            scene_layers: 0,
                             clip_layers,
                             max_clip_depth,
-                            applied_filter_count,
-                            applied_filter_capture_us,
-                            applied_filter_effect_us,
                             rendered: false,
                             captured_snapshot: false,
                         },
@@ -915,25 +734,19 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                     },
                 };
             }
-            Err(crate::platform::SurfaceError::Validation) => {
-                panic!("hydrolysis surface acquisition failed validation")
-            }
         };
-        let acquire_duration = rendered.acquire;
+        let acquire_duration = rendered.install;
         let render_duration = rendered.render;
-        let present_duration = rendered.present;
+        let present_duration = rendered.readback;
         snapshot = rendered.snapshot;
+        runtime.engine_next = Some(rendered.next);
         #[cfg(feature = "frame-profile")]
         {
             stages = runtime.renderer.take_frame_stage_times();
         }
-        runtime.renderer.clear_frame_resources();
         let (measurement_cache_hits, measurement_cache_misses) =
             runtime.renderer.measurement_cache_stats();
-        let layer_stats = runtime.renderer.render_layer_stats();
         let (clip_layers, max_clip_depth) = runtime.renderer.clip_layer_stats();
-        let (applied_filter_count, applied_filter_capture_us, applied_filter_effect_us) =
-            runtime.renderer.applied_filter_stats();
         profile = FrameProfile {
             phases: FramePhases {
                 rebuild: rebuild_phases.rebuild,
@@ -949,15 +762,9 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 rebuild_iterations: u32::from(pump_outcome.built),
                 measurement_cache_hits,
                 measurement_cache_misses,
-                scene_layers: layer_stats.composited_scene_layers,
-                vello_scene_layers: layer_stats.vello_scene_layers,
-                gpu_surface_layers: layer_stats.gpu_surface_layers,
-                direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
+                scene_layers: runtime.renderer.frame_picture_count(),
                 clip_layers,
                 max_clip_depth,
-                applied_filter_count,
-                applied_filter_capture_us,
-                applied_filter_effect_us,
                 rendered: true,
                 captured_snapshot: capture_snapshot,
             },
@@ -978,9 +785,6 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                     present: present_duration,
                     total: elapsed_or_zero(frame_started_at),
                     rebuild_iterations: u32::from(pump_outcome.built),
-                    applied_filter_count,
-                    applied_filter_capture_us,
-                    applied_filter_effect_us,
                     rebuilt: pump_outcome.built,
                 },
             );
@@ -1079,27 +883,13 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
 
     runtime.request_refresh();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height, adapter, device, queue, device_loss) = {
-        let surface = runtime.platform.surface();
-        let (width, height) = surface.size();
-        (
-            width,
-            height,
-            surface.adapter().clone(),
-            surface.device().clone(),
-            surface.queue().clone(),
-            surface.device_loss().clone(),
-        )
-    };
-    runtime
-        .renderer
-        .set_frame_resources(&adapter, &device, &queue, &device_loss);
+    let (width, height) = runtime.platform.surface().size();
     let bounds = create_bounds(width, height, scale_factor);
-    let transform = vello::kurbo::Affine::scale(scale_factor);
+    let transform = cherenkov::kurbo::Affine::scale(scale_factor);
     assert!(
         runtime
             .renderer
-            .flush_window_tree(env, bounds, transform, vello::kurbo::Affine::IDENTITY,),
+            .flush_window_tree(env, bounds, transform, cherenkov::kurbo::Affine::IDENTITY,),
         "hydrolysis input geometry refresh lost the retained window tree"
     );
     apply_window_size_limits(runtime, env);
@@ -1479,9 +1269,6 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     runtime
         .platform
         .sync_text_input_state(runtime.renderer.focused_text_input_state());
-    if runtime.renderer.poll_gpu_surface_redraw_handles() {
-        runtime.platform.request_redraw();
-    }
     // A gesture tick can mount a popup window — an armed context-menu hold
     // fires here — and the popup anchors in absolute coordinates through
     // `HydrolysisWindowOrigin`, the same extension pointer dispatch gets.
@@ -1513,7 +1300,19 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     if runtime.renderer.take_rebuild_request() {
         runtime.request_refresh();
     }
-    let next_deadline = runtime.renderer.next_gesture_deadline();
+    let mut next_deadline = runtime.renderer.next_gesture_deadline();
+    // The engine's own clock: a layer animation or an eased scroll the last
+    // render left running wants the next frame at `time`, content change or
+    // not. Due already means a redraw now.
+    if let Some(cherenkov::Next::At { time, .. }) = &runtime.engine_next {
+        let time = *time;
+        if time <= now {
+            runtime.engine_next = None;
+            runtime.platform.request_redraw();
+        } else {
+            next_deadline = Some(next_deadline.map_or(time, |deadline| deadline.min(time)));
+        }
+    }
     if runtime.mode.is_pending() {
         runtime.platform.request_redraw();
     }

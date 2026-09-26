@@ -26,8 +26,8 @@ impl EntryPhase {
     fn factor(self, now: Instant, animation: &Animation) -> f32 {
         match self {
             Self::Stable => 1.0,
-            Self::Entering(start) => animation.progress(now.saturating_duration_since(start)),
-            Self::Exiting(start) => 1.0 - animation.progress(now.saturating_duration_since(start)),
+            Self::Entering(start) => transition_progress(animation, now.saturating_duration_since(start)),
+            Self::Exiting(start) => 1.0 - transition_progress(animation, now.saturating_duration_since(start)),
         }
     }
 
@@ -35,13 +35,13 @@ impl EntryPhase {
         match self {
             Self::Stable => false,
             Self::Entering(start) | Self::Exiting(start) => {
-                !animation.is_complete(now.saturating_duration_since(start))
+                !transition_complete(animation, now.saturating_duration_since(start))
             }
         }
     }
 
     fn is_finished_exit(self, now: Instant, animation: &Animation) -> bool {
-        matches!(self, Self::Exiting(start) if animation.is_complete(now.saturating_duration_since(start)))
+        matches!(self, Self::Exiting(start) if transition_complete(animation, now.saturating_duration_since(start)))
     }
 
     /// Whether an entry in this phase is kept out of the accessibility tree. The
@@ -448,8 +448,8 @@ impl CollectionNode {
                 continue;
             }
             let child_ctx = ctx.child(
-                vello::kurbo::Affine::translate((f64::from(rect.x()), f64::from(rect.y()))),
-                vello::kurbo::Rect::new(
+                cherenkov::kurbo::Affine::translate((f64::from(rect.x()), f64::from(rect.y()))),
+                cherenkov::kurbo::Rect::new(
                     0.0,
                     0.0,
                     f64::from(rect.width()),
@@ -520,7 +520,7 @@ impl CollectionNode {
         }
         let bounds = child_ctx.bounds;
         let clip = match axis {
-            Some(TransitionAxis { vertical: true, .. }) => vello::kurbo::Rect::new(
+            Some(TransitionAxis { vertical: true, .. }) => cherenkov::kurbo::Rect::new(
                 0.0,
                 0.0,
                 bounds.width(),
@@ -528,7 +528,7 @@ impl CollectionNode {
             ),
             Some(TransitionAxis {
                 vertical: false, ..
-            }) => vello::kurbo::Rect::new(
+            }) => cherenkov::kurbo::Rect::new(
                 0.0,
                 0.0,
                 bounds.width() * f64::from(factor),
@@ -651,7 +651,7 @@ impl CollectionNode {
         let mut transitioning = false;
         for entry in &mut self.entries {
             if let EntryPhase::Entering(start) = entry.phase
-                && animation.is_complete(now.saturating_duration_since(start))
+                && transition_complete(&animation, now.saturating_duration_since(start))
             {
                 entry.phase = EntryPhase::Stable;
             }

@@ -79,7 +79,7 @@ fn semantic_flush_releases_frame_state_in_renderer_order() {
             })
         }
     };
-    let mut core = SemanticCore::new(Instant::now());
+    let mut core = SemanticCore::new(Instant::now(), None);
     core.capture_window_semantics(AnyView::new(view), &env);
 
     // A navigation slot whose retained owner left the tree dies at

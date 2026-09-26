@@ -1,4 +1,3 @@
-use crate::engine::Brush;
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 #[cfg(feature = "accessibility")]
@@ -9,7 +8,7 @@ use crate::renderer::{
     WidgetRenderContext, measure_navigation_view_intrinsic,
     measure_owned_navigation_view_with_proposal, measure_transient_view_with_proposal,
     navigation_back_button_rect, navigation_base_bar_height_for_display_mode,
-    normalize_layout_view, resolved_color_to_peniko, split_compact_threshold, transformed_rect,
+    normalize_layout_view, split_compact_threshold, transformed_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -30,7 +29,7 @@ use waterui_controls::text_field::TextField;
 use waterui_core::id::Id;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Metadata, Native};
-use waterui_graphics::color::{Color, ResolvedColor};
+use waterui_graphics::color::Color;
 
 #[derive(Clone, Copy)]
 struct NavigationLeadingReserve(f64);
@@ -65,7 +64,7 @@ pub(crate) struct NavigationViewRenderState {
     /// binding stays live through the node's own re-flush). `Some` exactly when
     /// `search` is present.
     search_field: Option<RetainedSubview>,
-    color: Computed<ResolvedColor>,
+    color: Computed<cherenkov::WorkingColor>,
     hidden: Computed<bool>,
     display_mode: NavigationTitleDisplayMode,
     subtitle_present: bool,
@@ -234,7 +233,7 @@ pub(crate) fn navigation_view_accessibility(
                     let metrics = theme.navigation_metrics();
                     let bar_height =
                         navigation_base_bar_height_for_display_mode(display_mode, theme);
-                    let bar_rect = vello::kurbo::Rect::new(
+                    let bar_rect = cherenkov::kurbo::Rect::new(
                         ctx.bounds.x0,
                         ctx.bounds.y0,
                         ctx.bounds.x1,
@@ -252,7 +251,7 @@ pub(crate) fn navigation_view_accessibility(
                         bar_rect.y0 + (bar_height - title_height) * 0.5
                     };
                     let title_leading = navigation_leading_reserve(env);
-                    let title_rect = vello::kurbo::Rect::new(
+                    let title_rect = cherenkov::kurbo::Rect::new(
                         if title_leading > 0.0 {
                             bar_rect.x0 + metrics.horizontal_inset + title_leading
                         } else {
@@ -507,18 +506,18 @@ pub(crate) fn render_navigation_view_parts(
 
     if top_bar_height > 0.0 {
         let base_bar_height = navigation_base_bar_height_for_display_mode(display_mode, &theme);
-        let bar_rect = vello::kurbo::Rect::new(
+        let bar_rect = cherenkov::kurbo::Rect::new(
             ctx.bounds.x0,
             ctx.bounds.y0,
             ctx.bounds.x1,
             (ctx.bounds.y0 + top_bar_height).min(ctx.bounds.y1),
         );
-        let bar_color = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&color_signal));
+        let bar_color = ctx.renderer_mut().read_signal(&color_signal);
         {
             let theme = ctx.theme();
             let mut draw = ctx.draw_context();
-            theme.draw_navigation_bar(&mut draw, bar_rect, &Brush::from(bar_color));
-            let separator = vello::kurbo::Rect::new(
+            theme.draw_navigation_bar(&mut draw, bar_rect, &cherenkov::Paint::from(bar_color));
+            let separator = cherenkov::kurbo::Rect::new(
                 bar_rect.x0,
                 (bar_rect.y1 - 1.0).max(bar_rect.y0),
                 bar_rect.x1,
@@ -545,13 +544,13 @@ pub(crate) fn render_navigation_view_parts(
         };
         let leading_width = f64::from(leading_size.width);
         let trailing_width = f64::from(trailing_size.width);
-        let leading_rect = vello::kurbo::Rect::new(
+        let leading_rect = cherenkov::kurbo::Rect::new(
             bar_rect.x0 + metrics.horizontal_inset,
             bar_rect.y0,
             (bar_rect.x0 + metrics.horizontal_inset + leading_width).min(bar_rect.x1),
             (bar_rect.y0 + base_bar_height).min(bar_rect.y1),
         );
-        let trailing_rect = vello::kurbo::Rect::new(
+        let trailing_rect = cherenkov::kurbo::Rect::new(
             (bar_rect.x1 - metrics.horizontal_inset - trailing_width).max(bar_rect.x0),
             bar_rect.y0,
             bar_rect.x1 - metrics.horizontal_inset,
@@ -596,7 +595,7 @@ pub(crate) fn render_navigation_view_parts(
         } else {
             bar_rect.x1 - metrics.title_trailing_inset
         };
-        let title_rect = vello::kurbo::Rect::new(
+        let title_rect = cherenkov::kurbo::Rect::new(
             title_x0.min(bar_rect.x1),
             title_y0,
             title_x1.max(bar_rect.x0),
@@ -628,7 +627,7 @@ pub(crate) fn render_navigation_view_parts(
         }
 
         if search.is_some() {
-            let search_rect = vello::kurbo::Rect::new(
+            let search_rect = cherenkov::kurbo::Rect::new(
                 bar_rect.x0 + metrics.horizontal_inset,
                 bar_rect.y0 + base_bar_height + metrics.search_vertical_inset,
                 bar_rect.x1 - metrics.horizontal_inset,
@@ -653,7 +652,7 @@ pub(crate) fn render_navigation_view_parts(
         }
     }
 
-    let content_rect = vello::kurbo::Rect::new(
+    let content_rect = cherenkov::kurbo::Rect::new(
         ctx.bounds.x0,
         (ctx.bounds.y0 + top_bar_height).min(ctx.bounds.y1),
         ctx.bounds.x1,
@@ -671,17 +670,17 @@ pub(crate) fn render_navigation_view_parts(
     }
 
     if bottom_bar_height > 0.0 {
-        let bottom_rect = vello::kurbo::Rect::new(
+        let bottom_rect = cherenkov::kurbo::Rect::new(
             ctx.bounds.x0,
             (ctx.bounds.y1 - bottom_bar_height).max(ctx.bounds.y0),
             ctx.bounds.x1,
             ctx.bounds.y1,
         );
-        let bar_color = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&color_signal));
+        let bar_color = ctx.renderer_mut().read_signal(&color_signal);
         {
             let theme = ctx.theme();
             let mut draw = ctx.draw_context();
-            theme.draw_navigation_bar(&mut draw, bottom_rect, &Brush::from(bar_color));
+            theme.draw_navigation_bar(&mut draw, bottom_rect, &cherenkov::Paint::from(bar_color));
         }
         flush_toolbar_group(
             ctx,
@@ -724,7 +723,7 @@ fn flush_toolbar_group(
     ctx: &mut WidgetRenderContext<'_>,
     group: &mut [RetainedSubview],
     env: &Environment,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     alignment: ToolbarAlignment,
 ) {
     if group.is_empty() || bounds.width() <= 0.0 || bounds.height() <= 0.0 {
@@ -747,7 +746,7 @@ fn flush_toolbar_group(
         let width = f64::from(size.width).min((bounds.x1 - x).max(0.0));
         let height = f64::from(size.height).min(bounds.height());
         let y = bounds.y0 + (bounds.height() - height) * 0.5;
-        let rect = vello::kurbo::Rect::new(x, y, x + width, y + height);
+        let rect = cherenkov::kurbo::Rect::new(x, y, x + width, y + height);
         if rect.width() > 0.0 && rect.height() > 0.0 {
             let render_ctx = ctx.render_context();
             item.flush_in_rect(
@@ -766,18 +765,18 @@ fn flush_toolbar_group(
 /// group — the same split `flush_title_and_subtitle` draws at, so the a11y
 /// node's bounds match the painted text.
 fn title_and_subtitle_rects(
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
     title_size: LayoutSize,
     subtitle_size: LayoutSize,
-) -> (vello::kurbo::Rect, vello::kurbo::Rect) {
+) -> (cherenkov::kurbo::Rect, cherenkov::kurbo::Rect) {
     let total_height =
         (f64::from(title_size.height) + f64::from(subtitle_size.height)).min(bounds.height());
     let mut y = bounds.y0 + (bounds.height() - total_height) * 0.5;
     let title_height = f64::from(title_size.height).min((bounds.y1 - y).max(0.0));
-    let title_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
+    let title_rect = cherenkov::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + title_height);
     y += title_height;
     let subtitle_height = f64::from(subtitle_size.height).min((bounds.y1 - y).max(0.0));
-    let subtitle_rect = vello::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
+    let subtitle_rect = cherenkov::kurbo::Rect::new(bounds.x0, y, bounds.x1, y + subtitle_height);
     (title_rect, subtitle_rect)
 }
 
@@ -785,7 +784,7 @@ fn flush_title_and_subtitle(
     ctx: &mut WidgetRenderContext<'_>,
     state: &mut NavigationViewRenderState,
     env: &Environment,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
 ) {
     let title_size = state.title.measure_intrinsic(ctx.renderer_mut(), env);
     let subtitle_size = if state.subtitle_present {
@@ -1302,24 +1301,24 @@ pub(crate) fn render_navigation_split_parts(
 
     let (primary_rect, content_rect, detail_rect) = if three_column && show_all {
         let primary_rect =
-            vello::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
-        let content_rect = vello::kurbo::Rect::new(
+            cherenkov::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
+        let content_rect = cherenkov::kurbo::Rect::new(
             primary_rect.x1,
             bounds.y0,
             primary_rect.x1 + column_width,
             bounds.y1,
         );
-        let detail_rect = vello::kurbo::Rect::new(content_rect.x1, bounds.y0, bounds.x1, bounds.y1);
+        let detail_rect = cherenkov::kurbo::Rect::new(content_rect.x1, bounds.y0, bounds.x1, bounds.y1);
         (Some(primary_rect), Some(content_rect), detail_rect)
     } else if three_column {
         let content_rect =
-            vello::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
-        let detail_rect = vello::kurbo::Rect::new(content_rect.x1, bounds.y0, bounds.x1, bounds.y1);
+            cherenkov::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
+        let detail_rect = cherenkov::kurbo::Rect::new(content_rect.x1, bounds.y0, bounds.x1, bounds.y1);
         (None, Some(content_rect), detail_rect)
     } else {
         let primary_rect =
-            vello::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
-        let detail_rect = vello::kurbo::Rect::new(primary_rect.x1, bounds.y0, bounds.x1, bounds.y1);
+            cherenkov::kurbo::Rect::new(bounds.x0, bounds.y0, bounds.x0 + column_width, bounds.y1);
+        let detail_rect = cherenkov::kurbo::Rect::new(primary_rect.x1, bounds.y0, bounds.x1, bounds.y1);
         (Some(primary_rect), None, detail_rect)
     };
 
@@ -1426,7 +1425,7 @@ fn render_split_content(
     env: &Environment,
     selected: Option<Id>,
     compact: bool,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
 ) {
     if let Some(selected) = selected {
         let mut state = state.borrow_mut();
@@ -1462,7 +1461,7 @@ fn render_split_detail(
     env: &Environment,
     selected: Option<Id>,
     compact: bool,
-    bounds: vello::kurbo::Rect,
+    bounds: cherenkov::kurbo::Rect,
 ) {
     if let Some(selected) = selected {
         let mut state = state.borrow_mut();
@@ -1498,7 +1497,7 @@ fn render_split_detail(
 pub(crate) struct NavigationStackRenderState {
     unresolved_root: Option<AnyView>,
     root: Option<RetainedSubview>,
-    background: Option<Computed<ResolvedColor>>,
+    background: Option<Computed<cherenkov::WorkingColor>>,
     transition_style: AnyNavigationTransition,
 }
 
@@ -1538,7 +1537,7 @@ impl NavigationStackRenderState {
             .expect("Hydrolysis navigation root must be resolved before rendering")
     }
 
-    fn background(&self) -> Computed<ResolvedColor> {
+    fn background(&self) -> Computed<cherenkov::WorkingColor> {
         self.background
             .clone()
             .expect("Hydrolysis navigation background must be resolved before rendering")
@@ -1591,12 +1590,12 @@ fn render_navigation_page_scene(
             entry.content.render_built_scene(renderer, env, size)
         }
     };
-    let mut scene = vello::Scene::new();
-    let bounds = vello::kurbo::Rect::new(0.0, 0.0, f64::from(size.width), f64::from(size.height));
+    let mut scene = crate::scene::Scene::new();
+    let bounds = cherenkov::kurbo::Rect::new(0.0, 0.0, f64::from(size.width), f64::from(size.height));
     scene.fill(
-        vello::peniko::Fill::NonZero,
-        vello::kurbo::Affine::IDENTITY,
-        resolved_color_to_peniko(renderer.read_signal(&background)),
+        crate::scene::Fill::NonZero,
+        cherenkov::kurbo::Affine::IDENTITY,
+        renderer.read_signal(&background),
         None,
         &bounds,
     );
@@ -1605,8 +1604,8 @@ fn render_navigation_page_scene(
         core::mem::swap(renderer.scene_mut(), &mut scene);
         let context = RenderContext::with_transforms(
             bounds,
-            vello::kurbo::Affine::IDENTITY,
-            vello::kurbo::Affine::IDENTITY,
+            cherenkov::kurbo::Affine::IDENTITY,
+            cherenkov::kurbo::Affine::IDENTITY,
         );
         {
             let theme = renderer.theme();
@@ -1803,11 +1802,11 @@ pub(crate) fn render_navigation_stack_parts(
     #[allow(clippy::cast_possible_truncation)]
     let scene_size = LayoutSize::new(ctx.bounds.width() as f32, ctx.bounds.height() as f32);
     let background = state.borrow().background();
-    let background = resolved_color_to_peniko(ctx.renderer_mut().read_signal(&background));
+    let background = ctx.renderer_mut().read_signal(&background);
     let transform = ctx.transform;
     let bounds = ctx.bounds;
     ctx.renderer_mut().scene_mut().fill(
-        vello::peniko::Fill::NonZero,
+        crate::scene::Fill::NonZero,
         transform,
         background,
         None,
@@ -1923,7 +1922,7 @@ pub(crate) fn render_navigation_stack_parts(
                         from_scene,
                         active_scene.clone(),
                         now,
-                        transition_motion.transition_duration,
+                        transition_motion.transition.duration,
                     ),
                 );
             }
@@ -2057,7 +2056,7 @@ pub(crate) fn render_navigation_stack_parts(
     });
 
     let metrics = ctx.theme().navigation_metrics();
-    let edge_rect = vello::kurbo::Rect::new(
+    let edge_rect = cherenkov::kurbo::Rect::new(
         ctx.bounds.x0,
         ctx.bounds.y0,
         (ctx.bounds.x0 + metrics.back_button_size).min(ctx.bounds.x1),

@@ -13,7 +13,6 @@ mod gesture_capture;
 mod gesture_env;
 mod gesture_retention;
 mod gesture_surface;
-mod gpu_surface_direct;
 mod gpu_surface_idle;
 mod gpu_surface_input;
 mod image_ingest;
@@ -45,7 +44,7 @@ mod tree;
 mod window_background;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_mount;
-use vello::kurbo::{Affine, BezPath, Point, Rect};
+use cherenkov::kurbo::{Affine, BezPath, Point, Rect};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
@@ -85,7 +84,7 @@ fn test_renderer_with_theme(theme: MinimalTestTheme) -> HydrolysisRenderer {
     let mut platform =
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
-    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme));
+    let mut renderer = HydrolysisRenderer::new(Rc::clone(surface.engine()), Rc::new(theme));
     renderer.set_frame_resources(
         surface.adapter(),
         surface.device(),
@@ -248,7 +247,7 @@ fn registration_signal<T: Clone + 'static>(
 fn subscribed_snapshot_preserves_registration_animation_metadata() {
     let signal = registration_signal(
         0.25,
-        nami::watcher::Context::from(0.25).with(Animation::linear(Duration::from_millis(250))),
+        nami::watcher::Context::from(0.25).with(Animation::Curve(Curve::linear(Duration::from_millis(250)))),
     );
     let metadata_replayed = Rc::new(Cell::new(false));
 
@@ -282,7 +281,7 @@ fn toggle_progress_subscribes_before_reading_its_snapshot() {
     let mut renderer = test_renderer();
 
     let (progress, selected) =
-        renderer.resolve_toggle_progress(&signal, Animation::linear(Duration::ZERO));
+        renderer.resolve_toggle_progress(&signal, Animation::Curve(Curve::linear(Duration::ZERO)));
 
     assert_eq!(progress, 0.0);
     assert!(!selected);
@@ -868,7 +867,7 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
         )
     };
     let env = test_environment();
-    let bounds = vello::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
+    let bounds = cherenkov::kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
     let surface = platform.surface();
     renderer.set_frame_resources(
         surface.adapter(),
@@ -878,7 +877,7 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
     );
     capture_root_window(&mut renderer, view, &env, bounds);
 
-    let point = vello::kurbo::Point::new(60.0, 60.0);
+    let point = cherenkov::kurbo::Point::new(60.0, 60.0);
     let debug_targets = renderer.gesture_engine.debug_targets_at(point);
     assert_eq!(
         debug_targets.len(),
@@ -1142,7 +1141,6 @@ fn a_label_survives_the_environment_snapshot_a_view_hook_takes() {
 /// controller permits it — but on a build bridging no engine there is nothing
 /// to draw it with, and the backend fails rather than occupying a layout slot
 /// with no page behind it.
-#[cfg(not(hydrolysis_macos_system_webview))]
 #[test]
 #[should_panic(expected = "no web engine is bridged")]
 fn a_webview_with_no_engine_to_draw_it_panics() {
@@ -1946,13 +1944,13 @@ impl WidgetTheme for MinimalTestTheme {
             focus_opacity: 0.12,
             pressed_opacity: 0.12,
             dragged_opacity: 0.16,
-            hover_enter: Animation::linear(Duration::from_millis(15)),
-            hover_exit: Animation::linear(Duration::from_millis(15)),
-            focus_enter: Animation::linear(Duration::from_millis(15)),
-            focus_exit: Animation::linear(Duration::from_millis(15)),
-            press_fade_in: Animation::linear(Duration::from_millis(105)),
-            press_fade_out: Animation::linear(Duration::from_millis(375)),
-            press_grow: Animation::bezier(Duration::from_millis(450), 0.2, 0.0, 0.0, 1.0),
+            hover_enter: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            hover_exit: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            focus_enter: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            focus_exit: Animation::Curve(Curve::linear(Duration::from_millis(15))),
+            press_fade_in: Animation::Curve(Curve::linear(Duration::from_millis(105))),
+            press_fade_out: Animation::Curve(Curve::linear(Duration::from_millis(375))),
+            press_grow: Animation::Curve(Curve::bezier(Duration::from_millis(450)), 0.2, 0.0, 0.0, 1.0),
             minimum_press_duration: Duration::from_millis(225),
             touch_delay: Duration::from_millis(150),
         }
@@ -1960,8 +1958,8 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn progress_motion(&self) -> ProgressMotion {
         ProgressMotion {
-            linear_determinate: Animation::bezier(Duration::from_millis(250), 0.4, 0.0, 0.6, 1.0),
-            circular_determinate: Animation::bezier(Duration::from_millis(500), 0.0, 0.0, 0.2, 1.0),
+            linear_determinate: Animation::Curve(Curve::bezier(Duration::from_millis(250)), 0.4, 0.0, 0.6, 1.0),
+            circular_determinate: Animation::Curve(Curve::bezier(Duration::from_millis(500)), 0.0, 0.0, 0.2, 1.0),
             linear_indeterminate_cycle: Duration::from_millis(2_000),
             loading_cycle: Duration::from_millis(4_666),
             circular_indeterminate_cycle: Duration::from_millis(5_332),
@@ -2017,7 +2015,7 @@ impl WidgetTheme for MinimalTestTheme {
     }
 
     fn toggle_value_animation(&self) -> Animation {
-        Animation::linear(Duration::from_millis(100))
+        Animation::Curve(Curve::linear(Duration::from_millis(100)))
     }
 
     fn draw_toggle_switch(
@@ -2075,11 +2073,11 @@ impl WidgetTheme for MinimalTestTheme {
     }
 
     fn input_selection_brush(&self) -> Brush {
-        Brush::from(vello::peniko::Color::new([0.20, 0.45, 0.90, 0.28]))
+        Brush::from(crate::scene::srgb([0.20, 0.45, 0.90, 0.28]))
     }
 
     fn input_caret_brush(&self, opacity: f32) -> Brush {
-        Brush::from(vello::peniko::Color::new([0.12, 0.14, 0.18, opacity]))
+        Brush::from(crate::scene::srgb([0.12, 0.14, 0.18, opacity]))
     }
 
     fn draw_input_field(
@@ -2128,9 +2126,9 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn radio_selection_motion(&self) -> RadioSelectionMotion {
         RadioSelectionMotion {
-            inner_grow: Animation::linear(Duration::from_millis(1)),
-            inner_opacity: Animation::linear(Duration::from_millis(1)),
-            outer_color: Animation::linear(Duration::from_millis(1)),
+            inner_grow: Animation::Curve(Curve::linear(Duration::from_millis(1))),
+            inner_opacity: Animation::Curve(Curve::linear(Duration::from_millis(1))),
+            outer_color: Animation::Curve(Curve::linear(Duration::from_millis(1))),
         }
     }
 

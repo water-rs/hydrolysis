@@ -309,7 +309,7 @@ pub fn run(app: App, style: impl crate::Style) {
             "hydrolysis web runner supports exactly one window"
         );
 
-        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        let mut env = env;
         let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
         super::install_native_component_hooks(&mut env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
@@ -331,7 +331,7 @@ pub fn run(app: App, style: impl crate::Style) {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device(), theme)
+            HydrolysisRenderer::new(Rc::clone(surface.engine()), theme)
         };
         let fonts = FontCollection::new(font_cx);
         fonts.clone().install(&mut env);

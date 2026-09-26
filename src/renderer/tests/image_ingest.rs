@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 
-use vello::kurbo::Affine;
+use cherenkov::kurbo::Affine;
 use vello::peniko::{Blob, Brush, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use waterui::{AnyView, View};
 use waterui_core::handler::AnyViewBuilder;
@@ -110,11 +110,11 @@ fn scene_view_rejects_malformed_image_inside_a_fill_brush() {
     let mut runtime = runtime_with(SceneView::new(ImagePane {
         draw: |scene| {
             scene.fill(
-                vello::peniko::Fill::NonZero,
+                crate::scene::Fill::NonZero,
                 Affine::IDENTITY,
                 &Brush::Image(ImageBrush::new(malformed_image())),
                 None,
-                &vello::kurbo::BezPath::from_svg("M0,0 L10,0 L10,10 Z")
+                &cherenkov::kurbo::BezPath::from_svg("M0,0 L10,0 L10,10 Z")
                     .expect("static path parses"),
             );
         },

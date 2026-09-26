@@ -32,7 +32,7 @@ use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, OffscreenGpuContext};
 
-use vello::kurbo::Affine;
+use cherenkov::kurbo::Affine;
 use vello::peniko::{Brush, Color, Fill};
 use waterui_core::layout::{
     HorizontalAlignment, Layout, ProposalSize, Rect as LayoutRect, Size, StretchAxis, SubView,
@@ -215,10 +215,10 @@ fn measure_replay(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> (
 /// reactive tree (Flutter-RenderObject / scene-graph style) would actually pay,
 /// once `body()`/dispatch/a11y-build/target-registration are amortized to
 /// once-and-on-Dynamic-change. No renderer, no dispatch — just encoding the row
-/// primitives into a fresh `vello::Scene` every frame.
+/// primitives into a fresh `crate::scene::Scene` every frame.
 #[test]
 fn pure_vello_encode_floor() {
-    use vello::kurbo::{Circle as KurboCircle, Rect, RoundedRect};
+    use cherenkov::kurbo::{Circle as KurboCircle, Rect, RoundedRect};
 
     let white = Brush::Solid(Color::new([1.0, 1.0, 1.0, 1.0]));
     let blue = Brush::Solid(Color::new([0.23, 0.51, 0.96, 1.0]));
@@ -229,7 +229,7 @@ fn pure_vello_encode_floor() {
         "(the per-frame cost a retained reactive tree pays: layout aside, just re-emit draw ops)"
     );
     for &rows in &[40usize, 80, 160, 320] {
-        let mut scene = vello::Scene::new();
+        let mut scene = crate::scene::Scene::new();
         let mut samples = Vec::with_capacity(SAMPLE_FRAMES);
         for f in 0..(WARMUP_FRAMES + SAMPLE_FRAMES) {
             scene.reset();
@@ -347,7 +347,7 @@ fn full_rebuild_vs_retained_replay_cost() {
 // This stands in for the future `RenderNode` tree to measure the ONE cost not
 // isolated by the probes above: per-frame **layout + encode** on a tree that is
 // built once and only re-flushed (no `body()`/dispatch/a11y/target churn). It is
-// pure `vello::Scene` + the real `Layout` implementations — no renderer — so the
+// pure `crate::scene::Scene` + the real `Layout` implementations — no renderer — so the
 // numbers are the irreducible per-frame cost the persistent-tree architecture
 // pays. The gate: a 160-row screen must flush well under the 120Hz budget.
 // ---------------------------------------------------------------------------
@@ -441,10 +441,10 @@ impl ProtoNode {
 
     /// Re-encode this subtree into the scene using cached placements — the
     /// per-frame cost of a geometry-static frame.
-    fn flush(&self, scene: &mut vello::Scene, transform: Affine, size: Size) {
+    fn flush(&self, scene: &mut crate::scene::Scene, transform: Affine, size: Size) {
         match self {
             ProtoNode::Color { brush, .. } => {
-                let rect = vello::kurbo::Rect::new(
+                let rect = cherenkov::kurbo::Rect::new(
                     0.0,
                     0.0,
                     f64::from(size.width),
@@ -514,7 +514,7 @@ fn prototype_flush_layout_cost() {
     );
     for &rows in &[40usize, 160, 320] {
         let mut tree = build_proto_screen(rows);
-        let mut scene = vello::Scene::new();
+        let mut scene = crate::scene::Scene::new();
         tree.layout(proposal, window);
         for _ in 0..WARMUP_FRAMES {
             scene.reset();
@@ -547,7 +547,7 @@ fn prototype_flush_layout_cost() {
     // Gate: the 120fps common-case frame (geometry static — animation, scroll,
     // re-present) must re-flush a large screen (160 dense rows) well under budget.
     let mut tree = build_proto_screen(160);
-    let mut scene = vello::Scene::new();
+    let mut scene = crate::scene::Scene::new();
     tree.layout(proposal, window);
     for _ in 0..WARMUP_FRAMES {
         scene.reset();

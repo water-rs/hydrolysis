@@ -45,7 +45,7 @@ struct SemanticWindow {
 
 impl SemanticWindow {
     fn new(window: Window, fonts: &FontCollection) -> Self {
-        let mut core = SemanticCore::new(Instant::now());
+        let mut core = SemanticCore::new(Instant::now(), None);
         seed_core(&mut core, fonts);
         #[cfg(feature = "accessibility")]
         {
@@ -153,7 +153,7 @@ impl SemanticRuntime {
             init_global_executor();
             None
         };
-        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        let mut env = env;
         #[cfg(not(target_arch = "wasm32"))]
         waterui::inspector::install(&mut env, inspector);
         let pending_window_queue = Rc::new(RefCell::new(Vec::new()));

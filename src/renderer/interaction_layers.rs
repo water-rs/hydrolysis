@@ -20,7 +20,7 @@ pub(crate) struct WaveLayer {
     /// point). Widgets map it into their own local frame at draw time via
     /// `local_interaction_state` and the live hit transform, so it stays
     /// correct under arbitrary nesting and scroll offsets.
-    origin: Cell<Option<vello::kurbo::Point>>,
+    origin: Cell<Option<cherenkov::kurbo::Point>>,
     pressing: Cell<bool>,
     pressed_at: Cell<Option<Instant>>,
     released_at: Cell<Option<Instant>>,
@@ -167,7 +167,7 @@ impl InteractionLayerHandles {
     /// rebuild.
     pub(crate) fn retain_waves_with_origin(
         &self,
-        mut retain: impl FnMut(vello::kurbo::Point) -> bool,
+        mut retain: impl FnMut(cherenkov::kurbo::Point) -> bool,
     ) {
         for wave in &self.waves {
             if !wave.origin.get().is_some_and(&mut retain) {
@@ -193,7 +193,7 @@ impl InteractionLayerHandles {
     /// grows from the origin while its layer fades in. Waves still fading from
     /// earlier presses keep fading independently (Material semantics); when every
     /// slot is still visible the oldest wave is recycled.
-    pub(crate) fn begin_press(&self, origin: vello::kurbo::Point, now: Instant) {
+    pub(crate) fn begin_press(&self, origin: cherenkov::kurbo::Point, now: Instant) {
         let wave = self.spawn_wave(now);
         let seq = self.next_wave_seq.get();
         self.next_wave_seq
@@ -204,7 +204,7 @@ impl InteractionLayerHandles {
         wave.pressed_at.set(Some(now));
         wave.released_at.set(None);
         wave.progress
-            .apply_target(0.0, Some(Animation::linear(Duration::ZERO)), now);
+            .apply_target(0.0, Some(Animation::Curve(Curve::linear(Duration::ZERO))), now);
         wave.progress
             .apply_target(1.0, Some(self.motion.press_grow.clone()), now);
         wave.alpha.apply_target(

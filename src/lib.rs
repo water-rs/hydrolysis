@@ -5,11 +5,11 @@
 
 mod engine;
 mod env;
-mod gpu_view;
 mod localization;
 mod platform;
 mod readback;
 mod renderer;
+mod scene;
 mod runner;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -18,9 +18,10 @@ mod view_renderer;
 mod widgets;
 
 // Interaction/runtime layer shared with other self-drawn backends.
-pub(crate) use waterui_backend_core::{animation, gesture, scroll, time};
+mod animation;
+pub(crate) use waterui_backend_core::{gesture, scroll, time};
 
-pub use engine::{Brush, DrawContext, IconOnlyButtonLabel, WidgetTheme};
+pub use engine::{IconOnlyButtonLabel, WidgetTheme};
 use waterui_core::Environment;
 
 /// A presentation style for the rendered Hydrolysis runtime.
@@ -44,7 +45,6 @@ pub trait Style: WidgetTheme + 'static {
     /// application's own entries still win in the assembled environment.
     fn install_tokens(&self, env: &mut Environment);
 }
-pub use gpu_view::{HydrolysisExt, HydrolysisGpuView};
 /// The W3C UI Events key vocabulary this backend speaks, re-exported so hosts
 /// that synthesize key events use the same version of it.
 pub use keyboard_types;
@@ -54,16 +54,14 @@ pub use platform::BrowserWindow;
 pub use platform::WinitWindow;
 pub use platform::{
     InputEvent, KeyCode, KeyState, Modifiers, OffscreenGpuContext, OffscreenSurface,
-    OffscreenWindow, PlatformWindow, PointerButton, PointerKind, SurfaceError, SurfaceFrame,
+    OffscreenWindow, PlatformWindow, PointerButton, PointerKind, SurfaceError,
     SurfaceProvider, TextInputPurpose, TextInputState, TouchPhase,
 };
 #[cfg(feature = "frame-profile")]
 pub use renderer::{FrameStageTimes, GpuIdentity};
-pub use renderer::{HydroState, HydrolysisRenderTarget, HydrolysisRenderer, RenderContext};
+pub use renderer::{HydroState, HydrolysisRenderer, RenderContext};
 pub use runner::run;
 pub use runner::{FrameCounters, FramePhases, FrameProfile, SemanticPumpResult, SemanticRuntime};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::{HeadlessPumpResult, HeadlessRuntime, HeadlessSnapshot};
 pub use view_renderer::HydrolysisViewRenderer;
-#[cfg(hydrolysis_macos_system_webview)]
-pub use widgets::platform::webview::MacSystemWebViewController;
