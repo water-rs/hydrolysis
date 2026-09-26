@@ -254,6 +254,12 @@ pub(crate) struct ListRenderState {
     /// A membership change invalidates index-based extents, including reorder
     /// operations whose collection length stays unchanged.
     rows_dirty: Rc<Cell<bool>>,
+    /// Ids the collection watcher reported as replaced since the last
+    /// `prepare_rows` consume — same-id items whose content may differ, so
+    /// exactly those rows are dropped from `item_cache` and re-materialized
+    /// while every other row keeps its retained node (focus, gestures,
+    /// in-flight scroll anchoring all live inside it).
+    replaced_row_ids: Rc<RefCell<std::collections::HashSet<ListItemId>>>,
     /// Last programmatic scroll generation applied to this semantic list.
     applied_scroll_generation: Cell<i32>,
     /// A requested index stays pending until its measured row intersects the
@@ -353,9 +359,16 @@ impl ListRenderState {
     ) -> Self {
         let rows_dirty = Rc::new(Cell::new(true));
         let rows_dirty_for_watch = Rc::clone(&rows_dirty);
+        let replaced_row_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let replaced_for_watch = Rc::clone(&replaced_row_ids);
         let signals = renderer.frame_signals();
-        let guard = config.contents.watch(.., move |_change| {
+        let guard = config.contents.watch(.., move |ctx, change| {
             rows_dirty_for_watch.set(true);
+            crate::renderer::collect_replaced_ids(
+                ctx.value(),
+                &change,
+                &mut replaced_for_watch.borrow_mut(),
+            );
             signals.request_refresh();
         });
         let row_selection = ListRowSelection::new(&config.selection, config.contents.clone());
@@ -366,6 +379,7 @@ impl ListRenderState {
             scroll: RefCell::new(None),
             item_cache: RefCell::new(VisibleSubviewCache::new()),
             rows_dirty,
+            replaced_row_ids,
             applied_scroll_generation: Cell::new(0),
             pending_scroll: Cell::new(None),
             viewport_anchor: Cell::new(None),
@@ -489,8 +503,21 @@ impl ListRenderState {
             .unwrap_or_default()
     }
 
+    /// Drop the retained sub-views of the rows the collection watcher
+    /// reported as replaced since the last consume — a same-id content change
+    /// re-materializes exactly those rows on their next `entry`, while every
+    /// untouched row keeps its node (focus, gestures, in-flight scroll
+    /// anchoring all live inside it).
+    fn consume_replaced_rows(&self) {
+        let replaced = core::mem::take(&mut *self.replaced_row_ids.borrow_mut());
+        if !replaced.is_empty() {
+            self.item_cache.borrow_mut().invalidate_ids(&replaced);
+        }
+    }
+
     fn prepare_rows(&self, len: usize, estimate: f64) {
         let dirty = self.rows_dirty.replace(false);
+        self.consume_replaced_rows();
         if dirty || !self.extent_index.borrow().matches(len, estimate, 0.0) {
             self.extent_index.borrow_mut().reset(len, estimate, 0.0);
             self.sections_resolved_for.set(None);
@@ -782,7 +809,9 @@ pub(crate) fn list_accessibility(
     } else {
         // The semantic path keeps section chrome current but measures rows in
         // units — one row is one extent unit, so scroll offsets read as row
-        // indices.
+        // indices. It still consumes replaced-row invalidations: the semantic
+        // emit reads the same retained rows.
+        state.consume_replaced_rows();
         let _ = state.resolve_sections(row_count, env);
         let mut extent_index = state.extent_index.borrow_mut();
         if !extent_index.matches(row_count, 1.0, 0.0) {

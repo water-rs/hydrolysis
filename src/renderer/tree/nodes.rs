@@ -438,6 +438,15 @@ impl<K: Eq + core::hash::Hash + Clone> VisibleSubviewCache<K> {
         self.entries.get(key)
     }
 
+    /// Drop the retained sub-views of exactly the keys in `ids`. The next
+    /// `entry` for a dropped key re-materializes it from the collection's
+    /// current data; keys not in `ids` keep their nodes (and their retained
+    /// state) untouched.
+    pub(crate) fn invalidate_ids(&mut self, ids: &std::collections::HashSet<K>) {
+        self.entries.retain(|key, _| !ids.contains(key));
+        self.touched.retain(|key| !ids.contains(key));
+    }
+
     /// Run the layout-time prepare pass over every currently retained item.
     pub(crate) fn prepare_for_measure(&mut self, renderer: &mut HydrolysisRenderer) {
         for entry in self.entries.values_mut() {

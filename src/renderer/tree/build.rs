@@ -765,10 +765,13 @@ impl RenderNode {
         let dirty_key = Rc::new(());
         let key = Rc::as_ptr(&dirty_key) as usize;
         let signals = renderer.signals.clone();
+        let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let replaced_for_watch = Rc::clone(&replaced_ids);
         let guard = views.watch(.., {
             let dirty = Rc::clone(&dirty);
-            move |_changed| {
+            move |ctx, change| {
                 dirty.set(true);
+                collect_replaced_ids(ctx.value(), &change, &mut replaced_for_watch.borrow_mut());
                 signals.mark_collection_dirty(key, 0);
             }
         });
@@ -813,6 +816,7 @@ impl RenderNode {
             placed: Vec::new(),
             transition,
             dirty,
+            replaced_ids,
             _dirty_key: dirty_key,
             _guard: guard,
             _layout_guards: layout_guards,
@@ -834,10 +838,15 @@ impl RenderNode {
         let key = Rc::as_ptr(&dirty_key) as usize;
         let signals = renderer.signals.clone();
         let dirty_for_watch = Rc::clone(&dirty);
-        let guard = views.watch(.., move |_changed| {
+        let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let replaced_for_watch = Rc::clone(&replaced_ids);
+        let guard = views.watch(.., move |ctx, change| {
             // Membership changed: request a fine-grained refresh; the flush re-reads
             // the collection length/items and re-resolves the visible window.
+            // The reported replaced positions accumulate their ids so the
+            // patch invalidates exactly those rows.
             dirty_for_watch.set(true);
+            collect_replaced_ids(ctx.value(), &change, &mut replaced_for_watch.borrow_mut());
             signals.mark_collection_dirty(key, 0);
         });
         let signals = renderer.signals.clone();
@@ -866,6 +875,7 @@ impl RenderNode {
             estimate_sample: Cell::new(None),
             floor_sample: Cell::new(None),
             dirty,
+            replaced_ids,
             _dirty_key: dirty_key,
             _guard: guard,
             _direction_guard: direction_guard,
