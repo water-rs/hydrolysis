@@ -59,6 +59,11 @@ pub(crate) struct ScopedAccessibilitySemantics {
     /// clones the scope itself — so a donation always lands in the slot the
     /// claimer drains.
     delegated_activation: Rc<RefCell<Option<AccessibilityActivation>>>,
+    /// Text a descendant donated to the claim's accessible name (see
+    /// [`AccessibilityNameFromContents`]). `Some` once any leaf donated — even
+    /// if the joined string is empty — so the claimer can tell "text was
+    /// consumed" apart from "there were no text descendants".
+    donated_text: Rc<RefCell<Option<String>>>,
 }
 
 #[cfg(feature = "accessibility")]
@@ -70,6 +75,7 @@ impl ScopedAccessibilitySemantics {
         Self {
             identity: Rc::new(()),
             delegated_activation: Rc::new(RefCell::new(None)),
+            donated_text: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -92,6 +98,67 @@ impl ScopedAccessibilitySemantics {
     pub(crate) fn take_delegated_activation(&self) -> Option<AccessibilityActivation> {
         self.delegated_activation.borrow_mut().take()
     }
+
+    /// Deposit text a descendant emitted no node for: the claim computes its
+    /// accessible name from these contents (water-rs/hydrolysis#229).
+    pub(crate) fn donate_text(&self, text: &str) {
+        let mut slot = self.donated_text.borrow_mut();
+        match slot.as_mut() {
+            Some(name) => {
+                if !name.is_empty() {
+                    name.push(' ');
+                }
+                name.push_str(text);
+            }
+            None => *slot = Some(text.to_owned()),
+        }
+    }
+
+    /// Take the text descendants donated to this claim's name — `Some` when
+    /// any leaf was consumed, even if the joined string is empty.
+    pub(crate) fn take_donated_text(&self) -> Option<String> {
+        self.donated_text.borrow_mut().take()
+    }
+}
+
+/// Marks a subtree whose text feeds the enclosing claim's accessible name.
+///
+/// Installed by [`accessibility_container_child_environment`] when the
+/// claiming container's role computes its name from descendant content — the
+/// platform names a tab after its text, so a `Label` node repeating those
+/// words is read twice (water-rs/hydrolysis#229). A text leaf under the
+/// marker donates its string to the claim's [`ScopedAccessibilitySemantics`]
+/// instead of registering a node — unless the leaf names itself: its own role
+/// or label is a nearer claim and wins. A nested claim boundary re-derives
+/// the marker, so consumption always belongs to the nearest claiming element.
+#[cfg(feature = "accessibility")]
+#[derive(Clone)]
+pub(crate) struct AccessibilityNameFromContents;
+
+#[cfg(feature = "accessibility")]
+impl MetadataKey for AccessibilityNameFromContents {}
+
+/// Whether an element of `role` takes its accessible name from descendant
+/// text — the ARIA "name from content" roles. Those containers consume their
+/// text descendants; containers whose role names the grouping itself (a tab
+/// list, a navigation landmark) leave them emitting `Label` nodes as before.
+#[cfg(feature = "accessibility")]
+fn accessibility_role_names_from_contents(role: &AccessibilityRole) -> bool {
+    matches!(
+        role,
+        AccessibilityRole::Button
+            | AccessibilityRole::Link
+            | AccessibilityRole::Checkbox
+            | AccessibilityRole::RadioButton
+            | AccessibilityRole::Switch
+            | AccessibilityRole::MenuItem
+            | AccessibilityRole::MenuItemCheckbox
+            | AccessibilityRole::MenuItemRadio
+            | AccessibilityRole::Option
+            | AccessibilityRole::Tab
+            | AccessibilityRole::Header
+            | AccessibilityRole::Text
+    )
 }
 
 #[cfg(feature = "accessibility")]
@@ -544,6 +611,20 @@ impl AccessibilityBuilder {
         );
     }
 
+    /// Name `node_id` from the descendant text its claim consumed (see
+    /// [`SemanticCore::consume_accessibility_descendant_text`]), when the
+    /// claim carries no explicit label. An empty donation names nothing.
+    fn name_claim_from_contents(&mut self, node_id: AccessibilityNodeId, name: String) {
+        if name.is_empty() {
+            return;
+        }
+        if let Some((_, node)) = self.nodes.iter_mut().find(|(id, _)| *id == node_id)
+            && node.label().is_none()
+        {
+            node.set_label(name);
+        }
+    }
+
     /// Collapses a synthesized naming container around exactly one semantic
     /// node into that node.
     ///
@@ -735,6 +816,16 @@ pub(crate) fn accessibility_container_child_environment(env: &Environment) -> Op
     child_env.remove::<AccessibilityChildren>();
     child_env.remove::<AccessibilityState>();
     child_env.remove::<AccessibilityStateSignal>();
+    // Every claim boundary re-derives text consumption: an enclosing
+    // consuming claim's marker is dropped here so a nested claim decides for
+    // its own subtree — the nearer claim owns the text.
+    child_env.remove::<AccessibilityNameFromContents>();
+    if env
+        .get::<AccessibilityRole>()
+        .is_some_and(accessibility_role_names_from_contents)
+    {
+        child_env.insert(AccessibilityNameFromContents);
+    }
     // `ScopedAccessibilitySemantics` deliberately stays: it no longer names
     // anything — the claim consumed it — but it is still the claim's identity,
     // which is how a silenced representative inside (a tap gesture) sees the
@@ -1357,22 +1448,78 @@ impl SemanticCore {
         self.accessibility.semantics_scope_is_claimed(env)
     }
 
-    /// Attach the activation a silenced representative delegated to `node_id`'s
-    /// naming scope (see [`ScopedAccessibilitySemantics::delegate_activation`])
-    /// onto the node that claimed it. Called once the claimer's subtree has
-    /// been walked, when every donation has already landed.
+    /// Consume `text` into the enclosing name-from-contents claim, if `env`
+    /// sits under one this leaf doesn't name itself. Returns true when the
+    /// leaf must emit no node of its own — its string is already part of the
+    /// claiming element's name, so a `Label` node for it is read twice
+    /// (water-rs/hydrolysis#229).
+    ///
+    /// A leaf carrying its own role or label is a nearer claim and keeps its
+    /// node; a suppressed subtree (hidden, `ExcludeDescendants`, or a widget's
+    /// own merged label) names nothing and donates nothing.
     #[cfg(feature = "accessibility")]
-    pub(crate) fn drain_delegated_activation(
-        &mut self,
-        node_id: AccessibilityNodeId,
+    pub(crate) fn consume_accessibility_descendant_text(
+        &self,
         env: &Environment,
-    ) {
-        if let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
-            && let Some(activation) = scope.take_delegated_activation()
+        text: &str,
+    ) -> bool {
+        if env.get::<AccessibilityNameFromContents>().is_none()
+            || env.get::<AccessibilityRole>().is_some()
+            || env.get::<AccessibilityLabel>().is_some()
+            || self.accessibility.suppression_depth > 0
         {
+            return false;
+        }
+        let Some(scope) = env.get::<ScopedAccessibilitySemantics>() else {
+            return false;
+        };
+        scope.donate_text(text);
+        true
+    }
+
+    /// Drain every channel `scope` collected from the subtree that produced it
+    /// — the activation a silenced representative delegated (see
+    /// [`ScopedAccessibilitySemantics::delegate_activation`]) and the text
+    /// name-from-contents descendants donated (see
+    /// [`SemanticCore::consume_accessibility_descendant_text`]) — onto
+    /// `node_id`, the node that claimed the scope. Called once the claimer's
+    /// subtree has been walked, when every donation has already landed.
+    ///
+    /// Returns whether descendant text was consumed (`Some` was donated — even
+    /// an empty join means the claim held silenced text descendants), so the
+    /// caller can tell a composite apart from a wrapper around a single child.
+    #[cfg(feature = "accessibility")]
+    fn drain_scope_donations(
+        &mut self,
+        scope: &ScopedAccessibilitySemantics,
+        node_id: AccessibilityNodeId,
+    ) -> bool {
+        if let Some(activation) = scope.take_delegated_activation() {
             self.accessibility
                 .attach_delegated_activation(node_id, activation);
         }
+        match scope.take_donated_text() {
+            Some(name) => {
+                self.accessibility.name_claim_from_contents(node_id, name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`SemanticCore::drain_scope_donations`] for a claim reached through
+    /// `env` rather than a container's stored naming scope — a tap gesture's
+    /// own node drains once its content has been rendered.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn drain_claim_scope(
+        &mut self,
+        node_id: AccessibilityNodeId,
+        env: &Environment,
+    ) -> bool {
+        let Some(scope) = env.get::<ScopedAccessibilitySemantics>() else {
+            return false;
+        };
+        self.drain_scope_donations(scope, node_id)
     }
 
     #[cfg(feature = "accessibility")]
@@ -1387,19 +1534,23 @@ impl SemanticCore {
                 .expect("hydrolysis accessibility container parent stack underflow");
         }
         if let Some(container_id) = scope.container_node {
-            // A tap gesture the claim silenced delegates its activation through
-            // the scope: the container node stands in for it, so it must stay
-            // activatable. Drained after the subtree walk — every donation has
-            // landed — and before the collapse hands the node to its child.
-            if let Some(activation) = scope
-                .naming_scope
-                .and_then(|scope| scope.take_delegated_activation())
-            {
-                self.accessibility
-                    .attach_delegated_activation(container_id, activation);
+            // Donations land in the claim's scope during the subtree walk and
+            // are drained once it ends: a tap gesture the claim silenced
+            // delegates its activation through the scope (the container node
+            // stands in for it, so it must stay activatable), and a
+            // name-from-contents role collects the text of the leaves it
+            // silenced as the container's own name.
+            let mut consumed_text = false;
+            if let Some(naming_scope) = scope.naming_scope {
+                consumed_text = self.drain_scope_donations(&naming_scope, container_id);
             }
-            self.accessibility
-                .collapse_single_child_container(container_id);
+            // A container that consumed descendant text is a composite — it
+            // holds its own name — so it must not dissolve into a surviving
+            // control child: the close button would answer as the tab.
+            if !consumed_text {
+                self.accessibility
+                    .collapse_single_child_container(container_id);
+            }
             // No real child ever registered under the container, but suppressed
             // decorative leaves beneath it still placed their boxes: the
             // container's node reports the element box they left, not the frame

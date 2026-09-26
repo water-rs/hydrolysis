@@ -58,6 +58,8 @@ use waterui_canvas::Canvas;
 use waterui_controls::button::{ButtonSize, ButtonStyle, button};
 use waterui_controls::label::{LabelDisplayMode, label};
 use waterui_controls::slider::slider;
+#[cfg(feature = "accessibility")]
+use waterui_controls::text_field::field;
 use waterui_controls::toggle::{ToggleStyle, toggle};
 use waterui_form::picker::PickerStyle;
 #[cfg(feature = "accessibility")]
@@ -1206,6 +1208,141 @@ fn a_naming_container_keeps_the_silenced_taps_activation() {
         *activations.borrow(),
         1,
         "Click on the claimed Button must run the delegated tap action"
+    );
+}
+
+/// water-rs/hydrolysis#229: a container whose role names it from its content —
+/// a tab, a checkbox, a link — computes its accessible name from descendant
+/// text. Those text leaves must not also emit `Label` nodes or a screen reader
+/// reads the same words twice; a descendant that is itself a control — a close
+/// button, or an edit control like a text field — keeps its own node, and its
+/// own label stays out of the claim's name.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_container_named_by_its_content_consumes_text_but_not_controls() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let field_value = Binding::container(Str::from(""));
+    let view = hstack((
+        text("Shell"),
+        field("Nickname", &field_value),
+        button("Close tab").action(|| {}),
+    ))
+    .a11y_role(AccessibilityRole::Tab);
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a tab container must publish an accessibility tree");
+    let tabs = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::Tab)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "the container must emit exactly one tab node"
+    );
+    let (_, tab) = tabs[0];
+    assert_eq!(
+        tab.label(),
+        Some("Shell"),
+        "the tab's accessible name comes from its descendant text"
+    );
+
+    let buttons = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::Button)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        buttons.len(),
+        1,
+        "the nested close control stays exposed as its own node"
+    );
+    let (button_id, button) = buttons[0];
+    assert_eq!(button.label(), Some("Close tab"));
+    assert!(
+        tab.children().contains(button_id),
+        "the close button is a child of the tab it belongs to"
+    );
+
+    let fields = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::TextInput)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields.len(),
+        1,
+        "a text field inside the claim keeps its own node"
+    );
+    let (field_id, field_node) = fields[0];
+    assert_eq!(field_node.label(), Some("Nickname"));
+    assert!(
+        tab.children().contains(field_id),
+        "the text field is a child of the tab it belongs to"
+    );
+
+    assert!(
+        update
+            .nodes
+            .iter()
+            .all(|(_, node)| node.role() != AccessibilityNodeRole::Label),
+        "text the tab was named from must not emit label nodes: {:?}",
+        update
+            .nodes
+            .iter()
+            .map(|(_, node)| (node.role(), node.label().map(str::to_owned)))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// water-rs/hydrolysis#229: an explicit `.a11y_label` still wins over the name
+/// a container would compute from its descendant text — and the text is still
+/// consumed, not emitted as `Label` nodes beside it.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_container_with_an_explicit_label_still_consumes_its_text() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let view = hstack((text("Shell"), text("Beta")))
+        .a11y_label("Pinned")
+        .a11y_role(AccessibilityRole::Tab);
+
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled tab must publish an accessibility tree");
+    let tabs = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == AccessibilityNodeRole::Tab)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "the container must emit exactly one tab node"
+    );
+    assert_eq!(
+        tabs[0].1.label(),
+        Some("Pinned"),
+        "the explicit label wins over the computed name"
+    );
+    assert!(
+        update
+            .nodes
+            .iter()
+            .all(|(_, node)| node.role() != AccessibilityNodeRole::Label),
+        "consumed text children must not emit label nodes: {:?}",
+        update
+            .nodes
+            .iter()
+            .map(|(_, node)| (node.role(), node.label().map(str::to_owned)))
+            .collect::<Vec<_>>()
     );
 }
 

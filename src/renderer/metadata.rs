@@ -440,7 +440,7 @@ impl HydrolysisRenderer {
             Self::render_gesture_content(renderer, env, content_env, render_content);
             #[cfg(feature = "accessibility")]
             if let Some(node_id) = claimed_naming_node {
-                renderer.drain_delegated_activation(node_id, env);
+                renderer.drain_claim_scope(node_id, env);
             }
 
             let color_signal = style.state_layer_color.resolve(env);
@@ -484,7 +484,7 @@ impl HydrolysisRenderer {
         Self::render_gesture_content(renderer, env, content_env, render_content);
         #[cfg(feature = "accessibility")]
         if let Some(node_id) = claimed_naming_node {
-            renderer.drain_delegated_activation(node_id, env);
+            renderer.drain_claim_scope(node_id, env);
         }
     }
 
@@ -514,7 +514,7 @@ impl HydrolysisRenderer {
     /// or `disabled` — with no bounds, no pointer or gesture targets, and no
     /// interaction state layer. Returns the node when the gesture claimed the
     /// naming scope; the caller then walks the content under the shielded
-    /// environment and drains delegated activations onto it.
+    /// environment and drains the claim's scope onto it.
     #[cfg(feature = "accessibility")]
     pub(super) fn emit_gesture_observer_accessibility(
         renderer: &mut SemanticCore,
