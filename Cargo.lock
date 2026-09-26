@@ -2842,6 +2842,7 @@ dependencies = [
  "futures",
  "futures-lite",
  "hydrolysis-m3",
+ "icu_properties",
  "icu_provider",
  "image",
  "jiff",

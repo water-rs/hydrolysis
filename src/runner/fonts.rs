@@ -502,6 +502,160 @@ mod tests {
         );
     }
 
+    /// A DejaVu-Sans subset kept to ASCII and the emoji codepoints the
+    /// emoji-family test exercises — including the ones that *also* live in a
+    /// colour face. DejaVu covering `U+1F600` at all is the whole point of
+    /// <https://github.com/water-rs/hydrolysis/issues/119>: a desktop sans
+    /// carries monochrome glyphs for emoji-presentation codepoints, so which
+    /// family answers the cluster decides whether it draws colour or flat
+    /// text.
+    const TEXT_WITH_EMOJI_COVERAGE: &[u8] =
+        include_bytes!("../../test-fonts/DejaVuSansEmojiCoverage.ttf");
+
+    /// A Noto Color Emoji subset over the same codepoints, playing the
+    /// `emoji` generic family.
+    const EMOJI_FACE: &[u8] = include_bytes!("../../test-fonts/NotoColorEmojiSubset.ttf");
+
+    /// A shaping service whose collection holds exactly the two fixture
+    /// faces, each pinned to its generic family: the text face at
+    /// `sans-serif`, the colour face at `emoji`. Both cover every emoji
+    /// codepoint the test shapes, so which blob a run resolves to reports
+    /// which family list the cluster consulted first — host fonts cannot
+    /// leak in because system discovery is off.
+    fn emoji_fixture_service() -> TextMeasureService {
+        use parley::fontique::{Blob, Collection, CollectionOptions, GenericFamily};
+        use std::sync::Arc;
+
+        let mut font_cx = parley::FontContext {
+            collection: Collection::new(CollectionOptions {
+                system_fonts: false,
+                ..CollectionOptions::default()
+            }),
+            source_cache: parley::fontique::SourceCache::default(),
+        };
+        let text_families = font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(TEXT_WITH_EMOJI_COVERAGE)), None);
+        let emoji_families = font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(EMOJI_FACE)), None);
+        font_cx.collection.set_generic_families(
+            GenericFamily::SansSerif,
+            text_families.iter().map(|(family_id, _)| *family_id),
+        );
+        font_cx.collection.set_generic_families(
+            GenericFamily::Emoji,
+            emoji_families.iter().map(|(family_id, _)| *family_id),
+        );
+        let mut service = TextMeasureService::new();
+        *service.fonts_mut() = font_cx;
+        service
+    }
+
+    /// <https://github.com/water-rs/hydrolysis/issues/119>: a cluster whose
+    /// presentation is emoji — an `Emoji_Presentation=Yes` codepoint, or an
+    /// `Emoji=Yes` base followed by U+FE0F — must resolve through the `emoji`
+    /// generic family *before* the text families. `parley` instead appends
+    /// the emoji fallback after the requested family, so a text face that
+    /// covers the codepoint wins and the cluster draws monochrome.
+    #[test]
+    fn emoji_presentation_clusters_resolve_through_the_emoji_family_first() {
+        let service = emoji_fixture_service();
+        let mut env = Environment::new();
+        crate::testing::install_theme(&mut env);
+
+        let faces_of = |text: &'static str| -> Vec<Vec<u8>> {
+            let input = resolve_text_layout_input(
+                &StyledStr::from(text),
+                HorizontalAlignment::Leading,
+                &env,
+            );
+            let layout = service.shape(&input, None);
+            layout
+                .lines()
+                .flat_map(|line| line.items())
+                .filter_map(|item| {
+                    let PositionedLayoutItem::GlyphRun(run) = item else {
+                        return None;
+                    };
+                    Some(run.run().font().data.data().to_vec())
+                })
+                .collect()
+        };
+
+        // Emoji presentation: the bare `Emoji_Presentation=Yes` codepoints
+        // and the `Emoji=Yes` bases followed by U+FE0F must all come back in
+        // the face pinned at `emoji`, never in the text face that also
+        // covers them.
+        for text in [
+            "\u{1F600}",
+            "\u{2764}\u{FE0F}",
+            "\u{2615}",
+            "\u{26A0}\u{FE0F}",
+            "\u{26A1}",
+        ] {
+            let faces = faces_of(text);
+            assert!(!faces.is_empty(), "`{text}` produced no glyph runs");
+            for face in &faces {
+                assert_eq!(
+                    face.as_slice(),
+                    EMOJI_FACE,
+                    "emoji-presentation `{text}` resolved to the text face"
+                );
+            }
+        }
+
+        // Text presentation keeps the text face: Latin, bare `Emoji=Yes`
+        // codepoints whose `Emoji_Presentation` is `No`, and one followed by
+        // U+FE0E all stay monochrome.
+        for text in ["plain", "\u{2764}", "\u{26A0}", "\u{2764}\u{FE0E}"] {
+            let faces = faces_of(text);
+            assert!(!faces.is_empty(), "`{text}` produced no glyph runs");
+            for face in &faces {
+                assert_eq!(
+                    face.as_slice(),
+                    TEXT_WITH_EMOJI_COVERAGE,
+                    "text-presentation `{text}` left the text face"
+                );
+            }
+        }
+
+        // Mixed text: the emoji cluster inside Latin text takes the emoji
+        // face while its ASCII neighbours keep the text face.
+        let text = "a\u{1F600}b";
+        let input =
+            resolve_text_layout_input(&StyledStr::from(text), HorizontalAlignment::Leading, &env);
+        let layout = service.shape(&input, None);
+        let (mut saw_emoji, mut saw_text) = (false, false);
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let face = run.run().font().data.data();
+                for cluster in run.run().clusters() {
+                    if text[cluster.text_range()].contains('\u{1F600}') {
+                        saw_emoji = true;
+                        assert_eq!(
+                            face, EMOJI_FACE,
+                            "the emoji cluster in `{text}` resolved to the text face"
+                        );
+                    } else {
+                        saw_text = true;
+                        assert_eq!(
+                            face, TEXT_WITH_EMOJI_COVERAGE,
+                            "a text cluster in `{text}` left the text face"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_emoji && saw_text,
+            "`{text}` produced no runs to assert on"
+        );
+    }
+
     /// And the same statement from the other side: a script Roboto does not
     /// carry must be answered by a face other than the pinned Roboto. Without this the
     /// test above could pass on a collection that had quietly stopped
