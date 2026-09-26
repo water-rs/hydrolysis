@@ -166,9 +166,9 @@ fn max_width_derived_from_the_mounted_window_frame_wraps_text() {
     assert!(
         bounds.height() > 130.0,
         "the text must wrap to the lines an 80pt cap produces, not render one clipped line: {bounds:?}"
+    );
 }
 
-    );
 /// `mount_app` must mount the application's own `Window` — the mount the
 /// window runner performs — so the runtime writes `Window::frame` from the
 /// viewport onto the app's binding at mount. Mounting the window's content
