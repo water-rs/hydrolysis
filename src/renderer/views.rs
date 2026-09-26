@@ -318,7 +318,9 @@ pub(crate) fn str_accessibility(
         // (water-rs/hydrolysis#176).
         let default_label = (!text.as_str().is_empty()).then(|| text.as_str().to_owned());
         let label = renderer.resolve_accessibility_label(env, default_label);
-        if let Some(label) = label {
+        if let Some(label) = label
+            && !renderer.consume_accessibility_descendant_text(env, &label)
+        {
             let mut node = AccessibilityNode::new(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
             );

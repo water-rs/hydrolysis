@@ -554,7 +554,7 @@ impl RenderNode {
                             node.child.emit_accessibility(renderer, walk_env);
                         }
                         if let Some(node_id) = claimed_node {
-                            renderer.drain_delegated_activation(node_id, child_env);
+                            renderer.drain_claim_scope(node_id, child_env);
                         }
                     }
                     WrapperEffect::Focused(value) => {

@@ -1107,6 +1107,9 @@ impl TextNode {
         let Some(label) = renderer.resolve_accessibility_label(env, default_label) else {
             return;
         };
+        if renderer.consume_accessibility_descendant_text(env, &label) {
+            return;
+        }
         let mut node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
         );

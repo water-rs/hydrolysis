@@ -126,6 +126,10 @@ pub(crate) fn restore_a11y_naming_scope(
         // it would let the leaf render the name that a container above still
         // believes nobody spoke for, and both would emit it.
         ScopedAccessibilitySemantics,
+        // The same goes for text the claim consumes as its name: a snapshot
+        // that drops the marker would let the leaf emit a `Label` the
+        // container's name already repeats.
+        AccessibilityNameFromContents,
     );
     snapshot
 }
