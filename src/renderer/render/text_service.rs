@@ -19,9 +19,12 @@ use super::*;
 use core::hash::{Hash, Hasher};
 use core::num::NonZeroUsize;
 use core::ops::Range;
+use icu_properties::props::{Emoji, EmojiPresentation};
+use icu_properties::{CodePointSetData, CodePointSetDataBorrowed};
 use lru::LruCache;
 use rustc_hash::FxHasher;
 use std::sync::{Arc, Mutex};
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Upper bound on retained shaped layouts.
 ///
@@ -491,6 +494,27 @@ fn build_parley_layout(
         push_text_style(&mut builder, style, range.clone());
     }
 
+    if !input.plain.is_ascii() {
+        // A cluster whose presentation is emoji consults the `emoji` generic
+        // family ahead of the family its own style resolved: a text face can
+        // carry a monochrome glyph for an emoji codepoint, and it must not
+        // win over a colour emoji face. The cluster's own family stays in
+        // the list, after `emoji`, to answer a codepoint no emoji face
+        // carries.
+        for range in emoji_cluster_ranges(&input.plain) {
+            let family = input
+                .spans
+                .iter()
+                .find(|(span, _)| span.contains(&range.start))
+                .and_then(|(_, style)| style.font.family.as_deref())
+                .or(input.default_font.family.as_deref());
+            builder.push(
+                parley::StyleProperty::FontFamily(emoji_font_family(family)),
+                range,
+            );
+        }
+    }
+
     let mut layout = builder.build(&input.plain);
     layout.break_all_lines(max_width);
     layout.align(
@@ -555,6 +579,66 @@ fn font_family(family: Option<&str>) -> parley::FontFamily<'static> {
         || parley::style::GenericFamily::SansSerif.into(),
         |family| parley::FontFamily::Source(std::borrow::Cow::Owned(family.to_string())),
     )
+}
+
+/// The `font-family` value an emoji-presentation range shapes with: the
+/// `emoji` generic family first, then the family list the range's own style
+/// resolved — `sans-serif` when nothing more specific applied.
+fn emoji_font_family(family: Option<&str>) -> parley::FontFamily<'static> {
+    let own = family.map_or_else(
+        || {
+            vec![parley::FontFamilyName::Generic(
+                parley::GenericFamily::SansSerif,
+            )]
+        },
+        |family| {
+            parley::FontFamilyName::parse_css_list(family)
+                .map(|name| name.map(parley::FontFamilyName::into_owned))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| {
+                    panic!("font family {family:?} is not a CSS family list: {error:?}")
+                })
+        },
+    );
+    let mut names = Vec::with_capacity(own.len() + 1);
+    names.push(parley::FontFamilyName::Generic(
+        parley::GenericFamily::Emoji,
+    ));
+    names.extend(own);
+    parley::FontFamily::List(std::borrow::Cow::Owned(names))
+}
+
+/// The byte ranges of `text` that present as emoji, one per grapheme
+/// cluster.
+fn emoji_cluster_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let emoji = CodePointSetData::new::<Emoji>();
+    let emoji_presentation = CodePointSetData::new::<EmojiPresentation>();
+    text.grapheme_indices(true)
+        .filter(move |(_, cluster)| is_emoji_cluster(cluster, emoji, emoji_presentation))
+        .map(|(start, cluster)| start..start + cluster.len())
+}
+
+/// Whether a grapheme cluster presents as emoji: it carries an
+/// `Emoji_Presentation=Yes` codepoint, or an `Emoji=Yes` base followed by
+/// U+FE0F. U+FE0E following a base requests text presentation and keeps the
+/// cluster off this path.
+fn is_emoji_cluster(
+    cluster: &str,
+    emoji: CodePointSetDataBorrowed<'static>,
+    emoji_presentation: CodePointSetDataBorrowed<'static>,
+) -> bool {
+    let mut chars = cluster.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(chars.peek(), Some('\u{FE0E}')) {
+            continue;
+        }
+        if emoji_presentation.contains(c)
+            || (matches!(chars.peek(), Some('\u{FE0F}')) && emoji.contains(c))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn text_layout_locale(env: &Environment) -> String {
