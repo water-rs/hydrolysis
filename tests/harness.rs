@@ -166,7 +166,36 @@ fn max_width_derived_from_the_mounted_window_frame_wraps_text() {
     assert!(
         bounds.height() > 130.0,
         "the text must wrap to the lines an 80pt cap produces, not render one clipped line: {bounds:?}"
+}
+
     );
+/// `mount_app` must mount the application's own `Window` — the mount the
+/// window runner performs — so the runtime writes `Window::frame` from the
+/// viewport onto the app's binding at mount. Mounting the window's content
+/// inside a synthetic default window leaves the app's `frame` at whatever
+/// the app seeded regardless of the viewport, orphaning every signal derived
+/// from it (water-rs/hydrolysis#128).
+#[test]
+fn mount_app_drives_the_app_window_frame_from_the_viewport() {
+    use waterui::window::{Window, WindowState};
+
+    let frame = waterui::binding(Rect::new(Point::zero(), Size::new(800.0, 600.0)));
+    let mut window = Window::new("app", waterui::binding(WindowState::Normal), || {
+        text("app content").body()
+    });
+    window.frame = frame.clone();
+    let app = App::new_with_windows([window], Environment::new());
+    let mut app = ui()
+        .theme(Material3::defaults())
+        .viewport(320, 240)
+        .mount_app(app);
+    assert_eq!(
+        frame.snapshot(),
+        Rect::new(Point::zero(), Size::new(320.0, 240.0)),
+        "the app's Window::frame must carry the mounted viewport"
+    );
+    let bounds = app.query().role(Role::LABEL).single().bounds();
+    assert_eq!(bounds.width(), 320.0);
 }
 
 // Origin: waterui `testing/src/tests.rs`.
