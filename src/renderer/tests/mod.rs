@@ -20,6 +20,7 @@ mod layout_contract;
 mod lazy_cross;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod list_remeasure;
+mod list_row_hit;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod list_row_metrics;
 mod perf_full_rebuild;
