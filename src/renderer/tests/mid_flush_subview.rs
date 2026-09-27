@@ -79,7 +79,12 @@ fn ink_span(rgba8: &[u8], rgb: [u8; 3]) -> Option<(usize, usize, usize)> {
     let mut y0 = usize::MAX;
     let mut y1 = 0;
     let mut n = 0;
-    for (y, row) in rgba8.chunks_exact(WINDOW_WIDTH as usize * 4).enumerate() {
+    for (y, row) in rgba8
+        .as_chunks::<{ WINDOW_WIDTH as usize * 4 }>()
+        .0
+        .iter()
+        .enumerate()
+    {
         for px in row.as_chunks::<4>().0 {
             if px[..3] == rgb[..] {
                 y0 = y0.min(y);
