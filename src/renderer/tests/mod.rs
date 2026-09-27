@@ -57,6 +57,7 @@ mod shadow;
 mod teardown_order;
 mod text_ink;
 mod tree;
+mod when_payload;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 #[cfg(not(target_arch = "wasm32"))]
 mod window_background;
