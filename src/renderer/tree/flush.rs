@@ -343,7 +343,8 @@ impl RenderNode {
                         ctx.bounds.height() as f32,
                     )
                 };
-                renderer.scene_mut().append(
+                crate::engine::vello_backend::append_scene(
+                    renderer.scene_mut(),
                     &scene,
                     Some(
                         ctx.transform

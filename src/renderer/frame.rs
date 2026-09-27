@@ -488,7 +488,7 @@ impl HydrolysisRenderer {
     }
 
     pub(crate) fn pop_layer(&mut self) {
-        self.scene.pop_layer();
+        crate::engine::vello_backend::pop_scene_layer(&mut self.scene);
         self.compositor
             .active_scene_layers
             .pop()
@@ -515,7 +515,7 @@ impl HydrolysisRenderer {
         );
 
         for _ in 0..self.compositor.active_scene_layers.len() {
-            self.scene.pop_layer();
+            crate::engine::vello_backend::pop_scene_layer(&mut self.scene);
         }
 
         if !scene_has_content(&self.scene) {

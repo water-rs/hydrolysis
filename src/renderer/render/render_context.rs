@@ -179,9 +179,11 @@ impl<'a> WidgetRenderContext<'a> {
     }
 
     pub(crate) fn append_scene(&mut self, scene: &vello::Scene) {
-        self.renderer
-            .scene_mut()
-            .append(scene, Some(self.transform));
+        crate::engine::vello_backend::append_scene(
+            self.renderer.scene_mut(),
+            scene,
+            Some(self.transform),
+        );
     }
 
     pub(crate) fn draw_navigation_transition(

@@ -1,3 +1,4 @@
+mod clip_transform;
 mod collection_update;
 use super::*;
 use std::borrow::Cow;

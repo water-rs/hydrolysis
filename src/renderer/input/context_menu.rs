@@ -579,9 +579,9 @@ impl HydrolysisRenderer {
                 None,
                 &hole,
             );
-            self.scene.pop_layer();
+            crate::engine::vello_backend::pop_scene_layer(&mut self.scene);
         }
-        self.scene.pop_layer();
+        crate::engine::vello_backend::pop_scene_layer(&mut self.scene);
 
         // Menu and accessory sit on the theme's context-menu surface —
         // container colour, radius and elevation — the same Material surface
