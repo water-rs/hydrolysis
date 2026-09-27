@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use accesskit::Role;
 use nami::collection::SignalCollection;
@@ -35,6 +35,8 @@ const MENU_ROW: usize = ROWS - 2;
 const ROW_H: f32 = 48.0;
 /// The last row's tap region is tall enough to cover the whole menu.
 const TAP_ROW_H: f32 = 400.0;
+/// The tail row's long-press minimum, in milliseconds.
+const LONG_PRESS_MS: u32 = 50;
 
 fn secondary_click(x: f32, y: f32) -> [InputEvent; 2] {
     [
@@ -76,13 +78,17 @@ fn primary_click(x: f32, y: f32) -> [InputEvent; 2] {
 
 /// A `scroll` over a `List`: filler rows, the menu row (a button carrying the
 /// `.context_menu`, so its a11y bounds are the open target), then a last row
-/// whose `.on_tap` region covers the rest of the window.
-fn chat_list(taps: Rc<RefCell<u32>>, menu: Rc<dyn Fn() -> ContextMenu>) -> AnyViewBuilder<AnyView> {
+/// `tail` supplies — its gesture region covers the rest of the window.
+fn chat_list_with_tail(
+    tail: impl Fn() -> AnyView + 'static,
+    menu: Rc<dyn Fn() -> ContextMenu>,
+) -> AnyViewBuilder<AnyView> {
+    let tail = Rc::new(tail);
     AnyViewBuilder::<AnyView>::new(move || {
         let rows = (0..ROWS).map(SelfId::new).collect::<Vec<_>>();
         AnyView::new(scroll(List::for_each(SignalCollection::new(rows), {
             let menu = menu.clone();
-            let taps = taps.clone();
+            let tail = tail.clone();
             move |row| {
                 let index = row.into_inner();
                 let content = if index == MENU_ROW {
@@ -92,12 +98,7 @@ fn chat_list(taps: Rc<RefCell<u32>>, menu: Rc<dyn Fn() -> ContextMenu>) -> AnyVi
                             .max_width(f32::INFINITY),
                     )
                 } else if index == ROWS - 1 {
-                    let taps = taps.clone();
-                    AnyView::new(
-                        vstack((text(format!("Row {index}")),))
-                            .size(f32::INFINITY, TAP_ROW_H)
-                            .on_tap(move || *taps.borrow_mut() += 1),
-                    )
+                    tail()
                 } else {
                     AnyView::new(vstack((text(format!("Row {index}")),)).size(f32::INFINITY, ROW_H))
                 };
@@ -105,6 +106,43 @@ fn chat_list(taps: Rc<RefCell<u32>>, menu: Rc<dyn Fn() -> ContextMenu>) -> AnyVi
             }
         })))
     })
+}
+
+/// The last row carries an `.on_tap` region covering the rest of the window.
+fn chat_list(taps: Rc<RefCell<u32>>, menu: Rc<dyn Fn() -> ContextMenu>) -> AnyViewBuilder<AnyView> {
+    chat_list_with_tail(
+        move || {
+            let taps = taps.clone();
+            AnyView::new(
+                vstack((text("Tail row"),))
+                    .size(f32::INFINITY, TAP_ROW_H)
+                    .on_tap(move || *taps.borrow_mut() += 1),
+            )
+        },
+        menu,
+    )
+}
+
+/// Same list, with an `.on_long_press_gesture` on the last row instead —
+/// occlusion must hold for every gesture kind the engine could arm, not
+/// only taps.
+fn chat_list_with_long_press(
+    long_presses: Rc<RefCell<u32>>,
+    menu: Rc<dyn Fn() -> ContextMenu>,
+) -> AnyViewBuilder<AnyView> {
+    chat_list_with_tail(
+        move || {
+            let long_presses = long_presses.clone();
+            AnyView::new(
+                vstack((text("Tail row"),))
+                    .size(f32::INFINITY, TAP_ROW_H)
+                    .on_long_press_gesture(LONG_PRESS_MS, move || {
+                        *long_presses.borrow_mut() += 1;
+                    }),
+            )
+        },
+        menu,
+    )
 }
 
 fn runtime(builder: AnyViewBuilder<AnyView>) -> HeadlessRuntime {
@@ -268,5 +306,77 @@ fn popup_window_item_press_does_not_fall_through_to_the_row_tap() {
     assert!(
         runtime.popup_frames().is_empty(),
         "an item choice closes the popup"
+    );
+}
+
+/// The same occlusion, proven gesture-kind independent: a press held on a
+/// menu item must not arm the `.on_long_press_gesture` on the row beneath —
+/// the engine's candidates are filtered by the occluder before it chooses
+/// what to arm, so there is no recognizer for the hold to feed.
+#[test]
+fn drawn_menu_item_press_and_hold_does_not_fall_through_to_the_row_long_press() {
+    let command = Rc::new(Cell::new(false));
+    let long_presses = Rc::new(RefCell::new(0_u32));
+    let fired = command.clone();
+    let menu = Rc::new(move || {
+        let menu_command = fired.clone();
+        ContextMenu::new(vec!["Star".action(move || menu_command.set(true))])
+            .accessory(Frame::new(button("React").action(|| {})))
+    });
+    let mut runtime = runtime(chat_list_with_long_press(long_presses.clone(), menu));
+    pump_until_settled(&mut runtime);
+
+    let row = bounds_of(&mut runtime, "Menu row");
+    let (row_x, row_y) = (
+        ((row.x0 + row.x1) / 2.0) as f32,
+        ((row.y0 + row.y1) / 2.0) as f32,
+    );
+    for event in secondary_click(row_x, row_y) {
+        runtime.push_input_event(event);
+    }
+    pump_until_settled(&mut runtime);
+    let item = runtime
+        .context_menu_row_frames()
+        .first()
+        .copied()
+        .expect("the drawn menu emits a row per item");
+
+    // Down on the item, then ticks past the long-press deadline while the
+    // press is still held — the gesture engine's `handle_tick` is what a
+    // long press fires on.
+    let (x, y) = (item.center().x as f32, item.center().y as f32);
+    let start = Instant::now();
+    runtime.push_input_event(InputEvent::PointerDown {
+        id: 2,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    let _ = runtime.pump_at(false, start);
+    for step in 1..=4u64 {
+        let _ = runtime.pump_at(
+            false,
+            start + Duration::from_millis(u64::from(LONG_PRESS_MS) * step),
+        );
+    }
+    runtime.push_input_event(InputEvent::PointerUp {
+        id: 2,
+        kind: PointerKind::Mouse,
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    let _ = runtime.pump_at(
+        false,
+        start + Duration::from_millis(u64::from(LONG_PRESS_MS) * 5),
+    );
+    pump_until_settled(&mut runtime);
+
+    assert!(command.get(), "the item's command must run");
+    assert_eq!(
+        *long_presses.borrow(),
+        0,
+        "the held press must not reach the long-press region underneath the menu"
     );
 }
