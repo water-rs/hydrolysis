@@ -28,7 +28,12 @@ const W: u32 = 320;
 const H: u32 = 240;
 
 fn rows(rgba8: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
-    rgba8.chunks_exact(W as usize * 4).enumerate()
+    rgba8
+        .as_chunks::<{ W as usize * 4 }>()
+        .0
+        .iter()
+        .map(<[u8; W as usize * 4]>::as_slice)
+        .enumerate()
 }
 
 fn px(row: &[u8], x: usize) -> [u8; 3] {
