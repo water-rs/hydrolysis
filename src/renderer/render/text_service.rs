@@ -1364,20 +1364,16 @@ fn glyph_ink_bounds(
         size: size.to_bits(),
         coords: normalized_coords_hash(coords),
     };
-    if let Some((stored_coords, bounds)) = cache.get_mut(&key) {
-        if stored_coords.as_slice() == coords {
-            return *bounds;
-        }
-        // Coordinate-hash collision: different instances never share bounds.
-        *bounds = metrics
-            .bounds(GlyphId::new(glyph))
-            .map(|bounds| (bounds.x_min, bounds.x_max));
-        *stored_coords = coords.to_vec();
+    // A hit is trusted only for the exact instance it recorded; on a
+    // coordinate-hash collision the fresh bounds replace the entry.
+    if let Some((stored_coords, bounds)) = cache.get(&key)
+        && stored_coords.as_slice() == coords
+    {
         return *bounds;
     }
     let bounds = metrics
         .bounds(GlyphId::new(glyph))
         .map(|bounds| (bounds.x_min, bounds.x_max));
-    cache.push(key, (coords.to_vec(), bounds));
+    cache.put(key, (coords.to_vec(), bounds));
     bounds
 }

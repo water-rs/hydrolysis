@@ -219,8 +219,7 @@ tracing-log = "0.2"
 # the real pipeline.
 waterui-icons-lucide = "0.5.1"
 waterui-chart = "0.3.0"
-# The text-measure bench rides the real layout path; `harness = false` on the
-# `[[bench]]` target is what criterion needs.
+# Drives the text-measure bench (`benches/text_measure.rs`).
 criterion = "0.8"
 
 # The text-measure bench rides the real layout path; `harness = false` hands
