@@ -157,12 +157,20 @@ pub(crate) struct ScrollTarget {
     /// The scroll view's offset handle, ticked per frame while a smoothed
     /// wheel scroll glides toward its target.
     pub(crate) handle: crate::scroll::ScrollHandle,
+    /// The stacking key every target carries: a scroll region painted above
+    /// an embedded surface wins the wheel through the same (order, depth)
+    /// priority pointer and text targets already sort by.
+    pub(crate) depth: usize,
+    pub(crate) order: usize,
 }
 
 #[derive(Clone)]
 pub(crate) struct TrackpadPanTarget {
     pub(crate) bounds: vello::kurbo::Rect,
     pub(crate) action: TrackpadPanAction,
+    /// See [`ScrollTarget::depth`].
+    pub(crate) depth: usize,
+    pub(crate) order: usize,
 }
 
 /// A native subview the host platform hit-tests for itself, together with the
@@ -2454,7 +2462,20 @@ impl HydrolysisRenderer {
         // A discrete wheel notch is complete on its own; a pixel-precise wheel
         // delta arriving through this path carries no phase, so neither ends a
         // gesture that the surface should settle.
-        if self.handle_embedded_scroll(point, dx, dy, unit, is_line_delta) {
+        let scroll_priority = self
+            .hit_test
+            .scroll_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| target.bounds.contains(point))
+            .map(|(index, target)| {
+                SemanticCore::target_hit_priority(target.depth, target.order, index)
+            })
+            .max();
+        if let Some((_, target, position)) =
+            self.embedded_target_wins_at(point, scroll_priority, None)
+        {
+            target.sink.scroll(position, dx, dy, unit, is_line_delta);
             return true;
         }
         // Newest-registered first: every scroll container registers its target
@@ -2508,7 +2529,33 @@ impl HydrolysisRenderer {
     ) -> bool {
         let point = vello::kurbo::Point::new(f64::from(x), f64::from(y));
         let finished = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
-        if self.handle_embedded_scroll(point, dx, dy, ScrollUnit::Pixel, finished) {
+        let pan_priority = self
+            .hit_test
+            .trackpad_pan_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| target.bounds.contains(point))
+            .map(|(index, target)| {
+                SemanticCore::target_hit_priority(target.depth, target.order, index)
+            })
+            .max();
+        let scroll_priority = self
+            .hit_test
+            .scroll_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, target)| target.bounds.contains(point))
+            .map(|(index, target)| {
+                SemanticCore::target_hit_priority(target.depth, target.order, index)
+            })
+            .max();
+        let contender_priority = pan_priority.max(scroll_priority);
+        if let Some((_, target, position)) =
+            self.embedded_target_wins_at(point, contender_priority, None)
+        {
+            target
+                .sink
+                .scroll(position, dx, dy, ScrollUnit::Pixel, finished);
             return true;
         }
         for target in self.hit_test.trackpad_pan_targets.iter_mut().rev() {
@@ -3040,10 +3087,13 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let order = self.hit_test.next_hit_test_order();
         self.hit_test.scroll_targets.push(ScrollTarget {
             bounds,
             action: Rc::new(RefCell::new(action)),
             handle,
+            depth: self.render_depth,
+            order,
         });
     }
 
@@ -3054,9 +3104,12 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let order = self.hit_test.next_hit_test_order();
         self.hit_test.trackpad_pan_targets.push(TrackpadPanTarget {
             bounds,
             action: Rc::new(RefCell::new(action)),
+            depth: self.render_depth,
+            order,
         });
     }
 

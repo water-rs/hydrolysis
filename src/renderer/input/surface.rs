@@ -426,23 +426,6 @@ impl SemanticCore {
         true
     }
 
-    pub(crate) fn handle_embedded_scroll(
-        &mut self,
-        point: vello::kurbo::Point,
-        delta_x: f32,
-        delta_y: f32,
-        unit: ScrollUnit,
-        finished: bool,
-    ) -> bool {
-        let Some((index, position)) = self.topmost_embedded_target_at(point) else {
-            return false;
-        };
-        self.hit_test.embedded_input_targets[index]
-            .sink
-            .scroll(position, delta_x, delta_y, unit, finished);
-        true
-    }
-
     pub(crate) fn handle_embedded_key(&mut self, delivery: &KeyDelivery<'_>) -> bool {
         // GTK's text-view convention: while a surface holds keyboard focus,
         // Tab and Shift-Tab are surface input like any other key — a
