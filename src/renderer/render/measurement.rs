@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::WidgetTheme;
 use std::rc::Rc;
+use std::sync::Arc;
 use waterui_core::handler::BoxedAction;
 use waterui_form::picker::PickerStyle;
 use waterui_form::picker::date::DatePickerConfig;
@@ -493,7 +494,7 @@ impl HydrolysisRenderer {
     fn encode_text_layout(
         service: &TextMeasureService,
         scene: &mut vello::Scene,
-        layout: &parley::Layout<[u8; 4]>,
+        layout: &Arc<parley::Layout<[u8; 4]>>,
         input: &ResolvedTextLayoutInput,
         max_lines: Option<usize>,
     ) {

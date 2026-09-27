@@ -39,6 +39,14 @@ use unicode_segmentation::UnicodeSegmentation;
 /// session evicts what it has stopped drawing.
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 4096;
 
+/// Capacity of the per-layout ink-extent LRU behind [`layout_ink_extent`]:
+/// measure and encode ask for the same layout's extent in one frame, and
+/// resize/re-layout replays measurements of layouts the shape cache still
+/// holds — the memo makes steady-state re-measure cost nothing. Entries pin
+/// their layout's `Arc` so the pointer key can never be recycled while the
+/// entry lives.
+const LAYOUT_INK_EXTENT_CACHE_CAPACITY: usize = 1024;
+
 /// Capacity of the per-glyph ink-bounds LRU behind [`layout_ink_extent`]: one
 /// entry per (face, glyph, size, instance) — a few hundred entries cover a
 /// dense screen, the bound keeps long-tail documents from growing it forever.
@@ -57,12 +65,14 @@ pub(crate) struct TextMeasureService {
     /// least-recently-shaped entries. Layouts are shared as [`Arc`] so a hit
     /// hands out a handle instead of copying the glyph runs.
     cache: Mutex<LruCache<TextLayoutCacheKey, Arc<parley::Layout<[u8; 4]>>>>,
+    /// Per-layout horizontal ink extent behind [`layout_ink_extent`].
+    ink_extents: Mutex<LruCache<LayoutInkExtentKey, LayoutInkExtentValue>>,
     /// Per-glyph horizontal ink bounds behind [`layout_ink_extent`].
     /// `GlyphMetrics::bounds` answers TrueType faces straight from the `glyf`
     /// header table and draws the outline only for faces that need it (gvar,
     /// CFF/CFF2); memoizing per (face, glyph, size, instance) keeps either
     /// path paid once per measure, not once per glyph.
-    ink_bounds: Mutex<LruCache<GlyphInkBoundsKey, Option<(f32, f32)>>>,
+    ink_bounds: Mutex<LruCache<GlyphInkBoundsKey, GlyphInkBoundsValue>>,
     /// Reusable `(FontContext, LayoutContext)` shaping scratch, checked out per
     /// shape call. Built once as a clone of [`Self::fonts`] (carrying the
     /// registered resource fonts) plus a fresh layout context, then returned for
@@ -88,15 +98,41 @@ struct TextSceneCacheKey {
 }
 
 /// Cache identity for one glyph's ink bounds: the font blob's own id plus the
-/// face index inside it (TTCs share a blob), the glyph, the pixel size, and
-/// the instance's normalized-variation coordinates as raw `F2Dot14` bits.
+/// face index inside it (TTCs share a blob), the glyph, the pixel size as raw
+/// bits, and the instance's normalized-variation coordinates hashed — hashing
+/// keeps every lookup alloc-free; a hit verifies against the coords the value
+/// recorded before it is trusted.
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct GlyphInkBoundsKey {
     font: u64,
     face: u32,
     glyph: u32,
     size: u32,
-    coords: Vec<i16>,
+    coords: u64,
+}
+
+/// Value side of the glyph ink bounds cache: the instance's raw `F2Dot14`
+/// coordinate bits the bounds were measured under, then the bounds.
+type GlyphInkBoundsValue = (Vec<i16>, Option<(f32, f32)>);
+
+/// Cache identity for one layout's ink extent: the `Arc<Layout>`'s address —
+/// the cached value pins the `Arc`, so the address is not recycled while the
+/// entry lives — plus the `max_lines` truncation the extent was measured at.
+type LayoutInkExtentKey = (usize, Option<usize>);
+
+/// Value side of the layout ink-extent cache: the `Arc` keeping the key's
+/// address live, then the extent.
+type LayoutInkExtentValue = (Arc<parley::Layout<[u8; 4]>>, Option<(f32, f32)>);
+
+/// Hash of a normalized-coordinate instance for [`GlyphInkBoundsKey`]; the
+/// no-variations case is every static face, so it never allocates or hashes.
+fn normalized_coords_hash(coords: &[i16]) -> u64 {
+    if coords.is_empty() {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash_slice(coords, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
 }
 
 /// Owned, mutable shaping scratch for one in-flight shape call.
@@ -112,6 +148,10 @@ impl TextMeasureService {
             cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(TEXT_LAYOUT_CACHE_CAPACITY)
                     .expect("text layout cache capacity must be non-zero"),
+            )),
+            ink_extents: Mutex::new(LruCache::new(
+                NonZeroUsize::new(LAYOUT_INK_EXTENT_CACHE_CAPACITY)
+                    .expect("layout ink extent cache capacity must be non-zero"),
             )),
             ink_bounds: Mutex::new(LruCache::new(
                 NonZeroUsize::new(GLYPH_INK_BOUNDS_CACHE_CAPACITY)
@@ -139,6 +179,10 @@ impl TextMeasureService {
         self.scene_cache
             .get_mut()
             .expect("text scene cache mutex must not be poisoned")
+            .clear();
+        self.ink_extents
+            .get_mut()
+            .expect("layout ink extent cache mutex must not be poisoned")
             .clear();
         *self
             .scratch
@@ -277,7 +321,7 @@ impl TextMeasureService {
         input: &ResolvedTextLayoutInput,
         max_width: Option<f32>,
         tail: TailMark,
-        encode: impl FnOnce(&parley::Layout<[u8; 4]>, &ResolvedTextLayoutInput, &mut vello::Scene),
+        encode: impl FnOnce(&Arc<parley::Layout<[u8; 4]>>, &ResolvedTextLayoutInput, &mut vello::Scene),
     ) -> Arc<vello::Scene> {
         let (max_lines, tail_ellipsis) = tail.parts();
         let key = TextSceneCacheKey {
@@ -306,36 +350,6 @@ impl TextMeasureService {
             .expect("text scene cache mutex must not be poisoned")
             .put(key, Arc::clone(&scene));
         scene
-    }
-
-    /// Horizontal ink bounds of `glyph` under `metrics` — `(x_min, x_max)`
-    /// relative to the pen origin — memoized per face/glyph/size/instance.
-    fn glyph_ink_bounds(
-        &self,
-        metrics: &GlyphMetrics<'_>,
-        font: &parley::FontData,
-        size: f32,
-        coords: &[i16],
-        glyph: u32,
-    ) -> Option<(f32, f32)> {
-        *self
-            .ink_bounds
-            .lock()
-            .expect("glyph ink bounds cache mutex must not be poisoned")
-            .get_or_insert(
-                GlyphInkBoundsKey {
-                    font: font.data.id(),
-                    face: font.index,
-                    glyph,
-                    size: size.to_bits(),
-                    coords: coords.to_vec(),
-                },
-                || {
-                    metrics
-                        .bounds(GlyphId::new(glyph))
-                        .map(|bounds| (bounds.x_min, bounds.x_max))
-                },
-            )
     }
 
     fn checkout_scratch(&self) -> TextShapingScratch {
@@ -908,6 +922,24 @@ fn truncate_spans(
 /// resolves to bitmap- or paint-only glyphs contributes nothing here).
 pub(crate) fn layout_ink_extent(
     service: &TextMeasureService,
+    layout: &Arc<parley::Layout<[u8; 4]>>,
+    max_lines: Option<usize>,
+) -> Option<(f32, f32)> {
+    let key: LayoutInkExtentKey = (Arc::as_ptr(layout) as usize, max_lines);
+    let mut extents = service
+        .ink_extents
+        .lock()
+        .expect("layout ink extent cache mutex must not be poisoned");
+    if let Some((_, extent)) = extents.get(&key) {
+        return *extent;
+    }
+    let extent = layout_ink_extent_uncached(service, layout, max_lines);
+    extents.put(key, (Arc::clone(layout), extent));
+    extent
+}
+
+fn layout_ink_extent_uncached(
+    service: &TextMeasureService,
     layout: &parley::Layout<[u8; 4]>,
     max_lines: Option<usize>,
 ) -> Option<(f32, f32)> {
@@ -938,6 +970,10 @@ pub(crate) fn layout_ink_extent(
                 .collect();
             let metrics =
                 font_ref.glyph_metrics(Size::new(run.font_size()), LocationRef::new(&coords));
+            let mut ink_bounds = service
+                .ink_bounds
+                .lock()
+                .expect("glyph ink bounds cache mutex must not be poisoned");
             // `glyph.x` accumulates onto `glyph_run.offset()` exactly as
             // `encode_text_layout` accumulates it, so these bounds land in
             // the same coordinates the painter uses.
@@ -945,7 +981,8 @@ pub(crate) fn layout_ink_extent(
             for glyph in glyph_run.glyphs() {
                 let x = run_x + glyph.x;
                 run_x += glyph.advance;
-                if let Some((x_min, x_max)) = service.glyph_ink_bounds(
+                if let Some((x_min, x_max)) = glyph_ink_bounds(
+                    &mut ink_bounds,
                     &metrics,
                     font,
                     run.font_size(),
@@ -965,7 +1002,7 @@ pub(crate) fn layout_ink_extent(
 /// layout. Pure; safe to call on any thread.
 pub(crate) fn text_dimensions_from_layout(
     service: &TextMeasureService,
-    layout: &parley::Layout<[u8; 4]>,
+    layout: &Arc<parley::Layout<[u8; 4]>>,
     max_lines: Option<usize>,
 ) -> ViewDimensions {
     if layout.is_empty() {
@@ -1307,4 +1344,40 @@ mod truncation_tests {
         );
         assert!(dimensions.size.width > 0.0);
     }
+}
+
+/// Horizontal ink bounds of `glyph` under `metrics` — `(x_min, x_max)`
+/// relative to the pen origin — memoized per face, glyph, size and
+/// variation instance behind the caller's lock.
+fn glyph_ink_bounds(
+    cache: &mut LruCache<GlyphInkBoundsKey, GlyphInkBoundsValue>,
+    metrics: &GlyphMetrics<'_>,
+    font: &parley::FontData,
+    size: f32,
+    coords: &[i16],
+    glyph: u32,
+) -> Option<(f32, f32)> {
+    let key = GlyphInkBoundsKey {
+        font: font.data.id(),
+        face: font.index,
+        glyph,
+        size: size.to_bits(),
+        coords: normalized_coords_hash(coords),
+    };
+    if let Some((stored_coords, bounds)) = cache.get_mut(&key) {
+        if stored_coords.as_slice() == coords {
+            return *bounds;
+        }
+        // Coordinate-hash collision: different instances never share bounds.
+        *bounds = metrics
+            .bounds(GlyphId::new(glyph))
+            .map(|bounds| (bounds.x_min, bounds.x_max));
+        *stored_coords = coords.to_vec();
+        return *bounds;
+    }
+    let bounds = metrics
+        .bounds(GlyphId::new(glyph))
+        .map(|bounds| (bounds.x_min, bounds.x_max));
+    cache.push(key, (coords.to_vec(), bounds));
+    bounds
 }
