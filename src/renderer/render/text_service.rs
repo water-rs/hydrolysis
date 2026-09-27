@@ -24,7 +24,7 @@ use icu_properties::{CodePointSetData, CodePointSetDataBorrowed};
 use lru::LruCache;
 use rustc_hash::FxHasher;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
-use skrifa::outline::{DrawSettings, pen::ControlBoundsPen};
+use skrifa::metrics::GlyphMetrics;
 use skrifa::{GlyphId, MetadataProvider};
 use std::sync::{Arc, Mutex};
 use unicode_segmentation::UnicodeSegmentation;
@@ -39,6 +39,11 @@ use unicode_segmentation::UnicodeSegmentation;
 /// session evicts what it has stopped drawing.
 const TEXT_LAYOUT_CACHE_CAPACITY: usize = 4096;
 
+/// Capacity of the per-glyph ink-bounds LRU behind [`layout_ink_extent`]: one
+/// entry per (face, glyph, size, instance) — a few hundred entries cover a
+/// dense screen, the bound keeps long-tail documents from growing it forever.
+const GLYPH_INK_BOUNDS_CACHE_CAPACITY: usize = 16384;
+
 /// Thread-safe text shaping service shared by the render path and layout
 /// measurement. Cheaply cloneable shaping scratch is pooled so each worker
 /// reuses a [`parley::FontContext`] carrying the registered resource fonts.
@@ -52,6 +57,12 @@ pub(crate) struct TextMeasureService {
     /// least-recently-shaped entries. Layouts are shared as [`Arc`] so a hit
     /// hands out a handle instead of copying the glyph runs.
     cache: Mutex<LruCache<TextLayoutCacheKey, Arc<parley::Layout<[u8; 4]>>>>,
+    /// Per-glyph horizontal ink bounds behind [`layout_ink_extent`].
+    /// `GlyphMetrics::bounds` answers TrueType faces straight from the `glyf`
+    /// header table and draws the outline only for faces that need it (gvar,
+    /// CFF/CFF2); memoizing per (face, glyph, size, instance) keeps either
+    /// path paid once per measure, not once per glyph.
+    ink_bounds: Mutex<LruCache<GlyphInkBoundsKey, Option<(f32, f32)>>>,
     /// Reusable `(FontContext, LayoutContext)` shaping scratch, checked out per
     /// shape call. Built once as a clone of [`Self::fonts`] (carrying the
     /// registered resource fonts) plus a fresh layout context, then returned for
@@ -76,6 +87,18 @@ struct TextSceneCacheKey {
     tail_ellipsis: bool,
 }
 
+/// Cache identity for one glyph's ink bounds: the font blob's own id plus the
+/// face index inside it (TTCs share a blob), the glyph, the pixel size, and
+/// the instance's normalized-variation coordinates as raw `F2Dot14` bits.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct GlyphInkBoundsKey {
+    font: u64,
+    face: u32,
+    glyph: u32,
+    size: u32,
+    coords: Vec<i16>,
+}
+
 /// Owned, mutable shaping scratch for one in-flight shape call.
 struct TextShapingScratch {
     font_cx: parley::FontContext,
@@ -89,6 +112,10 @@ impl TextMeasureService {
             cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(TEXT_LAYOUT_CACHE_CAPACITY)
                     .expect("text layout cache capacity must be non-zero"),
+            )),
+            ink_bounds: Mutex::new(LruCache::new(
+                NonZeroUsize::new(GLYPH_INK_BOUNDS_CACHE_CAPACITY)
+                    .expect("glyph ink bounds cache capacity must be non-zero"),
             )),
             scratch: Mutex::new(None),
             scene_cache: Mutex::new(LruCache::new(
@@ -279,6 +306,36 @@ impl TextMeasureService {
             .expect("text scene cache mutex must not be poisoned")
             .put(key, Arc::clone(&scene));
         scene
+    }
+
+    /// Horizontal ink bounds of `glyph` under `metrics` — `(x_min, x_max)`
+    /// relative to the pen origin — memoized per face/glyph/size/instance.
+    fn glyph_ink_bounds(
+        &self,
+        metrics: &GlyphMetrics<'_>,
+        font: &parley::FontData,
+        size: f32,
+        coords: &[i16],
+        glyph: u32,
+    ) -> Option<(f32, f32)> {
+        *self
+            .ink_bounds
+            .lock()
+            .expect("glyph ink bounds cache mutex must not be poisoned")
+            .get_or_insert(
+                GlyphInkBoundsKey {
+                    font: font.data.id(),
+                    face: font.index,
+                    glyph,
+                    size: size.to_bits(),
+                    coords: coords.to_vec(),
+                },
+                || {
+                    metrics
+                        .bounds(GlyphId::new(glyph))
+                        .map(|bounds| (bounds.x_min, bounds.x_max))
+                },
+            )
     }
 
     fn checkout_scratch(&self) -> TextShapingScratch {
@@ -850,6 +907,7 @@ fn truncate_spans(
 /// Returns `None` when no drawn glyph carries a scalable outline (a run that
 /// resolves to bitmap- or paint-only glyphs contributes nothing here).
 pub(crate) fn layout_ink_extent(
+    service: &TextMeasureService,
     layout: &parley::Layout<[u8; 4]>,
     max_lines: Option<usize>,
 ) -> Option<(f32, f32)> {
@@ -868,14 +926,18 @@ pub(crate) fn layout_ink_extent(
             let Ok(font_ref) = skrifa::FontRef::from_index(font.data.data(), font.index) else {
                 continue;
             };
-            let outlines = font_ref.outline_glyphs();
-            let size = Size::new(run.font_size());
+            // `GlyphMetrics::bounds` reads the `glyf` bbox without drawing and
+            // draws through the outline only when the face needs it (gvar,
+            // CFF/CFF2); built once per run so that choice — and the scaled,
+            // instance-aware metrics it wraps — is shared by every glyph on
+            // the run.
             let coords: Vec<NormalizedCoord> = run
                 .normalized_coords()
                 .iter()
                 .map(|coord| NormalizedCoord::from_bits(*coord))
                 .collect();
-            let location = LocationRef::new(coords.as_slice());
+            let metrics =
+                font_ref.glyph_metrics(Size::new(run.font_size()), LocationRef::new(&coords));
             // `glyph.x` accumulates onto `glyph_run.offset()` exactly as
             // `encode_text_layout` accumulates it, so these bounds land in
             // the same coordinates the painter uses.
@@ -883,19 +945,15 @@ pub(crate) fn layout_ink_extent(
             for glyph in glyph_run.glyphs() {
                 let x = run_x + glyph.x;
                 run_x += glyph.advance;
-                let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
-                    continue;
-                };
-                let mut pen = ControlBoundsPen::new();
-                if outline
-                    .draw(DrawSettings::unhinted(size, location), &mut pen)
-                    .is_err()
-                {
-                    continue;
-                }
-                if let Some(bounds) = pen.bounding_box() {
-                    ink_min = ink_min.min(x + bounds.x_min);
-                    ink_max = ink_max.max(x + bounds.x_max);
+                if let Some((x_min, x_max)) = service.glyph_ink_bounds(
+                    &metrics,
+                    font,
+                    run.font_size(),
+                    run.normalized_coords(),
+                    glyph.id,
+                ) {
+                    ink_min = ink_min.min(x + x_min);
+                    ink_max = ink_max.max(x + x_max);
                 }
             }
         }
@@ -906,6 +964,7 @@ pub(crate) fn layout_ink_extent(
 /// Compute view dimensions (size plus first/last baselines) from a shaped
 /// layout. Pure; safe to call on any thread.
 pub(crate) fn text_dimensions_from_layout(
+    service: &TextMeasureService,
     layout: &parley::Layout<[u8; 4]>,
     max_lines: Option<usize>,
 ) -> ViewDimensions {
@@ -934,7 +993,7 @@ pub(crate) fn text_dimensions_from_layout(
     // Advance is the pen distance; ink may extend past it on either edge.
     // The frame covers `[-ink_min, ink_max]` when ink overhangs so the encode
     // path's matching shift lands the painted extent inside the view rect.
-    if let Some((ink_min, ink_max)) = layout_ink_extent(layout, max_lines) {
+    if let Some((ink_min, ink_max)) = layout_ink_extent(service, layout, max_lines) {
         width = width.max(ink_max) - ink_min.min(0.0);
     }
 

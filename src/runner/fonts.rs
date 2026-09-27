@@ -177,6 +177,14 @@ const TEST_FALLBACK_FONTS: &[(&str, &[u8])] = &[
         "NotoSansDevanagari-Regular.ttf",
         include_bytes!("../../test-fonts/NotoSansDevanagari-Regular.ttf"),
     ),
+    // A face whose outlines overhang the pen advance on both edges ('p' 119u
+    // left, 'y'/'f' ~105u right at upem 1000): the ink-extent tests shape
+    // against it by family name so the #237 invariant is exercised on hosts
+    // whose default faces measure snug. Never pinned to a generic family.
+    (
+        "PacificoSubset.ttf",
+        include_bytes!("../../test-fonts/PacificoSubset.ttf"),
+    ),
     // The colour-emoji face a host carries: classifies into the `emoji`
     // generic family so emoji-presentation clusters shape — and rasterize
     // through the bitmap image atlas — the way they do in production.

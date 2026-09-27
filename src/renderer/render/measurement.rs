@@ -436,7 +436,13 @@ impl HydrolysisRenderer {
             Some(ctx.bounds.width() as f32),
             tail,
             |layout, effective, fragment| {
-                Self::encode_text_layout(fragment, layout, effective, tail.parts().0);
+                Self::encode_text_layout(
+                    state.text.as_ref(),
+                    fragment,
+                    layout,
+                    effective,
+                    tail.parts().0,
+                );
             },
         );
         scene.append(
@@ -460,7 +466,7 @@ impl HydrolysisRenderer {
         let metrics = line.metrics();
         // Center the measured frame — advance widened to cover overhanging
         // ink — matching what `text_dimensions_from_layout` reports for it.
-        let width = layout_ink_extent(&layout, Some(1)).map_or_else(
+        let width = layout_ink_extent(state.text.as_ref(), &layout, Some(1)).map_or_else(
             || f64::from(metrics.advance),
             |(ink_min, ink_max)| f64::from(metrics.advance.max(ink_max) - ink_min.min(0.0)),
         );
@@ -472,7 +478,7 @@ impl HydrolysisRenderer {
             None,
             TailMark::Clip(1),
             |layout, effective, fragment| {
-                Self::encode_text_layout(fragment, layout, effective, Some(1));
+                Self::encode_text_layout(state.text.as_ref(), fragment, layout, effective, Some(1));
             },
         );
         scene.append(
@@ -485,6 +491,7 @@ impl HydrolysisRenderer {
     /// caller positions the result by appending it under a transform, which is
     /// what makes the encoded fragment reusable across frames.
     fn encode_text_layout(
+        service: &TextMeasureService,
         scene: &mut vello::Scene,
         layout: &parley::Layout<[u8; 4]>,
         input: &ResolvedTextLayoutInput,
@@ -497,8 +504,8 @@ impl HydrolysisRenderer {
         // glyph ink that overhangs the pen advance (`layout_ink_extent`); the
         // same left-edge correction shifts the encoded glyphs so that ink
         // starts at the frame origin instead of painting left of it.
-        let ink_shift =
-            layout_ink_extent(layout, max_lines).map_or(0.0, |(ink_min, _)| -ink_min.min(0.0));
+        let ink_shift = layout_ink_extent(service, layout, max_lines)
+            .map_or(0.0, |(ink_min, _)| -ink_min.min(0.0));
         let paint_backgrounds = input.has_background();
         for (index, line) in layout.lines().enumerate() {
             if max_lines.is_some_and(|limit| index >= limit) {
@@ -621,7 +628,7 @@ impl HydrolysisRenderer {
     ) -> ViewDimensions {
         let input = resolve_text_layout_input(&styled, alignment, env);
         let layout = state.text.shape_limited(&input, max_width, max_lines);
-        text_dimensions_from_layout(&layout, max_lines)
+        text_dimensions_from_layout(state.text.as_ref(), &layout, max_lines)
     }
 
     pub(crate) fn measure_text_intrinsic_size(

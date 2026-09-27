@@ -219,6 +219,16 @@ tracing-log = "0.2"
 # the real pipeline.
 waterui-icons-lucide = "0.5.1"
 waterui-chart = "0.3.0"
+# The text-measure bench rides the real layout path; `harness = false` on the
+# `[[bench]]` target is what criterion needs.
+criterion = "0.8"
+
+# The text-measure bench rides the real layout path; `harness = false` hands
+# the binary's `main` to criterion.
+[[bench]]
+name = "text_measure"
+harness = false
+required-features = ["testing"]
 
 # `WKWebView` is `MainThreadOnly` and libtest runs tests on worker threads, so
 # the macOS real-engine suite owns its `main` and pumps the main run loop.

@@ -20,6 +20,7 @@ use waterui_core::AnyView;
 use waterui_core::handler::AnyViewBuilder;
 use waterui_core::id::SelfId;
 use waterui_layout::stack::{VStack, vstack};
+use waterui_text::font::{Body, Font};
 
 use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
@@ -59,25 +60,13 @@ fn capsule_bounds(rgba8: &[u8]) -> Option<(usize, usize, usize, usize)> {
     let mut y0 = usize::MAX;
     let mut y1 = 0usize;
     for (y, row) in rows(rgba8) {
-        // widest contiguous white run on this row
-        let mut best = 0usize;
-        let mut cur = 0usize;
-        for x in 0..W as usize {
-            if is_white(px(row, x)) {
-                cur += 1;
-                best = best.max(cur);
-            } else {
-                cur = 0;
-            }
-        }
-        if best >= 40 {
-            x0 = x0.min((0..W as usize).find(|&x| is_white(px(row, x))).unwrap());
-            x1 = x1.max(
-                (0..W as usize)
-                    .rev()
-                    .find(|&x| is_white(px(row, x)))
-                    .unwrap(),
-            );
+        // Every white pixel on the row: glyph ink splits the pill's interior
+        // into fragments, so a contiguous-run test under-measures the capsule
+        // whenever the text's own pixels interrupt it.
+        let whites: Vec<usize> = (0..W as usize).filter(|&x| is_white(px(row, x))).collect();
+        if whites.len() >= 40 {
+            x0 = x0.min(*whites.first().unwrap());
+            x1 = x1.max(*whites.last().unwrap());
             y0 = y0.min(y);
             y1 = y1.max(y);
         }
@@ -247,4 +236,101 @@ fn painted_ink_stays_within_measured_frame_single_text() {
         ix0 + 1 >= cx0 && ix1 <= cx1 + 1,
         "twin ink x {ix0}..={ix1} escapes measured frame x {cx0}..={cx1}"
     );
+}
+
+/// Same invariant on a face whose outlines genuinely overhang the pen
+/// advance — the bundled Pacifico subset ('p' starts 0.119em left of the
+/// pen origin, 'y'/'f' end ~0.10em right of the advance) — so the check
+/// exercises real overhang on every host, not only where the platform's
+/// default face happens to overhang.
+#[test]
+fn painted_ink_stays_within_measured_frame_overhang_font() {
+    let builder = AnyViewBuilder::<AnyView>::new(|| {
+        AnyView::new(
+            vstack((
+                text("play fully")
+                    .body()
+                    .font(Font::new(Body).family("Pacifico"))
+                    .foreground(Srgb::from_hex("#1B1B1F"))
+                    .background(Surface)
+                    .clip(RoundedRectangle::new(6.0)),
+                text("play fully")
+                    .body()
+                    .font(Font::new(Body).family("Pacifico"))
+                    .foreground(Srgb::from_hex("#FFFFFF")),
+            ))
+            .background(Srgb::from_hex("#0000FF")),
+        )
+    });
+
+    let mut runtime = HeadlessRuntime::new_for_tests_native_fonts(
+        test_environment(),
+        builder,
+        W,
+        H,
+        MinimalTestTheme::default(),
+    );
+    let at = Instant::now();
+    for _ in 0..4 {
+        runtime.pump_at(false, at);
+    }
+    let snapshot = runtime.pump_at(true, at).snapshot.expect("capture");
+
+    let (cx0, cx1, _cy0, cy1) = capsule_bounds(&snapshot.rgba8).expect("capsule painted");
+    let (ix0, ix1, _) =
+        row_span(&snapshot.rgba8, cy1 + 2..H as usize, is_white).expect("twin ink painted");
+    assert!(
+        ix0 + 1 >= cx0 && ix1 <= cx1 + 1,
+        "twin ink x {ix0}..={ix1} escapes measured frame x {cx0}..={cx1}"
+    );
+}
+
+/// `GlyphMetrics::bounds` must agree with drawing the outline through
+/// `ControlBoundsPen` — the ink-extent measure substitutes the former (the
+/// `glyf` header bounds) for the latter, so they must report the same extents
+/// on a TrueType face with real overhang.
+#[test]
+fn glyph_bounds_fast_path_agrees_with_drawn_outline() {
+    use skrifa::instance::{LocationRef, Size};
+    use skrifa::outline::{DrawSettings, pen::ControlBoundsPen};
+    use skrifa::{FontRef, GlyphId, MetadataProvider};
+
+    let font = FontRef::new(include_bytes!("../../../test-fonts/PacificoSubset.ttf"))
+        .expect("bundled Pacifico subset parses");
+    // Both paths read the same font-unit extents; at a scaled size the header
+    // path rounds through FreeType's 16.16 fixed-point scale while the pen
+    // scales in float, so allow one font unit of rounding in pixels.
+    let location = LocationRef::default();
+    for size in [Size::unscaled(), Size::new(16.0)] {
+        let slack = size.ppem().map_or(1e-3, |ppem| {
+            ppem / f32::from(font.metrics(size, location).units_per_em) + 1e-3
+        });
+        let metrics = font.glyph_metrics(size, location);
+        let outlines = font.outline_glyphs();
+        let glyph_count = font.metrics(size, location).glyph_count;
+        for glyph_id in 0..glyph_count {
+            let glyph = GlyphId::new(u32::from(glyph_id));
+            let header = metrics.bounds(glyph);
+            let drawn = outlines.get(glyph).and_then(|outline| {
+                let mut pen = ControlBoundsPen::new();
+                outline
+                    .draw(DrawSettings::unhinted(size, location), &mut pen)
+                    .ok()?;
+                pen.bounding_box()
+            });
+            let (Some(header), Some(drawn)) = (header, drawn) else {
+                // A glyph with no drawn outline reports no ink either way.
+                continue;
+            };
+            assert!(
+                (header.x_min - drawn.x_min).abs() <= slack
+                    && (header.x_max - drawn.x_max).abs() <= slack,
+                "glyph {glyph_id} @ {size:?}: header x {}..={} vs drawn {}..={}",
+                header.x_min,
+                header.x_max,
+                drawn.x_min,
+                drawn.x_max
+            );
+        }
+    }
 }
