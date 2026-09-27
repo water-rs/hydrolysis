@@ -330,6 +330,25 @@ pub(super) fn native_resource_fonts() -> parley::FontContext {
     font_cx
 }
 
+/// The native collection plus the bundled fallback faces, registered under
+/// their own family names only — [`ResourceFontFamilies::classify`] stays out
+/// of it, so the platform's collection still answers every generic family —
+/// which is what lets a test name a bundled family like `Pacifico` and reach
+/// the overhang face on a host (macOS included) that does not carry it.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
+pub(crate) fn native_test_fonts() -> parley::FontContext {
+    use parley::fontique::Blob;
+    use std::sync::Arc;
+
+    let mut font_cx = native_resource_fonts();
+    for (_, bytes) in TEST_FALLBACK_FONTS {
+        font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(*bytes)), None);
+    }
+    font_cx
+}
+
 /// Gives `core` the application's fonts to shape with.
 ///
 /// Every window shapes against the one collection the runner installed, so a

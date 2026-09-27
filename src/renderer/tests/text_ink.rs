@@ -41,8 +41,18 @@ fn px(row: &[u8], x: usize) -> [u8; 3] {
     row[x * 4..x * 4 + 3].try_into().unwrap()
 }
 
-fn is_white(px: [u8; 3]) -> bool {
-    px[0] > 240 && px[1] > 240 && px[2] > 240
+/// A pixel carrying any paint at all — white pill or ink, dark glyph ink, or
+/// the partial coverage of an antialiased edge. The canvas is solid
+/// `#0000FF`, so anything else is something the rasterizer drew.
+///
+/// Edge detection reads this rather than full whiteness: a pill edge's own
+/// AA column and the columns where dark glyph ink overlaps it sit *inside*
+/// the capsule's painted bounds, so a first-pure-white-column test lands up
+/// to several pixels inside the true edge (while thin twin ink on an
+/// antialiased ramp can still hit pure white). Comparing painted extent to
+/// painted extent keeps both sides on the same coverage rule.
+fn is_paint(px: [u8; 3]) -> bool {
+    px != [0, 0, 255]
 }
 
 /// A pixel that is neither the white pill/ink nor the blue canvas: glyph ink
@@ -51,22 +61,35 @@ fn is_dark_ink(px: [u8; 3]) -> bool {
     px[0] < 0x80 && px[1] < 0x80 && px[2] < 0xB4
 }
 
-/// Bounding box of the capsule: for every row, the span of its widest
-/// contiguous white run is part of the pill (pill rows have a single wide run;
-/// twin ink rows only scatter thin strokes).
+/// Painted bounding box of the capsule. A pill row carries the capsule edge
+/// to edge as one contiguous painted run — interior glyph ink counts as
+/// paint, so it cannot fragment the run the way a white-pixel scan did —
+/// while a twin-ink row only scatters thin strokes, so the wide run selects
+/// pill rows alone.
 fn capsule_bounds(rgba8: &[u8]) -> Option<(usize, usize, usize, usize)> {
     let mut x0 = usize::MAX;
     let mut x1 = 0usize;
     let mut y0 = usize::MAX;
     let mut y1 = 0usize;
     for (y, row) in rows(rgba8) {
-        // Every white pixel on the row: glyph ink splits the pill's interior
-        // into fragments, so a contiguous-run test under-measures the capsule
-        // whenever the text's own pixels interrupt it.
-        let whites: Vec<usize> = (0..W as usize).filter(|&x| is_white(px(row, x))).collect();
-        if whites.len() >= 40 {
-            x0 = x0.min(*whites.first().unwrap());
-            x1 = x1.max(*whites.last().unwrap());
+        let mut start = 0usize;
+        let mut in_run = false;
+        let mut widest = (0usize, 0usize);
+        for x in 0..=W as usize {
+            let painted = x < W as usize && is_paint(px(row, x));
+            if painted && !in_run {
+                start = x;
+                in_run = true;
+            } else if !painted && in_run {
+                in_run = false;
+                if x - start > widest.1 - widest.0 {
+                    widest = (start, x);
+                }
+            }
+        }
+        if widest.1 - widest.0 >= 40 {
+            x0 = x0.min(widest.0);
+            x1 = x1.max(widest.1 - 1);
             y0 = y0.min(y);
             y1 = y1.max(y);
         }
@@ -163,18 +186,20 @@ fn painted_ink_stays_within_measured_frame_native_fonts() {
         "capsule should wrap all four rows, got {capsule_w}x{capsule_h}"
     );
 
-    // Unclipped twin ink: white pixels strictly below the capsule.
-    let (ix0, ix1, ink_px) = row_span(&snapshot.rgba8, cy1 + 4..H as usize, is_white)
+    // Unclipped twin ink: painted pixels strictly below the capsule.
+    let (ix0, ix1, ink_px) = row_span(&snapshot.rgba8, cy1 + 4..H as usize, is_paint)
         .expect("twin ink painted — native fonts must render the rows");
     assert!(
         ink_px > 200,
         "twin ink too sparse ({ink_px}px): fonts may not have loaded"
     );
 
-    // The invariant: the true painted ink extent fits inside the frame the
-    // measure produced (the capsule). 1 px of slack for AA coverage edges.
+    // The invariant: the painted ink extent fits inside the frame the
+    // measure produced (the capsule). Both extents are detected at the same
+    // coverage granularity — any painted pixel — so a column of ink the
+    // capsule never reached is a real escape, not an AA rounding edge.
     assert!(
-        ix0 + 1 >= cx0 && ix1 <= cx1 + 1,
+        ix0 >= cx0 && ix1 <= cx1,
         "twin ink x {ix0}..={ix1} escapes measured frame x {cx0}..={cx1}"
     );
 
@@ -231,9 +256,9 @@ fn painted_ink_stays_within_measured_frame_single_text() {
 
     let (cx0, cx1, _cy0, cy1) = capsule_bounds(&snapshot.rgba8).expect("capsule painted");
     let (ix0, ix1, _) =
-        row_span(&snapshot.rgba8, cy1 + 2..H as usize, is_white).expect("twin ink painted");
+        row_span(&snapshot.rgba8, cy1 + 2..H as usize, is_paint).expect("twin ink painted");
     assert!(
-        ix0 + 1 >= cx0 && ix1 <= cx1 + 1,
+        ix0 >= cx0 && ix1 <= cx1,
         "twin ink x {ix0}..={ix1} escapes measured frame x {cx0}..={cx1}"
     );
 }
@@ -278,9 +303,9 @@ fn painted_ink_stays_within_measured_frame_overhang_font() {
 
     let (cx0, cx1, _cy0, cy1) = capsule_bounds(&snapshot.rgba8).expect("capsule painted");
     let (ix0, ix1, _) =
-        row_span(&snapshot.rgba8, cy1 + 2..H as usize, is_white).expect("twin ink painted");
+        row_span(&snapshot.rgba8, cy1 + 2..H as usize, is_paint).expect("twin ink painted");
     assert!(
-        ix0 + 1 >= cx0 && ix1 <= cx1 + 1,
+        ix0 >= cx0 && ix1 <= cx1,
         "twin ink x {ix0}..={ix1} escapes measured frame x {cx0}..={cx1}"
     );
 }

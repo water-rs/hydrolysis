@@ -317,7 +317,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            native_resource_fonts,
+            super::fonts::native_test_fonts,
         )
     }
 
