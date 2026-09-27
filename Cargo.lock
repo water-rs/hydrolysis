@@ -2865,6 +2865,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shaderloom",
+ "skrifa",
  "tiny_http",
  "toml",
  "tracing",

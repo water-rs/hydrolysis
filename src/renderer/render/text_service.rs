@@ -23,6 +23,9 @@ use icu_properties::props::{Emoji, EmojiPresentation};
 use icu_properties::{CodePointSetData, CodePointSetDataBorrowed};
 use lru::LruCache;
 use rustc_hash::FxHasher;
+use skrifa::instance::{LocationRef, NormalizedCoord, Size};
+use skrifa::outline::{DrawSettings, pen::ControlBoundsPen};
+use skrifa::{GlyphId, MetadataProvider};
 use std::sync::{Arc, Mutex};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -830,6 +833,76 @@ fn truncate_spans(
     truncated
 }
 
+/// Inline extent of a layout's painted glyph ink — the union of every drawn
+/// glyph's outline bounds translated to its pen position — in the same
+/// layout-space coordinates `encode_text_layout` draws into.
+///
+/// `LineMetrics::advance` and the `inline_*_coord` fields parley derives from
+/// it track the pen advance only (see `layout/line_break.rs` where both are
+/// set from `line_max_advance`). Glyph outlines are free to overhang the
+/// advance: italic terminals, script faces, and the edge glyphs of the
+/// Windows default face (Segoe UI) all paint past it on one or both sides, so
+/// a frame measured to `advance` alone clips real ink (issue #237). The
+/// measure path ([`text_dimensions_from_layout`]) widens the frame to cover
+/// this extent and the encode path shifts the glyphs by the same correction,
+/// keeping the two in lockstep.
+///
+/// Returns `None` when no drawn glyph carries a scalable outline (a run that
+/// resolves to bitmap- or paint-only glyphs contributes nothing here).
+pub(crate) fn layout_ink_extent(
+    layout: &parley::Layout<[u8; 4]>,
+    max_lines: Option<usize>,
+) -> Option<(f32, f32)> {
+    let mut ink_min = f32::INFINITY;
+    let mut ink_max = f32::NEG_INFINITY;
+    for (index, line) in layout.lines().enumerate() {
+        if max_lines.is_some_and(|limit| index >= limit) {
+            break;
+        }
+        for item in line.items() {
+            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let run = glyph_run.run();
+            let font = run.font();
+            let Ok(font_ref) = skrifa::FontRef::from_index(font.data.data(), font.index) else {
+                continue;
+            };
+            let outlines = font_ref.outline_glyphs();
+            let size = Size::new(run.font_size());
+            let coords: Vec<NormalizedCoord> = run
+                .normalized_coords()
+                .iter()
+                .map(|coord| NormalizedCoord::from_bits(*coord))
+                .collect();
+            let location = LocationRef::new(coords.as_slice());
+            // `glyph.x` accumulates onto `glyph_run.offset()` exactly as
+            // `encode_text_layout` accumulates it, so these bounds land in
+            // the same coordinates the painter uses.
+            let mut run_x = glyph_run.offset();
+            for glyph in glyph_run.glyphs() {
+                let x = run_x + glyph.x;
+                run_x += glyph.advance;
+                let Some(outline) = outlines.get(GlyphId::new(glyph.id)) else {
+                    continue;
+                };
+                let mut pen = ControlBoundsPen::new();
+                if outline
+                    .draw(DrawSettings::unhinted(size, location), &mut pen)
+                    .is_err()
+                {
+                    continue;
+                }
+                if let Some(bounds) = pen.bounding_box() {
+                    ink_min = ink_min.min(x + bounds.x_min);
+                    ink_max = ink_max.max(x + bounds.x_max);
+                }
+            }
+        }
+    }
+    (ink_min <= ink_max).then_some((ink_min, ink_max))
+}
+
 /// Compute view dimensions (size plus first/last baselines) from a shaped
 /// layout. Pure; safe to call on any thread.
 pub(crate) fn text_dimensions_from_layout(
@@ -856,6 +929,13 @@ pub(crate) fn text_dimensions_from_layout(
             first_baseline = Some(metrics.baseline);
         }
         last_baseline = Some(metrics.baseline);
+    }
+
+    // Advance is the pen distance; ink may extend past it on either edge.
+    // The frame covers `[-ink_min, ink_max]` when ink overhangs so the encode
+    // path's matching shift lands the painted extent inside the view rect.
+    if let Some((ink_min, ink_max)) = layout_ink_extent(layout, max_lines) {
+        width = width.max(ink_max) - ink_min.min(0.0);
     }
 
     let mut dimensions = ViewDimensions::new(LayoutSize::new(width, height));
