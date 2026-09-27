@@ -2766,6 +2766,61 @@ impl SemanticCore {
         });
     }
 
+    /// Registers an opaque occlusion for `bounds`: an overlay's painted panel
+    /// must own every press inside it, whatever hit regions the content
+    /// beneath carries.
+    ///
+    /// Two faces of the same shield. The pointer target runs first in
+    /// dispatch order for its rect — `action` answers `true`, so a press
+    /// inside the panel is consumed without touching content press targets
+    /// underneath. The gesture target is the arm the gesture engine picks up:
+    /// the engine arms every recognizer in the topmost group under the
+    /// point, and this inert `Tap` — registered after the overlay's content,
+    /// so it outranks it and, in a group of its own, is the only recognizer
+    /// in that group — is what a press inside the panel arms. The press's
+    /// release lands on the inert tap and nothing else; without it the
+    /// topmost group under the point would be the content's, and a tap or
+    /// long-press bound to a row below the panel would fire through it
+    /// (water-rs/hydrolysis#260).
+    ///
+    /// Register the occluder BEFORE the overlay's own controls flush — they
+    /// take a later order and outrank it inside the panel. `bounds` is the
+    /// panel's painted rect in hit space; a press outside it is the
+    /// dismiss-and-pass-through the overlay already implements, which this
+    /// target must not shadow.
+    pub(crate) fn register_hit_test_occluder(&mut self, bounds: vello::kurbo::Rect) {
+        if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
+            return;
+        }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
+        let order = self.hit_test.next_hit_test_order();
+        self.hit_test.pointer_targets.push(PointerTarget {
+            bounds,
+            captures_drag: false,
+            depth: self.render_depth,
+            order,
+            press_slot: None,
+            claim_owner: self.owner_stack.last().cloned(),
+            interaction: None,
+            action: Rc::new(RefCell::new(
+                |_: &mut SemanticCore, _: vello::kurbo::Point, _: &Environment| true,
+            )),
+            keyboard_step: None,
+            keyboard_focusable: false,
+            modal: false,
+        });
+        let order = self.hit_test.next_hit_test_order();
+        let group_id = self.allocate_gesture_group_id();
+        self.gesture_engine.register_target(
+            bounds,
+            Gesture::Tap(waterui::gesture::TapGesture::new()),
+            Box::new(|_: &Environment| {}),
+            self.render_depth,
+            order,
+            group_id,
+        );
+    }
+
     /// Registers a scrollbar-gutter drag target: it captures the press like any
     /// drag target, but its changes are transform-level (a scroll offset), so
     /// they schedule a re-encode instead of a layout refresh.
