@@ -77,6 +77,10 @@ pub(crate) struct EmbeddedInputTarget {
     /// `.focused(binding)` write address the surface by.
     pub(crate) interaction_key: InteractionKey,
     pub(crate) local_bounds: vello::kurbo::Rect,
+    /// The paint clip enclosing the surface when it flushed, in window
+    /// hit-test space — a surface straddling a scroll viewport only takes
+    /// input where it is painted (water-rs/hydrolysis#252).
+    pub(crate) hit_clip: Option<vello::kurbo::Rect>,
     pub(crate) inverse_transform: vello::kurbo::Affine,
     pub(crate) depth: usize,
     pub(crate) order: usize,
@@ -92,6 +96,9 @@ pub(crate) struct EmbeddedInputTarget {
 
 impl EmbeddedInputTarget {
     pub(crate) fn local_position(&self, point: vello::kurbo::Point) -> Option<vello::kurbo::Point> {
+        if self.hit_clip.is_some_and(|clip| !clip.contains(point)) {
+            return None;
+        }
         self.local_bounds
             .contains(self.inverse_transform * point)
             .then(|| self.local_position_unclamped(point))
@@ -314,6 +321,7 @@ impl SemanticCore {
             .push(EmbeddedInputTarget {
                 interaction_key,
                 local_bounds,
+                hit_clip: self.hit_test.hit_clip_stack.last().copied(),
                 inverse_transform: transform.inverse(),
                 depth: self.render_depth,
                 order,

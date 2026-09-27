@@ -318,6 +318,36 @@ pub(crate) struct HitTestState {
     /// gesture engine owns the recognizers but not a bounds query the press
     /// path needs.
     pub(crate) gesture_regions: Vec<GestureRegion>,
+    /// The clip stack of the paint layers currently open, in window hit-test
+    /// space. Every entry is already intersected with the ones below it, so
+    /// the top is the effective clip. [`HydrolysisRenderer::push_layer_rect`]
+    /// pushes the same rect it clips paint to and `pop_layer` pops it, so a
+    /// hit region flushed inside a scroll viewport can't outlive the paint
+    /// clip (water-rs/hydrolysis#252).
+    pub(crate) hit_clip_stack: Vec<vello::kurbo::Rect>,
+}
+
+impl HitTestState {
+    /// Intersects `rect` — already in window hit-test space — with the clip
+    /// stack the open paint layers pushed.
+    pub(crate) fn clip_hit_bounds(&self, rect: vello::kurbo::Rect) -> vello::kurbo::Rect {
+        self.hit_clip_stack
+            .last()
+            .map_or(rect, |clip| rect.intersect(*clip))
+    }
+
+    /// Pushes a clip rect in window hit-test space, intersected with the
+    /// enclosing clips so the top of the stack is always the effective clip.
+    pub(crate) fn push_hit_clip(&mut self, rect: vello::kurbo::Rect) {
+        let clip = self.clip_hit_bounds(rect);
+        self.hit_clip_stack.push(clip);
+    }
+
+    pub(crate) fn pop_hit_clip(&mut self) {
+        self.hit_clip_stack
+            .pop()
+            .expect("hydrolysis renderer: hit clip stack underflow");
+    }
 }
 
 impl HitTestState {
@@ -333,11 +363,13 @@ impl HitTestState {
         self.scroll_targets.clear();
         self.trackpad_pan_targets.clear();
         self.modal_interaction = None;
+        self.hit_clip_stack.clear();
     }
 
     pub(crate) fn begin_rebuild_frame(&mut self) {
         self.hit_test_opacity = 1.0;
         self.hit_test_order = 0;
+        self.hit_clip_stack.clear();
         self.focus_dropped_this_frame = false;
         self.interaction.begin_rebuild_frame();
     }
@@ -2608,6 +2640,7 @@ impl SemanticCore {
     ) {
         // The subview claims a slot in the same order every hit-test target
         // uses, which is what makes "registered later" mean "painted above".
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         self.hit_test
             .native_view_occlusions
@@ -2629,6 +2662,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         let interaction = press_slot
             .as_ref()
@@ -2662,6 +2696,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         self.hit_test.pointer_targets.push(PointerTarget {
             bounds,
@@ -2732,6 +2767,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         self.hit_test.drop_targets.push(DropTarget {
             bounds,
@@ -2864,6 +2900,7 @@ impl HydrolysisRenderer {
         // re-flush (not just a re-present of the stale scene).
         handles.mark_chrome_state_dependent();
         if !disabled && self.hit_test.hit_test_opacity > HIT_TEST_ALPHA_THRESHOLD {
+            let bounds = self.hit_test.clip_hit_bounds(bounds);
             self.hit_test.hover_targets.push(HoverTarget {
                 bounds,
                 slot: hover_slot,
@@ -2915,6 +2952,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         let interaction = self.hit_test.interaction.handles_for(&press_slot);
         let modal = press_slot.modal;
@@ -2946,6 +2984,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         let interaction = self.hit_test.interaction.handles_for(&press_slot);
         let modal = press_slot.modal;
@@ -3004,6 +3043,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         self.hit_test
             .cursor_targets
             .push(CursorTarget { bounds, style });
@@ -3032,6 +3072,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let (slot, _hovering) = self.hit_test.interaction.bind_hover(&key);
         self.hit_test.hover_targets.push(HoverTarget {
             bounds,
@@ -3087,6 +3128,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         self.hit_test.scroll_targets.push(ScrollTarget {
             bounds,
@@ -3104,6 +3146,7 @@ impl SemanticCore {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
         self.hit_test.trackpad_pan_targets.push(TrackpadPanTarget {
             bounds,

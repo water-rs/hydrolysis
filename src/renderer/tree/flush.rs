@@ -94,7 +94,14 @@ impl RenderNode {
                     &node.value.value,
                     OPACITY_ANIMATION_KEY,
                 );
-                renderer.push_layer_rect(alpha, ctx.transform, ctx.bounds);
+                renderer.push_layer_rect(
+                    alpha,
+                    LayerTransforms {
+                        paint: ctx.transform,
+                        hit: ctx.hit_transform,
+                    },
+                    ctx.bounds,
+                );
                 node.child.flush(renderer, ctx, env);
                 renderer.pop_layer();
             }
@@ -408,7 +415,14 @@ impl RenderNode {
                     f64::from(node.viewport.width),
                     f64::from(node.viewport.height),
                 );
-                renderer.push_layer_rect(1.0, ctx.transform, viewport_rect);
+                renderer.push_layer_rect(
+                    1.0,
+                    LayerTransforms {
+                        paint: ctx.transform,
+                        hit: ctx.hit_transform,
+                    },
+                    viewport_rect,
+                );
                 let scroll_offset =
                     vello::kurbo::Affine::translate((-metrics.offset_x, -metrics.offset_y));
                 let content_bounds = vello::kurbo::Rect::new(

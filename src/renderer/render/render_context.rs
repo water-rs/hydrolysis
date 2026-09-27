@@ -1,6 +1,7 @@
 use super::{HydrolysisRenderer, TailMark};
 use crate::engine::vello_backend::VelloDrawContext;
 use crate::renderer::HydroState;
+use crate::renderer::frame::LayerTransforms;
 use crate::renderer::navigation::{
     NavigationCapturedScene, NavigationTransitionFrame, draw_navigation_transition,
 };
@@ -119,7 +120,14 @@ impl<'a> WidgetRenderContext<'a> {
     }
 
     pub(crate) fn push_layer_rect(&mut self, alpha: f32, clip: vello::kurbo::Rect) {
-        self.renderer.push_layer_rect(alpha, self.transform, clip);
+        self.renderer.push_layer_rect(
+            alpha,
+            LayerTransforms {
+                paint: self.transform,
+                hit: self.hit_transform,
+            },
+            clip,
+        );
     }
 
     pub(crate) fn pop_layer(&mut self) {

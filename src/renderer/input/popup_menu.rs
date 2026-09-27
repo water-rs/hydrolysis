@@ -1440,6 +1440,7 @@ impl SemanticCore {
             return;
         }
         let order = self.hit_test.next_hit_test_order();
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         self.hit_test.context_menu_targets.push(ContextMenuTarget {
             bounds,
             depth,
