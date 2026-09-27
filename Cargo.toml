@@ -302,7 +302,7 @@ hydrolysis = { path = "." }
 # The Material 3 theme must implement the five-argument
 # `WidgetTheme::draw_button_chrome` contract added for
 # water-rs/hydrolysis#115.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "fe30bac4d17898443290600b75faa6a3d7586716"}
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "4a85054ac9c5f70bb7e6b11d2bd3b2cd6b64fdb9"}
 
 
 # Migrated framework crates pinned to waterui's devin/chore/nami-snapshot
