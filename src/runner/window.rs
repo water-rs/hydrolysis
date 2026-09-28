@@ -2,7 +2,6 @@
 //! scene rebuild/refresh/render phases, and input-event dispatch.
 
 use super::*;
-use std::path::PathBuf;
 
 /// The work scheduled for the next pump of a window.
 ///
@@ -1131,11 +1130,6 @@ where
     // activate a form or delete committed text.
     let ime_owned = ime::ime_owned_events(&events, runtime.renderer.ime_composition_active());
     let mut geometry_refreshed = false;
-    // winit reports an OS file drag one event per file (`HoveredFile` /
-    // `DroppedFile`); the drag is one, so the paths collect here — the drop
-    // is delivered once, after the batch, with every file it carried.
-    let mut hovered_files: Vec<PathBuf> = Vec::new();
-    let mut dropped_files: Vec<PathBuf> = Vec::new();
     for (event, ime_owned) in events.into_iter().zip(ime_owned) {
         // The preflight re-registers every hit target at the geometry a
         // pending refresh is *about to* paint, so it is reserved for the
@@ -1472,17 +1466,16 @@ where
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::FileHovered { path } => {
-                hovered_files.push(path);
                 let event_env = input_env(runtime, env);
-                let changed = runtime
-                    .renderer
-                    .handle_files_hovered(&hovered_files, &event_env);
+                let changed = runtime.renderer.handle_file_hovered(path, &event_env);
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::FileDropped { path } => {
-                // Held until the batch ends so one drop delivers once with
-                // every file it carried.
-                dropped_files.push(path);
+                // The file joins the drag's collected list on the renderer;
+                // delivery is deferred to `finish_os_file_drop` below —
+                // winit reports one event per file and a drop's files can
+                // outlive a single batch.
+                runtime.renderer.handle_file_dropped(path);
             }
             InputEvent::FileHoverCancelled => {
                 let event_env = input_env(runtime, env);
@@ -1491,11 +1484,9 @@ where
             }
         }
     }
-    if !dropped_files.is_empty() {
+    {
         let event_env = input_env(runtime, env);
-        let changed = runtime
-            .renderer
-            .handle_files_dropped(dropped_files, &event_env);
+        let changed = runtime.renderer.finish_os_file_drop(&event_env);
         schedule_redraw_or_refresh(runtime, changed);
     }
     runtime

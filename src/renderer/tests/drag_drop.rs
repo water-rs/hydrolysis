@@ -192,6 +192,9 @@ fn os_file_drop_delivers_one_files_payload_with_every_url() {
     ] {
         runtime.push_input_event(event);
     }
+    // The drop is delivered when the first drain adds no more files — winit
+    // emits no drop-end event.
+    let _ = runtime.pump(false);
     let _ = runtime.pump(false);
 
     assert_eq!(
@@ -204,6 +207,52 @@ fn os_file_drop_delivers_one_files_payload_with_every_url() {
     );
     assert_eq!(enters.get(), 1, "the destination is hovered once");
     assert_eq!(exits.get(), 1, "the delivered destination exits once");
+}
+
+/// A drop's `DroppedFile` events straddling two pumps still merge into one
+/// delivery carrying every file — the collected list lives on the drag, not
+/// on the batch.
+#[test]
+fn os_file_drop_split_across_pumps_delivers_once_with_every_url() {
+    let file_a = PathBuf::from("/tmp/split-a.png");
+    let file_b = PathBuf::from("/tmp/split-b.png");
+    let drops = Rc::new(RefCell::new(Vec::<Files>::new()));
+    let view = {
+        let drops = Rc::clone(&drops);
+        ().size(SIZE, SIZE)
+            .drop_destination(move |files: Files| drops.borrow_mut().push(files))
+    };
+    let mut runtime = runtime_with(AnyView::new(view));
+
+    pointer_move(&mut runtime, 80.0, 80.0);
+    for event in [
+        InputEvent::FileHovered {
+            path: file_a.clone(),
+        },
+        InputEvent::FileHovered {
+            path: file_b.clone(),
+        },
+        InputEvent::FileDropped {
+            path: file_a.clone(),
+        },
+    ] {
+        runtime.push_input_event(event);
+    }
+    let _ = runtime.pump(false);
+    runtime.push_input_event(InputEvent::FileDropped {
+        path: file_b.clone(),
+    });
+    let _ = runtime.pump(false);
+    let _ = runtime.pump(false);
+
+    assert_eq!(
+        drops.borrow().as_slice(),
+        &[Files::new([
+            Url::from_file_path(&file_a),
+            Url::from_file_path(&file_b),
+        ])],
+        "the straddled drop delivers once, as one Files of both file URLs"
+    );
 }
 
 #[test]
@@ -231,6 +280,9 @@ fn os_file_drop_produces_no_text() {
     ] {
         runtime.push_input_event(event);
     }
+    let _ = runtime.pump(false);
+    // The deferred delivery point must be crossed for the assertion to mean
+    // the destination rejected the payload rather than the drop never ran.
     let _ = runtime.pump(false);
 
     assert!(

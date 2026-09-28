@@ -46,6 +46,22 @@ pub(crate) struct ActiveDrag {
     pub(crate) hovered_target: Option<DropTargetKey>,
 }
 
+/// An in-flight OS file drag. The path list lives here rather than in the
+/// event batch: winit reports the files of a drag one `HoveredFile` /
+/// `DroppedFile` event at a time, and nothing guarantees they all arrive in
+/// one batch, so the list must survive the lifetime of the drag — from the
+/// first `HoveredFile` until the drop is delivered or the hover cancelled.
+pub(crate) struct OsFileDrag {
+    /// Every path winit has reported for this drag.
+    pub(crate) paths: Vec<PathBuf>,
+    /// The drop has begun (a `DroppedFile` arrived) but its files may still
+    /// be landing one event each; delivery waits for the first drain that
+    /// adds none.
+    pub(crate) drop_pending: bool,
+    /// A `DroppedFile` was collected in the drain now closing.
+    pub(crate) dropped_this_drain: bool,
+}
+
 #[derive(Clone)]
 /// A gesture hit region registered this frame, mirrored from the gesture
 /// engine's target list: the press path weighs a press candidate against the
@@ -302,6 +318,8 @@ pub(crate) struct HitTestState {
     pub(crate) hover_targets: Vec<HoverTarget>,
     pub(crate) drop_targets: Vec<DropTarget>,
     pub(crate) active_drag: Option<ActiveDrag>,
+    /// The in-flight OS file drag, if any — see [`OsFileDrag`].
+    pub(crate) os_file_drag: Option<OsFileDrag>,
     pub(crate) context_menu_targets: Vec<ContextMenuTarget>,
     pub(crate) interaction: InteractionEngine,
     pub(crate) active_press_bounds: Option<vello::kurbo::Rect>,
@@ -705,6 +723,7 @@ impl SemanticCore {
     }
 
     fn cancel_active_drag(&mut self, env: &Environment) -> bool {
+        self.hit_test.os_file_drag = None;
         let Some(active_drag) = self.hit_test.active_drag.take() else {
             return false;
         };
@@ -719,16 +738,45 @@ impl SemanticCore {
         false
     }
 
-    /// The files of an OS file drag are hovering the window (winit
-    /// `HoveredFile`, coalesced by the runner — the event fires once per
-    /// file). The drag carries a [`Files`] payload built from every reported
-    /// path, so a destination that accepts [`Files`] sees the hover and one
-    /// that does not is never entered.
+    /// The drag's collected files as a [`Files`] payload of `file://` URLs.
+    /// `Url::from_file_path` is infallible on any bytes, so non-UTF-8 paths
+    /// cannot panic here.
+    fn os_file_payload(paths: &[PathBuf]) -> DragPayload {
+        DragPayload::new(Files::new(paths.iter().map(Url::from_file_path)))
+    }
+
+    /// Appends `path` to the drag's collected files if it is not already
+    /// there — winit reports every file of a drag twice, once as
+    /// `HoveredFile` and again as `DroppedFile`, so a naive append would
+    /// deliver each URL twice.
+    fn collect_os_file_drag_path(&mut self, path: PathBuf) -> &mut OsFileDrag {
+        let state = self
+            .hit_test
+            .os_file_drag
+            .get_or_insert_with(|| OsFileDrag {
+                paths: Vec::new(),
+                drop_pending: false,
+                dropped_this_drain: false,
+            });
+        if !state.paths.contains(&path) {
+            state.paths.push(path);
+        }
+        state
+    }
+
+    /// A file of an OS drag hovered the window (winit `HoveredFile`, one
+    /// event per file). The path joins the drag's collected files and the
+    /// [`Files`] payload is rebuilt over all of them, so a destination that
+    /// accepts [`Files`] sees the hover and one that does not is never
+    /// entered.
     ///
     /// winit's file events carry no position; the hover resolves at the last
-    /// reported pointer position.
-    pub fn handle_files_hovered(&mut self, paths: &[PathBuf], env: &Environment) -> bool {
-        let payload = DragPayload::new(Files::new(paths.iter().map(Url::from_file_path)));
+    /// position the window saw (`hit_test.pointer_position`).
+    pub fn handle_file_hovered(&mut self, path: PathBuf, env: &Environment) -> bool {
+        let payload = {
+            let state = self.collect_os_file_drag_path(path);
+            Self::os_file_payload(&state.paths)
+        };
         let Some(point) = self.hit_test.pointer_position else {
             self.hit_test.active_drag = Some(ActiveDrag {
                 payload,
@@ -739,11 +787,53 @@ impl SemanticCore {
         self.begin_or_update_drag(payload, point, env)
     }
 
-    /// The files of an OS file drag were dropped on the window (winit
-    /// `DroppedFile`, coalesced by the runner): deliver one [`Files`] payload
-    /// carrying every file of the drop, once.
-    pub fn handle_files_dropped(&mut self, paths: Vec<PathBuf>, env: &Environment) -> bool {
-        let payload = DragPayload::new(Files::new(paths.iter().map(Url::from_file_path)));
+    /// A file of an OS drag was dropped on the window (winit `DroppedFile`,
+    /// one event per file). The path joins the drag's collected files; the
+    /// drop itself is delivered once by [`Self::finish_os_file_drop`], at the
+    /// end of the first drain that adds no more files.
+    pub fn handle_file_dropped(&mut self, path: PathBuf) {
+        let state = self.collect_os_file_drag_path(path);
+        state.drop_pending = true;
+        state.dropped_this_drain = true;
+    }
+
+    /// Ends an OS file drag's drop if one has fully landed.
+    ///
+    /// winit emits no drop-end event — only `DroppedFile` per file — so a
+    /// drop ends with the first drain that adds no file. That is sound
+    /// because every backend emits a drop's whole file set inside a single
+    /// platform callback, which lands entirely within one drain: on X11 the
+    /// `XdndDrop` handler loops `for path in path_list` emitting one
+    /// `DroppedFile` each (winit 0.30.13
+    /// `platform_impl/linux/x11/event_processor.rs`), on macOS
+    /// `performDragOperation:` queues every file at once
+    /// (`platform_impl/macos/window_delegate.rs`), and on Windows
+    /// `IDropTarget::Drop` iterates the HDROP's files in one call
+    /// (`platform_impl/windows/drop_handler.rs`). Keeping the collection on
+    /// the drag rather than the batch means a set that does straddle drains
+    /// still delivers once, with every file it carried.
+    ///
+    /// The drop resolves at the last position the window saw; if the pointer
+    /// was never observed entering, the drop is discarded with an error —
+    /// never silently.
+    pub fn finish_os_file_drop(&mut self, env: &Environment) -> bool {
+        let Some(state) = self.hit_test.os_file_drag.as_mut() else {
+            return false;
+        };
+        if !state.drop_pending {
+            return false;
+        }
+        if state.dropped_this_drain {
+            // This drain just collected files — a drop may still be landing.
+            state.dropped_this_drain = false;
+            return false;
+        }
+        let state = self
+            .hit_test
+            .os_file_drag
+            .take()
+            .expect("os_file_drag presence checked above");
+        let payload = Self::os_file_payload(&state.paths);
         match self.hit_test.active_drag.as_mut() {
             Some(active_drag) => active_drag.payload = payload,
             None => {
@@ -754,8 +844,12 @@ impl SemanticCore {
             }
         }
         let Some(point) = self.hit_test.pointer_position else {
-            self.hit_test.active_drag = None;
-            return false;
+            tracing::error!(
+                target: "waterui::hydrolysis::input",
+                paths = ?state.paths,
+                "OS file drop discarded: no pointer position has ever been reported"
+            );
+            return self.cancel_active_drag(env);
         };
         self.finish_active_drag(point, env)
     }
@@ -763,6 +857,7 @@ impl SemanticCore {
     /// An OS file drag left the window or ended without a drop (winit
     /// `HoveredFileCancelled`).
     pub fn handle_file_hover_cancelled(&mut self, env: &Environment) -> bool {
+        self.hit_test.os_file_drag = None;
         self.cancel_active_drag(env)
     }
 
