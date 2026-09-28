@@ -89,9 +89,7 @@ pub(crate) fn ime_owned_events(events: &[InputEvent], composing: bool) -> Vec<bo
                     }
                     break;
                 }
-                InputEvent::TextInput { .. } | InputEvent::KeyText { .. } => {
-                    claimed[behind] = true
-                }
+                InputEvent::TextInput { .. } | InputEvent::KeyText { .. } => claimed[behind] = true,
                 _ => break,
             }
         }
@@ -100,9 +98,9 @@ pub(crate) fn ime_owned_events(events: &[InputEvent], composing: bool) -> Vec<bo
     let mut owned = Vec::with_capacity(events.len());
     for (index, event) in events.iter().enumerate() {
         owned.push(match event {
-            InputEvent::Key { .. }
-            | InputEvent::TextInput { .. }
-            | InputEvent::KeyText { .. } => composing || claimed[index],
+            InputEvent::Key { .. } | InputEvent::TextInput { .. } | InputEvent::KeyText { .. } => {
+                composing || claimed[index]
+            }
             InputEvent::ImePreedit { text, .. } => {
                 composing = !text.is_empty();
                 false

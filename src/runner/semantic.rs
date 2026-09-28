@@ -1192,7 +1192,10 @@ mod tests {
         runtime.pump();
         assert_eq!(
             hits.snapshot().as_slice(),
-            &[String::from("Character(\"x\")"), String::from("Character(\"y\")")],
+            &[
+                String::from("Character(\"x\")"),
+                String::from("Character(\"y\")")
+            ],
             "the presses did not both reach the ancestor handler"
         );
         assert_eq!(

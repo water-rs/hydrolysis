@@ -148,9 +148,7 @@ fn to_input_event(event: &FixtureEvent) -> InputEvent {
             assert!(*disabled, "a `disabled` fixture event must be true");
             InputEvent::ImeDisabled
         }
-        FixtureEvent::Text { text } => InputEvent::TextInput {
-            text: text.clone(),
-        },
+        FixtureEvent::Text { text } => InputEvent::TextInput { text: text.clone() },
         FixtureEvent::Key { key } => {
             let logical_key = key
                 .logical
