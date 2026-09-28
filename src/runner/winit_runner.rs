@@ -898,6 +898,7 @@ mod tests {
         assert!(!native_window_attributes(&window, &env, false, None).active);
     }
 
+    #[cfg(hydrolysis_wayland_platform)]
     #[test]
     fn window_attributes_split_wm_class_from_instance_name() {
         use waterui_core::Str;
