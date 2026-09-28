@@ -4,10 +4,10 @@ use std::time::Duration;
 use hydrolysis::run;
 use waterui::Environment;
 use waterui::app::App;
-use waterui::window::{Window, WindowState};
 use waterui::prelude::*;
 use waterui::reactive::binding;
 use waterui::shape::{RoundedRectangle, ShapeExt};
+use waterui::window::{Window, WindowState};
 use waterui_controls::{slider::slider, stepper::stepper};
 
 fn main_view() -> impl View {
@@ -40,7 +40,11 @@ fn main_view() -> impl View {
 
 fn app(env: Environment) -> App {
     App::new_with_windows(
-        [Window::new("Hydrolysis Wayland Smoke", binding(WindowState::Normal), main_view)],
+        [Window::new(
+            "Hydrolysis Wayland Smoke",
+            binding(WindowState::Normal),
+            main_view,
+        )],
         env,
     )
 }

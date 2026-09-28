@@ -4,10 +4,10 @@ use std::time::Duration;
 use hydrolysis::run;
 use waterui::Environment;
 use waterui::app::App;
-use waterui::reactive::binding;
-use waterui::window::{Window, WindowState};
 use waterui::prelude::*;
+use waterui::reactive::binding;
 use waterui::shape::{RoundedRectangle, ShapeExt};
+use waterui::window::{Window, WindowState};
 
 /// Bounded-content probe for window size limits: no scroll, so the vstack's
 /// intrinsic minimum (two text lines + a 320x120 fixed chip + padding) is the

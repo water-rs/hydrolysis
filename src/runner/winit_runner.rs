@@ -967,9 +967,9 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::{ends_event_loop, native_window_attributes};
     #[cfg(any(unix, windows))]
     use super::{TerminationAction, TerminationRequests};
+    use super::{ends_event_loop, native_window_attributes};
     use waterui::window::{Window, WindowState};
     use waterui_core::{Binding, Environment, binding};
 
