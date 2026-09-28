@@ -1,6 +1,8 @@
 use super::*;
-use nami::{Computed, Signal as _};
-use waterui::drag_drop::DragData;
+use nami::Signal as _;
+use std::path::PathBuf;
+use waterui::Url;
+use waterui::drag_drop::{DragPayload, Files};
 use waterui::gesture::PointerButton as WuiPointerButton;
 use waterui_backend_core::gesture::LONG_PRESS_SLOP;
 use waterui_backend_core::widget::{
@@ -19,38 +21,28 @@ pub(crate) struct DropTarget {
     pub(crate) bounds: vello::kurbo::Rect,
     pub(crate) key: DropTargetKey,
     pub(crate) env: Environment,
-    pub(crate) on_drop: Rc<RefCell<BoxedAction<()>>>,
-    pub(crate) on_enter: Option<Rc<RefCell<BoxedAction<()>>>>,
-    pub(crate) on_exit: Option<Rc<RefCell<BoxedAction<()>>>>,
+    pub(crate) destination: Rc<RefCell<DropDestination>>,
 }
 
-/// Shareable, pre-wrapped drop-destination handlers. A [`DropDestination`]'s
-/// boxed closures are wrapped in `Rc<RefCell<…>>` once (the form the hit-test
-/// stores), so a retained `Wrapper` node can hold them by value and re-register
-/// the same handles on every flush without moving the closures out.
+/// A shareable drop destination. The [`DropDestination`] is wrapped in
+/// `Rc<RefCell<…>>` once (the form the hit-test stores), so a retained
+/// `Wrapper` node can hold it by value and re-register the same handle on
+/// every flush.
 #[derive(Clone)]
 pub(crate) struct DropDestinationHandles {
-    on_drop: Rc<RefCell<BoxedAction<()>>>,
-    on_enter: Option<Rc<RefCell<BoxedAction<()>>>>,
-    on_exit: Option<Rc<RefCell<BoxedAction<()>>>>,
+    destination: Rc<RefCell<DropDestination>>,
 }
 
 impl DropDestinationHandles {
     pub(crate) fn from_destination(destination: DropDestination) -> Self {
         Self {
-            on_drop: Rc::new(RefCell::new(destination.on_drop)),
-            on_enter: destination
-                .on_enter
-                .map(|handler| Rc::new(RefCell::new(handler))),
-            on_exit: destination
-                .on_exit
-                .map(|handler| Rc::new(RefCell::new(handler))),
+            destination: Rc::new(RefCell::new(destination)),
         }
     }
 }
 
 pub(crate) struct ActiveDrag {
-    pub(crate) data: DragData,
+    pub(crate) payload: DragPayload,
     pub(crate) hovered_target: Option<DropTargetKey>,
 }
 
@@ -590,11 +582,20 @@ impl HitTestState {
         sync
     }
 
-    fn topmost_drop_target_index_at_point(&self, point: vello::kurbo::Point) -> Option<usize> {
+    /// The topmost drop target under `point` that accepts `payload`. A
+    /// destination that does not accept the drag's payload is skipped — it is
+    /// neither hovered nor delivered.
+    fn topmost_drop_target_index_at_point(
+        &self,
+        point: vello::kurbo::Point,
+        payload: &DragPayload,
+    ) -> Option<usize> {
         self.drop_targets
             .iter()
             .enumerate()
-            .filter(|(_, target)| target.bounds.contains(point))
+            .filter(|(_, target)| {
+                target.bounds.contains(point) && target.destination.borrow().accepts(payload)
+            })
             .max_by(|(left_index, left), (right_index, right)| {
                 SemanticCore::target_hit_priority(left.key.depth, left.key.order, *left_index).cmp(
                     &SemanticCore::target_hit_priority(
@@ -616,26 +617,22 @@ impl HitTestState {
 }
 
 impl SemanticCore {
-    fn call_drop_action(
-        action: &Rc<RefCell<BoxedAction<()>>>,
-        captured_env: &Environment,
-        runtime_env: &Environment,
-        data: &DragData,
-    ) {
-        let drag_env = runtime_env.extending(data.clone());
-        let action_env = captured_env.layered_on(&drag_env);
-        (action.borrow_mut())(&action_env);
+    /// The environment a drop destination's callbacks run in: the
+    /// environment captured where the destination was declared, layered over
+    /// the runtime's.
+    fn drop_target_env(target: &DropTarget, runtime_env: &Environment) -> Environment {
+        target.env.layered_on(runtime_env)
     }
 
     fn sync_active_drag_hover(&mut self, point: vello::kurbo::Point, env: &Environment) -> bool {
         let Some(active_drag) = self.hit_test.active_drag.as_ref() else {
             return false;
         };
-        let data = active_drag.data.clone();
+        let payload = active_drag.payload.clone();
         let previous_key = active_drag.hovered_target;
         let current_target = self
             .hit_test
-            .topmost_drop_target_index_at_point(point)
+            .topmost_drop_target_index_at_point(point, &payload)
             .map(|index| self.hit_test.drop_targets[index].clone());
         let current_key = current_target.as_ref().map(|target| target.key);
         if previous_key == current_key {
@@ -648,16 +645,14 @@ impl SemanticCore {
         }
 
         let mut changed = previous_key.is_some() || current_key.is_some();
-        if let Some(target) = previous_target
-            && let Some(on_exit) = target.on_exit.as_ref()
-        {
-            Self::call_drop_action(on_exit, &target.env, env, &data);
+        if let Some(target) = previous_target {
+            let action_env = Self::drop_target_env(&target, env);
+            target.destination.borrow_mut().exit(&action_env);
             changed = true;
         }
-        if let Some(target) = current_target
-            && let Some(on_enter) = target.on_enter.as_ref()
-        {
-            Self::call_drop_action(on_enter, &target.env, env, &data);
+        if let Some(target) = current_target {
+            let action_env = Self::drop_target_env(&target, env);
+            target.destination.borrow_mut().enter(&action_env);
             changed = true;
         }
         changed
@@ -665,15 +660,15 @@ impl SemanticCore {
 
     fn begin_or_update_drag(
         &mut self,
-        data: DragData,
+        payload: DragPayload,
         point: vello::kurbo::Point,
         env: &Environment,
     ) -> bool {
         if let Some(active_drag) = self.hit_test.active_drag.as_mut() {
-            active_drag.data = data;
+            active_drag.payload = payload;
         } else {
             self.hit_test.active_drag = Some(ActiveDrag {
-                data,
+                payload,
                 hovered_target: None,
             });
         }
@@ -686,7 +681,7 @@ impl SemanticCore {
         };
         let drop_target = self
             .hit_test
-            .topmost_drop_target_index_at_point(point)
+            .topmost_drop_target_index_at_point(point, &active_drag.payload)
             .map(|index| self.hit_test.drop_targets[index].clone());
         let exit_target = active_drag
             .hovered_target
@@ -694,13 +689,16 @@ impl SemanticCore {
 
         let mut changed = false;
         if let Some(target) = drop_target {
-            Self::call_drop_action(&target.on_drop, &target.env, env, &active_drag.data);
+            let action_env = Self::drop_target_env(&target, env);
+            target
+                .destination
+                .borrow_mut()
+                .deliver(active_drag.payload.clone(), &action_env);
             changed = true;
         }
-        if let Some(target) = exit_target
-            && let Some(on_exit) = target.on_exit.as_ref()
-        {
-            Self::call_drop_action(on_exit, &target.env, env, &active_drag.data);
+        if let Some(target) = exit_target {
+            let action_env = Self::drop_target_env(&target, env);
+            target.destination.borrow_mut().exit(&action_env);
             changed = true;
         }
         changed
@@ -713,13 +711,59 @@ impl SemanticCore {
         let exit_target = active_drag
             .hovered_target
             .and_then(|key| self.hit_test.drop_target_with_key(key));
-        if let Some(target) = exit_target
-            && let Some(on_exit) = target.on_exit.as_ref()
-        {
-            Self::call_drop_action(on_exit, &target.env, env, &active_drag.data);
+        if let Some(target) = exit_target {
+            let action_env = Self::drop_target_env(&target, env);
+            target.destination.borrow_mut().exit(&action_env);
             return true;
         }
         false
+    }
+
+    /// The files of an OS file drag are hovering the window (winit
+    /// `HoveredFile`, coalesced by the runner — the event fires once per
+    /// file). The drag carries a [`Files`] payload built from every reported
+    /// path, so a destination that accepts [`Files`] sees the hover and one
+    /// that does not is never entered.
+    ///
+    /// winit's file events carry no position; the hover resolves at the last
+    /// reported pointer position.
+    pub fn handle_files_hovered(&mut self, paths: &[PathBuf], env: &Environment) -> bool {
+        let payload = DragPayload::new(Files::new(paths.iter().map(Url::from_file_path)));
+        let Some(point) = self.hit_test.pointer_position else {
+            self.hit_test.active_drag = Some(ActiveDrag {
+                payload,
+                hovered_target: None,
+            });
+            return false;
+        };
+        self.begin_or_update_drag(payload, point, env)
+    }
+
+    /// The files of an OS file drag were dropped on the window (winit
+    /// `DroppedFile`, coalesced by the runner): deliver one [`Files`] payload
+    /// carrying every file of the drop, once.
+    pub fn handle_files_dropped(&mut self, paths: Vec<PathBuf>, env: &Environment) -> bool {
+        let payload = DragPayload::new(Files::new(paths.iter().map(Url::from_file_path)));
+        match self.hit_test.active_drag.as_mut() {
+            Some(active_drag) => active_drag.payload = payload,
+            None => {
+                self.hit_test.active_drag = Some(ActiveDrag {
+                    payload,
+                    hovered_target: None,
+                });
+            }
+        }
+        let Some(point) = self.hit_test.pointer_position else {
+            self.hit_test.active_drag = None;
+            return false;
+        };
+        self.finish_active_drag(point, env)
+    }
+
+    /// An OS file drag left the window or ended without a drop (winit
+    /// `HoveredFileCancelled`).
+    pub fn handle_file_hover_cancelled(&mut self, env: &Environment) -> bool {
+        self.cancel_active_drag(env)
     }
 
     pub(crate) fn sync_active_pointer_drag_target_after_layout(
@@ -1483,6 +1527,15 @@ impl HydrolysisRenderer {
             drag_changed |= pointer_drag_changed;
             refresh_requested |= pointer_drag_changed;
         }
+        // An OS file drag has no pointer target driving it — its hover sync
+        // happens here. For an in-app drag this repeats the sync the
+        // drag-target action just ran, a no-op while the target is unchanged.
+        let drag_hover_changed = self.sync_active_drag_hover(point, env);
+        if drag_hover_changed {
+            self.request_refresh();
+        }
+        drag_changed |= drag_hover_changed;
+        refresh_requested |= drag_hover_changed;
         let hover = if pointer_kind == PointerKind::Mouse {
             self.hit_test.sync_hover_targets(point, env, true, at)
         } else {
@@ -3040,10 +3093,13 @@ impl SemanticCore {
             .is_some_and(|drag| drag.key == key)
     }
 
+    /// Register the drag source for `draggable`. The payload is read when
+    /// the drag begins — the action snapshots the [`Draggable`]'s signal then,
+    /// so a binding-backed payload carries its current value.
     pub(crate) fn register_draggable_target(
         &mut self,
         bounds: vello::kurbo::Rect,
-        data: Computed<DragData>,
+        draggable: Rc<Draggable>,
     ) {
         self.register_pointer_target_action(
             bounds,
@@ -3053,7 +3109,7 @@ impl SemanticCore {
                 move |renderer: &mut SemanticCore,
                       point: vello::kurbo::Point,
                       env: &Environment| {
-                    renderer.begin_or_update_drag(data.snapshot(), point, env)
+                    renderer.begin_or_update_drag(draggable.payload(), point, env)
                 },
             )),
             self.render_depth,
@@ -3082,9 +3138,7 @@ impl SemanticCore {
                 order,
             },
             env: env.clone(),
-            on_drop: Rc::clone(&handles.on_drop),
-            on_enter: handles.on_enter.clone(),
-            on_exit: handles.on_exit.clone(),
+            destination: Rc::clone(&handles.destination),
         });
     }
 }
