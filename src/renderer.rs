@@ -561,8 +561,10 @@ impl HydrolysisRenderer {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         theme: Rc<dyn crate::engine::WidgetTheme>,
-        mut options: vello::RendererOptions,
+        options: vello::RendererOptions,
     ) -> Self {
+        #[cfg(hydrolysis_pipeline_cache)]
+        let mut options = options;
         #[cfg(hydrolysis_pipeline_cache)]
         let pipeline_cache_store = if options.pipeline_cache.is_some() {
             None
