@@ -17,7 +17,9 @@ use nami::Signal as _;
 use std::cell::Cell;
 use std::time::Duration;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
-use waterui::app::{App, AppParts};
+use waterui::app::App;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "winit")))]
+use waterui::app::AppParts;
 use waterui::component::table::TableConfig;
 use waterui::graphics::Color;
 use waterui::theme;
