@@ -788,6 +788,7 @@ fn is_compute_capable_adapter(adapter: &wgpu::Adapter) -> bool {
 /// instantiates the GL backend's EGL driver stack only on hosts that need it —
 /// a headless CI box where Mesa llvmpipe supplies GL 4.5 compute shaders —
 /// never alongside a Vulkan adapter it would sit idle next to.
+#[cfg(not(all(target_arch = "wasm32", feature = "web")))]
 fn hydrolysis_backend_tiers() -> Vec<wgpu::Backends> {
     match wgpu::Backends::from_env() {
         Some(backends) => vec![backends],
@@ -885,6 +886,7 @@ async fn probe_adapters(
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", feature = "web")))]
 fn fail_no_adapter(context: &str, inspected_adapters: Vec<String>, tiers: &[wgpu::Backends]) -> ! {
     if inspected_adapters.is_empty() {
         panic!(
@@ -923,7 +925,7 @@ async fn request_instance_and_adapter(
             .await
             .expect("hydrolysis adapter selection: failed to find web adapter");
         log_selected_adapter(context, &adapter);
-        return (instance, adapter);
+        (instance, adapter)
     }
 
     #[cfg(not(all(target_arch = "wasm32", feature = "web")))]
