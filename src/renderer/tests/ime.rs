@@ -148,7 +148,9 @@ fn to_input_event(event: &FixtureEvent) -> InputEvent {
             assert!(*disabled, "a `disabled` fixture event must be true");
             InputEvent::ImeDisabled
         }
-        FixtureEvent::Text { text } => InputEvent::TextInput { text: text.clone() },
+        FixtureEvent::Text { text } => InputEvent::TextInput {
+            text: text.clone(),
+        },
         FixtureEvent::Key { key } => {
             let logical_key = key
                 .logical
@@ -680,7 +682,7 @@ fn expected_surface_events(fixture: &Fixture) -> Vec<SurfaceInputEvent> {
                         });
                     }
                 }
-                InputEvent::TextInput { text } if !owned => {
+                InputEvent::TextInput { text, .. } if !owned => {
                     expected.push(SurfaceInputEvent::TextInput(text.into()));
                 }
                 _ => {}
