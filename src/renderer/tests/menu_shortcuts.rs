@@ -432,7 +432,7 @@ fn menu_bar_chord_fires_without_a_mounted_menu() {
         )])
     };
     let env = test_environment();
-    let _menu_bar = crate::runner::menu_bar::install_menu_bar(&menu_bar, &env);
+    let _menu_bar_items = crate::runner::menu_bar::register_menu_bar(&menu_bar, &env);
     let mut runtime = HeadlessRuntime::new_for_tests(
         env,
         AnyViewBuilder::<AnyView>::new(|| AnyView::new(button("plain").action(|| {}))),
@@ -470,7 +470,7 @@ fn a_mounted_menu_wins_the_app_bars_chord_while_mounted() {
     };
     let mounted = Binding::container(false);
     let env = test_environment();
-    let _menu_bar = crate::runner::menu_bar::install_menu_bar(&menu_bar, &env);
+    let _menu_bar_items = crate::runner::menu_bar::register_menu_bar(&menu_bar, &env);
     let view = {
         let menu_fired = menu_fired.clone();
         let mounted = mounted.clone();

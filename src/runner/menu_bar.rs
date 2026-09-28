@@ -1,16 +1,19 @@
-//! `App::menu_bar` installation (watergram DOGFOOD r43-1).
+//! `App::menu_bar` plumbing shared by the runners.
 //!
 //! Every runner that destructures the app used to drop `menu_bar`, so an
 //! app-level menu bar rendered nothing and armed no shortcuts. The runner
 //! now resolves the menus once — `resolve_menu_bar_items` keeps the signal
-//! reactive, so item edits apply on the next lookup — and, where the
-//! platform exposes no menu-bar surface of its own, registers their
+//! reactive, so item edits apply on the next lookup — and registers their
 //! command chords on the window-shared [`MenuShortcutRegistry`] as an
 //! app-scoped source (live for the app's duration, answering to whichever
 //! window dispatches — the same behaviour a mounted `Menu` gives, minus
 //! the window affinity).
 //!
-//! What hydrolysis renders per platform:
+//! Rendering is a separate decision the *runner* makes, not the platform
+//! triple: `register_menu_bar` returns the resolved items, and only the
+//! winit runner turns them into a native surface by calling
+//! `platform::native_menu_bar::NativeMenuBar::install` and keeping the
+//! result for the app's duration. What hydrolysis renders per platform:
 //!
 //! - **winit on macOS** — `NSApp.mainMenu` is the system menu bar: the
 //!   menus become real `NSMenu` items via `muda`, commands carrying their
@@ -35,66 +38,30 @@
 //!
 //! Whichever path renders a native menu, choosing an item posts a
 //! `muda::MenuEvent` on muda's channel; the winit runner drains it once
-//! per event-loop pass (`pump_menu_events`) and runs the command's
-//! `SharedAction` through `call_action_discarding_result` with the app
-//! env — the same dispatch the registry uses for chords.
+//! per event-loop pass and runs the command's `SharedAction` through
+//! `call_action_discarding_result` with the app env — the same dispatch
+//! the registry uses for chords.
 
-use waterui_controls::menu::{Menu, resolve_menu_bar_items};
+use nami::Computed;
+use waterui_controls::menu::{Menu, ResolvedMenuItem, resolve_menu_bar_items};
 use waterui_core::Environment;
 
 use crate::renderer::{MISSING_MENU_SHORTCUT_REGISTRY, MenuShortcutRegistry};
 
-/// What installing the app's menu bar set up: chords on the registry plus
-/// a native menu-bar surface where the platform has one (winit on macOS
-/// and Windows — see the module docs for how chord dispatch stays
-/// exactly-once on each). The runner keeps the returned value alive for
-/// the app's duration.
-pub(crate) struct MenuBarInstall {
-    #[cfg(all(feature = "winit", any(target_os = "macos", target_os = "windows")))]
-    native: crate::platform::native_menu_bar::NativeMenuBar,
-}
-
-impl MenuBarInstall {
-    /// Drains muda's `MenuEvent` channel and dispatches each command's
-    /// action through the same path the registry uses. A no-op where no
-    /// native surface exists. The winit runner calls this once per
-    /// `about_to_wait` pass — muda posts events from the main thread.
-    #[cfg(feature = "winit")]
-    pub(crate) fn pump_menu_events(&self) {
-        #[cfg(all(feature = "winit", any(target_os = "macos", target_os = "windows")))]
-        self.native.pump_menu_events();
-    }
-
-    /// Attaches the native bar to a freshly created application window
-    /// (Windows `HWND`; a no-op everywhere else).
-    #[cfg(all(feature = "winit", target_os = "windows"))]
-    pub(crate) fn attach_hwnd(&self, hwnd: isize) {
-        self.native.attach_hwnd(hwnd);
-    }
-
-    /// Forgets an application window's `HWND` before the window is
-    /// destroyed, so the native bar never touches a dead handle (a no-op
-    /// everywhere else).
-    #[cfg(all(feature = "winit", target_os = "windows"))]
-    pub(crate) fn detach_hwnd(&self, hwnd: isize) {
-        self.native.detach_hwnd(hwnd);
-    }
-}
-
-/// Resolves `menu_bar` against `env`, registers the app-scoped chord
-/// source, and installs the native surface where one exists. The app `env`
-/// is what the commands' actions are invoked with, layered over whichever
-/// window dispatches (same as a mounted `Menu`'s).
-pub(crate) fn install_menu_bar(
-    menu_bar: &nami::Computed<Vec<Menu>>,
+/// Resolves `menu_bar` against `env` and registers its command chords as
+/// an app-scoped source on the window-shared registry (the app `env` is
+/// what the actions are invoked with, layered over whichever window
+/// dispatches — same as a mounted `Menu`'s). Returns the resolved items
+/// signal for whichever surface consumes it: the winit runner feeds it to
+/// `NativeMenuBar::install` on macOS and Windows; runners with no menu-bar
+/// surface just arm the chords and drop it.
+pub(crate) fn register_menu_bar(
+    menu_bar: &Computed<Vec<Menu>>,
     env: &Environment,
-) -> MenuBarInstall {
+) -> Computed<Vec<ResolvedMenuItem>> {
     let items = resolve_menu_bar_items(menu_bar, env);
     env.get::<MenuShortcutRegistry>()
         .expect(MISSING_MENU_SHORTCUT_REGISTRY)
         .register_menu_bar(items.clone(), env.clone());
-    MenuBarInstall {
-        #[cfg(all(feature = "winit", any(target_os = "macos", target_os = "windows")))]
-        native: crate::platform::native_menu_bar::NativeMenuBar::install(items, env),
-    }
+    items
 }

@@ -186,7 +186,7 @@ pub fn run(app: App, style: impl crate::Style) {
     install_headless_window_managers(&mut env, Rc::clone(&pending_window_queue));
     // App-level menu bar: arms its chords on the shared registry. The
     // headless host renders no chrome, so there is no surface to draw.
-    let _menu_bar_install = menu_bar::install_menu_bar(&menu_bar, &env);
+    menu_bar::register_menu_bar(&menu_bar, &env);
     env.insert(HydrolysisTextContextMenuMode::Overlay);
     crate::theme::install_theme_tokens(&mut env, Some(&style));
     let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);

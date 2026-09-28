@@ -317,7 +317,7 @@ pub fn run(app: App, style: impl crate::Style) {
         let _ = env.get_or_insert_with::<MenuShortcutRegistry, _>(MenuShortcutRegistry::default);
         // A browser page cannot own the browser's menu bar, so the app menus
         // contribute their chords only — nothing renders.
-        let _menu_bar_install = super::menu_bar::install_menu_bar(&menu_bar, &env);
+        super::menu_bar::register_menu_bar(&menu_bar, &env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
         crate::theme::install_theme_tokens(&mut env, Some(&style));
         let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
