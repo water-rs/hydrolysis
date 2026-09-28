@@ -10,13 +10,13 @@ use std::rc::Rc;
 use executor_core::LocalExecutor;
 use executor_core::async_task::{self, AsyncTask, Runnable};
 
-mod drag_drop;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod anchored_overlay;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod context_menu_occlusion;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod context_menu_presentation;
+mod drag_drop;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod dynamic_remeasure;
 #[cfg(not(target_arch = "wasm32"))]

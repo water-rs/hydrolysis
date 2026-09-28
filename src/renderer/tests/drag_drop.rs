@@ -255,6 +255,59 @@ fn os_file_drop_split_across_pumps_delivers_once_with_every_url() {
     );
 }
 
+/// A dropped drag must deliver even if no further input ever arrives: the
+/// drain that collected the `DroppedFile`s marks the runtime unsettled and
+/// requests the one follow-up pump that runs the delivering drain.
+#[test]
+fn os_file_drop_is_delivered_by_the_pump_the_runner_schedules() {
+    let file_a = PathBuf::from("/tmp/scheduled-a.png");
+    let file_b = PathBuf::from("/tmp/scheduled-b.png");
+    let drops = Rc::new(RefCell::new(Vec::<Files>::new()));
+    let view = {
+        let drops = Rc::clone(&drops);
+        ().size(SIZE, SIZE)
+            .drop_destination(move |files: Files| drops.borrow_mut().push(files))
+    };
+    let mut runtime = runtime_with(AnyView::new(view));
+
+    pointer_move(&mut runtime, 80.0, 80.0);
+    for event in [
+        InputEvent::FileHovered {
+            path: file_a.clone(),
+        },
+        InputEvent::FileHovered {
+            path: file_b.clone(),
+        },
+        InputEvent::FileDropped {
+            path: file_a.clone(),
+        },
+        InputEvent::FileDropped {
+            path: file_b.clone(),
+        },
+    ] {
+        runtime.push_input_event(event);
+    }
+    // No further input is delivered — the drop only lands if the runner
+    // scheduled the drain that delivers it, which `is_settled` reports.
+    let mut pumps = 0;
+    while !runtime.is_settled() && pumps < 8 {
+        let _ = runtime.pump(false);
+        pumps += 1;
+    }
+    assert!(
+        runtime.is_settled(),
+        "the runner-scheduled pump lands the drop without further input"
+    );
+    assert_eq!(
+        drops.borrow().as_slice(),
+        &[Files::new([
+            Url::from_file_path(&file_a),
+            Url::from_file_path(&file_b),
+        ])],
+        "the drop is delivered exactly once, with every file it carried"
+    );
+}
+
 #[test]
 fn os_file_drop_produces_no_text() {
     let calls = Rc::new(RefCell::new(Vec::<&'static str>::new()));

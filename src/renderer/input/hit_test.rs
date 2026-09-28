@@ -54,12 +54,21 @@ pub(crate) struct ActiveDrag {
 pub(crate) struct OsFileDrag {
     /// Every path winit has reported for this drag.
     pub(crate) paths: Vec<PathBuf>,
-    /// The drop has begun (a `DroppedFile` arrived) but its files may still
-    /// be landing one event each; delivery waits for the first drain that
-    /// adds none.
-    pub(crate) drop_pending: bool,
-    /// A `DroppedFile` was collected in the drain now closing.
-    pub(crate) dropped_this_drain: bool,
+    /// Where the drag is in its lifetime — see [`OsFileDragPhase`].
+    pub(crate) phase: OsFileDragPhase,
+}
+
+/// How far an [`OsFileDrag`] has progressed. Once a `DroppedFile` arrives the
+/// drag can only be `Dropping`, so the impossible "collected a file while not
+/// dropping" state is unwritable.
+pub(crate) enum OsFileDragPhase {
+    /// Only `HoveredFile`s have arrived; no drop has begun.
+    Hovering,
+    /// A `DroppedFile` arrived and the drop is collecting its files.
+    /// `collected_this_drain` stays set while the drain that received the
+    /// last `DroppedFile` is open; the first drain that closes without
+    /// adding one ends the drop and delivers.
+    Dropping { collected_this_drain: bool },
 }
 
 #[derive(Clone)]
@@ -755,8 +764,7 @@ impl SemanticCore {
             .os_file_drag
             .get_or_insert_with(|| OsFileDrag {
                 paths: Vec::new(),
-                drop_pending: false,
-                dropped_this_drain: false,
+                phase: OsFileDragPhase::Hovering,
             });
         if !state.paths.contains(&path) {
             state.paths.push(path);
@@ -793,8 +801,19 @@ impl SemanticCore {
     /// end of the first drain that adds no more files.
     pub fn handle_file_dropped(&mut self, path: PathBuf) {
         let state = self.collect_os_file_drag_path(path);
-        state.drop_pending = true;
-        state.dropped_this_drain = true;
+        state.phase = OsFileDragPhase::Dropping {
+            collected_this_drain: true,
+        };
+    }
+
+    /// Whether an OS file drop is collecting files and owes the runner one
+    /// more drain to deliver it — the runner turns this into a scheduled
+    /// follow-up pump so the drop lands even if no further input arrives.
+    pub(crate) fn os_file_drop_pending(&self) -> bool {
+        matches!(
+            self.hit_test.os_file_drag.as_ref().map(|drag| &drag.phase),
+            Some(OsFileDragPhase::Dropping { .. })
+        )
     }
 
     /// Ends an OS file drag's drop if one has fully landed.
@@ -813,6 +832,12 @@ impl SemanticCore {
     /// the drag rather than the batch means a set that does straddle drains
     /// still delivers once, with every file it carried.
     ///
+    /// The drain that ends a drop only exists because the runner asked for
+    /// it: when this leaves the drag [`OsFileDragPhase::Dropping`], the
+    /// caller requests one follow-up pump through
+    /// `PlatformWindow::request_redraw` — the same wake a signal change
+    /// triggers — so the drop lands even if no further input ever arrives.
+    ///
     /// The drop resolves at the last position the window saw; if the pointer
     /// was never observed entering, the drop is discarded with an error —
     /// never silently.
@@ -820,13 +845,22 @@ impl SemanticCore {
         let Some(state) = self.hit_test.os_file_drag.as_mut() else {
             return false;
         };
-        if !state.drop_pending {
-            return false;
-        }
-        if state.dropped_this_drain {
-            // This drain just collected files — a drop may still be landing.
-            state.dropped_this_drain = false;
-            return false;
+        match state.phase {
+            OsFileDragPhase::Hovering => return false,
+            OsFileDragPhase::Dropping {
+                collected_this_drain: true,
+            } => {
+                // This drain just collected files — a drop may still be
+                // landing; the runner schedules the follow-up drain that
+                // delivers it.
+                state.phase = OsFileDragPhase::Dropping {
+                    collected_this_drain: false,
+                };
+                return false;
+            }
+            OsFileDragPhase::Dropping {
+                collected_this_drain: false,
+            } => {}
         }
         let state = self
             .hit_test
