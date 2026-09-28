@@ -438,16 +438,10 @@ fn native_window_attributes(
     // identity leaves winit's default (the executable name) in place.
     #[cfg(hydrolysis_wayland_platform)]
     let attributes = {
-        use winit::platform::{
-            wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11,
-        };
+        use winit::platform::{wayland::WindowAttributesExtWayland, x11::WindowAttributesExtX11};
         match window_desktop_identity(window) {
             Some((class, instance)) => WindowAttributesExtWayland::with_name(
-                WindowAttributesExtX11::with_name(
-                    attributes,
-                    class.as_str(),
-                    instance.as_str(),
-                ),
+                WindowAttributesExtX11::with_name(attributes, class.as_str(), instance.as_str()),
                 class.as_str(),
                 instance.as_str(),
             ),
