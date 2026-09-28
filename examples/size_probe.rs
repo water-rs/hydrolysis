@@ -4,6 +4,8 @@ use std::time::Duration;
 use hydrolysis::run;
 use waterui::Environment;
 use waterui::app::App;
+use waterui::reactive::binding;
+use waterui::window::{Window, WindowState};
 use waterui::prelude::*;
 use waterui::shape::{RoundedRectangle, ShapeExt};
 
@@ -41,7 +43,14 @@ fn main() {
     });
 
     run(
-        App::new(main_view, Environment::new()).title("size-probe"),
+        App::new_with_windows(
+            [Window::new(
+                "size-probe",
+                binding(WindowState::Normal),
+                main_view,
+            )],
+            Environment::new(),
+        ),
         hydrolysis_m3::Material3::defaults(),
     );
 }
