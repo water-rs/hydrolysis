@@ -3011,6 +3011,7 @@ dependencies = [
  "waterui-shape",
  "waterui-testing",
  "waterui-text",
+ "waterui-url",
  "waterui-webview",
  "web-sys",
  "wgpu",
