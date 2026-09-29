@@ -161,6 +161,27 @@ fn accessibility_role_names_from_contents(role: &AccessibilityRole) -> bool {
     )
 }
 
+/// The `f32`-representable points inside the half-open range `[lo, hi)`, as
+/// `(nearest, farthest)`.
+///
+/// Pointer input is delivered in `f32`, so an activation point survives only
+/// if the narrowing keeps it inside the fragment: `hi` yields the largest
+/// `f32` strictly below it, `lo` the smallest `f32` at or above it. `None`
+/// when no `f32` lands inside — a sliver thinner than one `f32` ulp is as
+/// unreachable as an empty fragment (water-rs/hydrolysis#27).
+#[cfg(feature = "accessibility")]
+fn f32_interior_range(lo: f64, hi: f64) -> Option<(f32, f32)> {
+    let lo = match lo as f32 {
+        narrowed if f64::from(narrowed) >= lo => narrowed,
+        narrowed => narrowed.next_up(),
+    };
+    let hi = match hi as f32 {
+        narrowed if f64::from(narrowed) < hi => narrowed,
+        narrowed => narrowed.next_down(),
+    };
+    (lo <= hi).then_some((lo, hi))
+}
+
 #[cfg(feature = "accessibility")]
 pub(crate) const ACCESSIBILITY_ROOT_NODE_ID: AccessibilityNodeId = AccessibilityNodeId(0);
 #[cfg(feature = "accessibility")]
@@ -1381,20 +1402,23 @@ impl SemanticCore {
         if fragment.width() <= 0.0 || fragment.height() <= 0.0 {
             return Err(AccessibilityActivationPointError::EmptyFragment);
         }
+        // Hit-test space is half-open and pointer input arrives in `f32`, so
+        // the point must come from the range an `f32` event can still land
+        // inside: clamping to `x1 - ε` in `f64` narrows back onto the excluded
+        // edge whenever ε is below the `f32` ulp at that magnitude.
+        let Some((x0, x1)) = f32_interior_range(fragment.x0, fragment.x1) else {
+            return Err(AccessibilityActivationPointError::EmptyFragment);
+        };
+        let Some((y0, y1)) = f32_interior_range(fragment.y0, fragment.y1) else {
+            return Err(AccessibilityActivationPointError::EmptyFragment);
+        };
         let requested = kurbo::Point::new(
             bounds.x0 + bounds.width() * x_fraction,
             bounds.y0 + bounds.height() * y_fraction,
         );
-        // Hit-test space is half-open: a point on the far edge is not inside
-        // the fragment, so clamp just short of it — without ever letting the
-        // upper bound fall below the near edge on a sliver-thin fragment.
         Ok(kurbo::Point::new(
-            requested
-                .x
-                .clamp(fragment.x0, (fragment.x1 - 1e-6).max(fragment.x0)),
-            requested
-                .y
-                .clamp(fragment.y0, (fragment.y1 - 1e-6).max(fragment.y0)),
+            f64::from((requested.x as f32).clamp(x0, x1)),
+            f64::from((requested.y as f32).clamp(y0, y1)),
         ))
     }
 

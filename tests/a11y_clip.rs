@@ -11,7 +11,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use accesskit::{
     Action as AccessibilityAction, ActionRequest as AccessibilityActionRequest, NodeId,
@@ -59,9 +59,17 @@ fn headless(content: AnyViewBuilder<AnyView>, width: u32, height: u32) -> Headle
     )
 }
 
-fn settle(runtime: &mut HeadlessRuntime) {
+/// Pumps one frame per virtual display interval until the runtime reports
+/// quiescence — the cadence `OffscreenApp`'s settle paces at, applied to the
+/// bare runtime. The clock is virtual: `at` advances a frame per pump and
+/// never backwards, because a finite animation, a gliding scroll or an armed
+/// gesture deadline ends only once the frame instant passes its end — a loop
+/// that keeps re-reading `Instant::now()` can burn its whole pump budget
+/// inside that duration on a fast host.
+fn settle(runtime: &mut HeadlessRuntime, at: &mut Instant) {
     for _ in 0..240 {
-        runtime.pump_offscreen();
+        *at += Duration::from_millis(16);
+        runtime.pump_at(false, *at);
         if runtime.is_settled() {
             return;
         }
@@ -85,19 +93,19 @@ fn node_bounds(tree: &accesskit::TreeUpdate, label: &str) -> AccessibilityRect {
         .unwrap_or_else(|| panic!("no bounded accessibility node labelled {label}"))
 }
 
-fn semantic_click(runtime: &mut HeadlessRuntime, node: NodeId) {
+fn semantic_click(runtime: &mut HeadlessRuntime, at: &mut Instant, node: NodeId) {
     runtime.perform_accessibility_action(AccessibilityActionRequest {
         action: AccessibilityAction::Click,
         target_tree: AccessibilityTreeId::ROOT,
         target_node: node,
         data: None,
     });
-    settle(runtime);
+    settle(runtime, at);
 }
 
 /// A pointer tap through the real input path — the down/up pair
 /// `waterui-testing`'s `tap_at` pushes.
-fn pointer_tap(runtime: &mut HeadlessRuntime, x: f64, y: f64) {
+fn pointer_tap(runtime: &mut HeadlessRuntime, at: &mut Instant, x: f64, y: f64) {
     for event in [
         InputEvent::PointerDown {
             id: 1,
@@ -116,7 +124,7 @@ fn pointer_tap(runtime: &mut HeadlessRuntime, x: f64, y: f64) {
     ] {
         runtime.push_input_event(event);
     }
-    settle(runtime);
+    settle(runtime, at);
 }
 
 /// "Reset" sits 170 pt into a 200 pt horizontal rail: the logical rect's
@@ -145,7 +153,8 @@ fn a_button_clipped_by_a_scroll_rail_activates_through_the_clip() {
         240,
         240,
     );
-    settle(&mut runtime);
+    let mut at = Instant::now();
+    settle(&mut runtime, &mut at);
     let tree = runtime
         .accessibility_tree()
         .expect("a mounted window emits a tree");
@@ -171,12 +180,12 @@ fn a_button_clipped_by_a_scroll_rail_activates_through_the_clip() {
         point.x < rail.x1 && point.y < rail.y1 && point.x >= rail.x0 && point.y >= rail.y0,
         "the resolved point lands inside the clip: {point:?} rail={rail:?}"
     );
-    pointer_tap(&mut runtime, point.x, point.y);
+    pointer_tap(&mut runtime, &mut at, point.x, point.y);
     assert_eq!(count.get(), 1, "a tap at the resolved point must fire");
 
     // The semantic Click dispatches the retained action directly — no point
     // is synthesized, so clipping the centre can no longer dead-click it.
-    semantic_click(&mut runtime, reset);
+    semantic_click(&mut runtime, &mut at, reset);
     assert_eq!(count.get(), 2, "a semantic Click fires even while clipped");
 
     // "Ghost" lies past the rail entirely: the query fails loudly rather than
@@ -206,7 +215,8 @@ fn a_list_row_straddling_the_viewport_edge_activates_its_retained_action() {
             let row = item.into_inner();
             let reactions = Rc::clone(&reactions);
             ListItem::new(
-                hstack((text(row_label(row)), spacer())).on_tap(move || reactions.set(row)),
+                hstack((text(row_label(row)), spacer()))
+                    .on_tap(move || reactions.set(reactions.get() + 1)),
             )
         })
         .selection(&binding)
@@ -234,7 +244,8 @@ fn a_list_row_straddling_the_viewport_edge_activates_its_retained_action() {
     // The projection resolves the visible sliver: a real tap lands there and
     // fires the row's gesture.
     let mut runtime = headless(AnyViewBuilder::new(list_view).erase(), 360, 240);
-    settle(&mut runtime);
+    let mut at = Instant::now();
+    settle(&mut runtime, &mut at);
     runtime.push_input_event(InputEvent::Scroll {
         x: 180.0,
         y: 120.0,
@@ -242,7 +253,7 @@ fn a_list_row_straddling_the_viewport_edge_activates_its_retained_action() {
         dy: -SCROLL,
         is_line_delta: false,
     });
-    settle(&mut runtime);
+    settle(&mut runtime, &mut at);
     let tree = runtime
         .accessibility_tree()
         .expect("a mounted window emits a tree");
@@ -250,7 +261,7 @@ fn a_list_row_straddling_the_viewport_edge_activates_its_retained_action() {
     let point = runtime
         .accessibility_activation_point(straddled, 0.5, 0.5)
         .expect("a straddling row resolves a hittable point");
-    pointer_tap(&mut runtime, point.x, point.y);
+    pointer_tap(&mut runtime, &mut at, point.x, point.y);
     assert_eq!(
         reactions.get(),
         1,
@@ -294,7 +305,8 @@ fn a_context_menu_item_in_a_popup_resolves_a_hittable_point() {
         240,
         240,
     );
-    settle(&mut runtime);
+    let mut at = Instant::now();
+    settle(&mut runtime, &mut at);
 
     // A secondary press on the anchor mounts the menu as a popup window.
     for event in [
@@ -315,7 +327,7 @@ fn a_context_menu_item_in_a_popup_resolves_a_hittable_point() {
     ] {
         runtime.push_input_event(event);
     }
-    settle(&mut runtime);
+    settle(&mut runtime, &mut at);
 
     let tree = runtime
         .accessibility_tree()
@@ -331,7 +343,7 @@ fn a_context_menu_item_in_a_popup_resolves_a_hittable_point() {
     let point = runtime
         .accessibility_activation_point(copy, 0.5, 0.5)
         .expect("a popup item resolves a hittable point");
-    pointer_tap(&mut runtime, point.x, point.y);
+    pointer_tap(&mut runtime, &mut at, point.x, point.y);
     assert_eq!(
         fired.get(),
         1,
