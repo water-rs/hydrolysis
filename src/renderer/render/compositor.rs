@@ -19,7 +19,7 @@ const GPU_SURFACE_COMPOSITOR_SHADER: CompiledShader =
 /// Builds a fresh legacy render object for the parallel-encode pool, matching
 /// the main renderer's options (GPU-only, area AA, backend-appropriate init
 /// parallelism).
-fn build_pooled_vello_renderer(
+fn build_pooled_legacy_renderer(
     device: &wgpu::Device,
     backend: wgpu::Backend,
     pipeline_cache: Option<wgpu::PipelineCache>,
@@ -32,7 +32,7 @@ fn build_pooled_vello_renderer(
             pipeline_cache,
         },
     )
-    .expect("hydrolysis renderer: failed to create pooled vello renderer")
+    .expect("hydrolysis renderer: failed to create pooled legacy renderer")
 }
 
 /// The GPU handles a pooled vello renderer encode against.
@@ -54,7 +54,7 @@ struct PoolGpu<'a> {
 /// `vello::Renderer` is `!Sync`, so per-worker ownership (not sharing) is what makes this
 /// sound; the GPU `Queue` is `Send + Sync` and each layer targets an independent texture,
 /// so submission order is irrelevant.
-fn encode_vello_layers_parallel(
+fn encode_legacy_layers_parallel(
     pool: &std::sync::Mutex<Vec<crate::engine::LegacyRenderer>>,
     gpu: PoolGpu<'_>,
     scenes: Vec<(usize, &Recording, PooledLayerTexture)>,
@@ -75,10 +75,10 @@ fn encode_vello_layers_parallel(
     let render_layer = |(index, scene, leased): (usize, &Recording, PooledLayerTexture)| {
         let mut renderer = pool
             .lock()
-            .expect("hydrolysis renderer: vello renderer pool poisoned")
+            .expect("hydrolysis renderer: legacy renderer pool poisoned")
             .pop()
             .unwrap_or_else(|| {
-                build_pooled_vello_renderer(device, backend, pipeline_cache.clone())
+                build_pooled_legacy_renderer(device, backend, pipeline_cache.clone())
             });
 
         renderer
@@ -91,10 +91,10 @@ fn encode_vello_layers_parallel(
                 height,
                 peniko::Color::TRANSPARENT,
             )
-            .expect("hydrolysis renderer: failed to render vello layer scene");
+            .expect("hydrolysis renderer: failed to render legacy layer scene");
 
         pool.lock()
-            .expect("hydrolysis renderer: vello renderer pool poisoned")
+            .expect("hydrolysis renderer: legacy renderer pool poisoned")
             .push(renderer);
 
         (index, leased)
@@ -130,7 +130,7 @@ pub(crate) struct Compositor {
     /// per-layer encoding. `vello::Renderer` is `!Sync` (it holds a `RefCell`), so each
     /// worker checks out its own instance; the `Mutex` only guards the free-list, not the
     /// (parallel) encode itself.
-    pub(crate) vello_renderer_pool: std::sync::Mutex<Vec<crate::engine::LegacyRenderer>>,
+    pub(crate) legacy_renderer_pool: std::sync::Mutex<Vec<crate::engine::LegacyRenderer>>,
     pub(crate) gpu_surface_compositor: Option<GpuSurfaceCompositorState>,
     pub(crate) render_layers: Vec<RenderLayer>,
     pub(crate) active_scene_layers: Vec<ActiveSceneLayer>,
@@ -1324,7 +1324,7 @@ fn write_f32(bytes: &mut [u8], offset: usize, value: f32) {
 impl HydrolysisRenderer {
     #[cfg(hydrolysis_macos_system_webview)]
     pub(crate) fn take_hybrid_composition(&mut self) -> Option<HybridComposition> {
-        self.flush_vello_scene_layer();
+        self.flush_legacy_scene_layer();
         if !self
             .compositor
             .render_layers
@@ -1482,7 +1482,7 @@ impl HydrolysisRenderer {
 
     /// Renders a scene into a pooled target-sized texture, which the caller
     /// must hand back to the pool once the composite pass has sampled it.
-    fn render_vello_layer_to_texture(
+    fn render_legacy_layer_to_texture(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1502,7 +1502,7 @@ impl HydrolysisRenderer {
                 height,
                 peniko::Color::TRANSPARENT,
             )
-            .expect("hydrolysis renderer: failed to render vello layer scene");
+            .expect("hydrolysis renderer: failed to render legacy layer scene");
         leased
     }
 
@@ -1532,7 +1532,7 @@ impl HydrolysisRenderer {
         for _ in 0..active_layers.len() {
             mask_scene.pop_scope();
         }
-        self.render_vello_layer_to_texture(device, queue, &mask_scene, width, height)
+        self.render_legacy_layer_to_texture(device, queue, &mask_scene, width, height)
     }
 
     fn default_compositor_mask_view(
@@ -1709,7 +1709,7 @@ impl HydrolysisRenderer {
         );
 
         let _render_span = tracing::debug_span!("hydrolysis_render_scene").entered();
-        self.flush_vello_scene_layer();
+        self.flush_legacy_scene_layer();
         #[cfg(feature = "frame-profile")]
         self.gpu_profile_mark(target.device, target.queue, 0);
         self.frame_direct_gpu_surfaces = 0;
@@ -1840,7 +1840,7 @@ impl HydrolysisRenderer {
         let mut encoded_vello: Vec<Option<PooledLayerTexture>> =
             (0..render_layers.len()).map(|_| None).collect();
         {
-            let vello_indices: Vec<usize> = render_layers
+            let legacy_indices: Vec<usize> = render_layers
                 .iter()
                 .enumerate()
                 .filter_map(|(index, layer)| match layer {
@@ -1852,8 +1852,8 @@ impl HydrolysisRenderer {
                     }
                 })
                 .collect();
-            if vello_indices.len() > 1 {
-                let vello_scenes: Vec<(usize, &Recording, PooledLayerTexture)> = vello_indices
+            if legacy_indices.len() > 1 {
+                let legacy_scenes: Vec<(usize, &Recording, PooledLayerTexture)> = legacy_indices
                     .iter()
                     .map(|&index| {
                         let leased = self.compositor.acquire_layer_texture(
@@ -1862,7 +1862,7 @@ impl HydrolysisRenderer {
                             target.height,
                         );
                         let RenderLayer::Vello(scene) = &render_layers[index] else {
-                            panic!("hydrolysis renderer: vello layer index changed type");
+                            panic!("hydrolysis renderer: legacy layer index changed type");
                         };
                         (index, scene, leased)
                     })
@@ -1870,15 +1870,15 @@ impl HydrolysisRenderer {
                 // `self.pipeline_cache()` borrows all of `self`; hoist it so
                 // the counter borrow below stays field-disjoint.
                 let pipeline_cache = self.pipeline_cache();
-                for (index, leased) in encode_vello_layers_parallel(
-                    &self.compositor.vello_renderer_pool,
+                for (index, leased) in encode_legacy_layers_parallel(
+                    &self.compositor.legacy_renderer_pool,
                     PoolGpu {
                         device: target.device,
                         queue: target.queue,
                         backend: target.adapter.get_info().backend,
                         pipeline_cache,
                     },
-                    vello_scenes,
+                    legacy_scenes,
                     target.width,
                     target.height,
                     // Direct `core` field path: `self.state` would resolve
@@ -1903,7 +1903,7 @@ impl HydrolysisRenderer {
                     );
                     let leased = match encoded_vello[layer_index].take() {
                         Some(leased) => leased,
-                        None => self.render_vello_layer_to_texture(
+                        None => self.render_legacy_layer_to_texture(
                             target.device,
                             target.queue,
                             scene,
@@ -1928,7 +1928,7 @@ impl HydrolysisRenderer {
                 // user-facing, main-thread contract (`!Send` setup/render futures,
                 // `&mut Environment`), so parallelizing this loop would force
                 // `Send` onto every user renderer. Vello layers get their
-                // parallelism in `encode_vello_layers_parallel` instead.
+                // parallelism in `encode_legacy_layers_parallel` instead.
                 RenderLayer::GpuSurface(layer) => {
                     tracing::trace!(
                         layer_index,

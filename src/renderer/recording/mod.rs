@@ -11,6 +11,12 @@
 //! are deleted: call sites become real Cherenkov recording or retained-layer
 //! operations. No `type Recording = cherenkov::Recorder` alias remains.
 
-mod vello;
+#[path = "vello.rs"]
+mod legacy;
 
-pub use vello::{Recording, VelloDrawContext};
+pub use legacy::{Recording, VelloDrawContext};
+
+// Encoding types tests inspect through `legacy_scene()` — vello_encoding
+// itself is only named inside `legacy` (the `vello.rs` file).
+#[cfg(test)]
+pub(crate) use legacy::{PathTag, Resolver, Transform};
