@@ -672,14 +672,13 @@ impl HydrolysisRenderer {
                 };
                 claimed_naming_node =
                     renderer.register_accessibility_node(node, bounds, env, action_target);
-            } else if !disabled
-                && renderer.accessibility_scope_is_claimed(env)
-                && let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
-            {
-                // The scope's claim already names this view — registering would
-                // emit a silenced duplicate — so the tap delegates its
-                // activation to the claiming node, which drains it when its
-                // subtree has been walked.
+            } else if !disabled && let Some(scope) = env.get::<ScopedAccessibilitySemantics>() {
+                // The scope names this view's representative — registering a
+                // second node would emit a silenced duplicate — so the tap
+                // delegates its activation to the scope instead, which the
+                // representative drains when its subtree has been walked. An
+                // unclaimed scope (a `List` row's, whose node the row
+                // registers itself) receives the same donation.
                 scope.delegate_activation(Self::tap_accessibility_activation(env, &effect.action));
             }
         }
@@ -836,10 +835,10 @@ impl HydrolysisRenderer {
             };
             return renderer.register_accessibility_node_semantic(node, env, action_target);
         }
-        if !disabled
-            && renderer.accessibility_scope_is_claimed(env)
-            && let Some(scope) = env.get::<ScopedAccessibilitySemantics>()
-        {
+        if !disabled && let Some(scope) = env.get::<ScopedAccessibilitySemantics>() {
+            // Claimed or not, the scope's representative drains the donation
+            // when its subtree ends — the same contract the rendered arm of
+            // `apply_gesture_observer` holds.
             scope.delegate_activation(Self::tap_accessibility_activation(env, &effect.action));
         }
         None

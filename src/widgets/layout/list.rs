@@ -5,8 +5,8 @@ use std::rc::Rc;
 use crate::gesture::GestureTarget;
 #[cfg(feature = "accessibility")]
 use crate::renderer::{
-    AccessibilityActionTarget, accessibility_container_child_environment,
-    hoist_accessibility_metadata,
+    AccessibilityActionTarget, ScopedAccessibilitySemantics,
+    accessibility_container_child_environment, hoist_accessibility_metadata,
 };
 use crate::renderer::{
     HydroNativeView, HydroState, RenderContext, VisibleSubviewCache, WidgetRenderContext,
@@ -1025,8 +1025,13 @@ pub(crate) fn list_accessibility(
                     row_node_id,
                 );
                 let deletable = editing && renderer.read_signal(&item.deletable);
-                let subtree_env = accessibility_container_child_environment(&row_a11y_env)
+                let mut subtree_env = accessibility_container_child_environment(&row_a11y_env)
                     .unwrap_or_else(|| row_a11y_env.clone());
+                // Every row is an activation scope of its own: a tap gesture
+                // the row's content silences delegates into the scope —
+                // claimed or not — and the row node drains it as the subtree
+                // ends, so the row's `Click` dispatches the retained action.
+                subtree_env.insert(ScopedAccessibilitySemantics::new());
                 if ctx.is_none() {
                     // Emit the row content's own semantics under the row's node:
                     // every text, control and image in the row becomes a child
@@ -1041,6 +1046,7 @@ pub(crate) fn list_accessibility(
                         subview.emit_accessibility(renderer, &subtree_env);
                     }
                     renderer.pop_accessibility_parent();
+                    renderer.drain_claim_scope(row_node_id, &subtree_env);
                 }
                 // Edit mode's delete and reorder controls are pointer-only hit
                 // regions in the draw pass — emit their nodes too, or the tree
@@ -1465,8 +1471,16 @@ pub(crate) fn render_list_parts(
             (item, scoped)
         };
         #[cfg(feature = "accessibility")]
-        let subtree_env =
-            accessibility_container_child_environment(&row_env).unwrap_or_else(|| row_env.clone());
+        let subtree_env = {
+            let mut subtree_env = accessibility_container_child_environment(&row_env)
+                .unwrap_or_else(|| row_env.clone());
+            // The row's own activation scope: silenced taps delegate into it
+            // and the row node drains them below, so a semantic `Click` on
+            // the row dispatches the retained action rather than a
+            // synthesized press.
+            subtree_env.insert(ScopedAccessibilitySemantics::new());
+            subtree_env
+        };
         #[cfg(not(feature = "accessibility"))]
         let subtree_env = row_env.clone();
         // Interaction slots per row: 0 and 1 are the reorder handle's up/down
@@ -1821,6 +1835,10 @@ pub(crate) fn render_list_parts(
             #[cfg(feature = "accessibility")]
             if row_parented {
                 ctx.renderer_mut().pop_accessibility_parent();
+                ctx.renderer_mut().drain_claim_scope(
+                    row_node_id.expect("a parented list row always has a registered node"),
+                    &subtree_env,
+                );
             } else {
                 ctx.renderer_mut().pop_accessibility_suppression();
             }
