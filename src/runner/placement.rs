@@ -493,12 +493,7 @@ fn x11_visible_frame(event_loop: &ActiveEventLoop, spec: &MonitorSpec) -> Option
         .reply()
         .expect("hydrolysis runner: X11 GetProperty(_NET_CURRENT_DESKTOP) reply failed");
     // A WM that publishes no `_NET_CURRENT_DESKTOP` has no work areas.
-    let index_bytes: [u8; 4] = desktop
-        .value
-        .get(0..4)?
-        .try_into()
-        .expect("slice is four bytes");
-    let index = u32::from_le_bytes(index_bytes) as usize;
+    let index = u32::from_le_bytes(*desktop.value.first_chunk::<4>()?) as usize;
     let reply = conn
         .get_property(false, display.root, workarea, AtomEnum::CARDINAL, 0, 1024)
         .expect("hydrolysis runner: X11 GetProperty(_NET_WORKAREA) request failed")
@@ -506,12 +501,12 @@ fn x11_visible_frame(event_loop: &ActiveEventLoop, spec: &MonitorSpec) -> Option
         .expect("hydrolysis runner: X11 GetProperty(_NET_WORKAREA) reply failed");
     // `_NET_WORKAREA` is a flat CARD32 list, four entries per desktop.
     let base = index * 4;
-    let area: Vec<u32> = reply
-        .value
-        .chunks_exact(4)
+    let (cards, _) = reply.value.as_chunks::<4>();
+    let area: Vec<u32> = cards
+        .iter()
         .skip(base)
         .take(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk is four bytes")))
+        .map(|card| u32::from_le_bytes(*card))
         .collect();
     let &[wx, wy, ww, wh] = area.as_slice() else {
         return None;
@@ -863,9 +858,9 @@ fn apply_windows_noactivate(native_window: &NativeWindow, never: bool) {
     unsafe {
         let mut extended = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         if never {
-            extended |= WS_EX_NOACTIVATE as _;
+            extended |= WS_EX_NOACTIVATE as isize;
         } else {
-            extended &= !(WS_EX_NOACTIVATE as _);
+            extended &= !(WS_EX_NOACTIVATE as isize);
         }
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, extended);
     }
