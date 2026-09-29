@@ -187,7 +187,9 @@
       },
       "set_window_viewport": {
         "vello::kurbo::Rect": 1,
-        "vello::kurbo::Affine": 1
+        "vello::kurbo::Affine": 1,
+        "vello_renderer": 1,
+        "vello::BumpBufferSizes::for_target": 1
       },
       "window_viewport": {
         "vello::kurbo::Rect": 1
@@ -834,11 +836,37 @@
         "vello_init_threads": 1
       },
       "encode_vello_layers_parallel": {
-        "vello::Renderer": 1,
+        "vello::Renderer": 2,
         "vello::Scene": 2,
-        "vello::RenderParams": 1,
+        "vello::BumpReadback": 1,
+        "vello_layer_render_params": 1
+      },
+      "vello_layer_render_params": {
+        "vello_layer_render_params": 1,
+        "vello::RenderParams": 2,
         "vello::peniko::Color::TRANSPARENT": 1,
         "vello::AaConfig::Area": 1
+      },
+      "DeferredVelloSource": {
+        "vello::Scene": 1
+      },
+      "PendingVelloRender": {
+        "vello::BumpReadback": 1
+      },
+      "DeferredVelloFrame": {
+        "vello::Renderer": 1
+      },
+      "verify_ready": {
+        "vello::BumpReadback::is_ready": 2
+      },
+      "build_active_layers_mask_scene": {
+        "vello::Scene": 1,
+        "vello::Scene::new": 1,
+        "vello::peniko::Fill::NonZero": 1,
+        "vello::kurbo::Affine::IDENTITY": 1,
+        "vello::peniko::Color::WHITE": 1,
+        "vello::kurbo::Rect::new": 1,
+        "vello_backend::pop_scene_layer": 1
       },
       "Compositor": {
         "vello_renderer_pool": 1,
@@ -917,27 +945,29 @@
       },
       "render_vello_layer_to_texture": {
         "vello::Scene": 1,
-        "vello::RenderParams": 1,
-        "vello::peniko::Color::TRANSPARENT": 1,
-        "vello::AaConfig::Area": 1,
+        "vello::BumpReadback": 1,
+        "vello_layer_render_params": 1,
         "vello_renderer": 1
       },
       "render_active_layers_mask_to_texture": {
-        "vello::Scene::new": 1,
-        "vello::peniko::Fill::NonZero": 1,
-        "vello::kurbo::Affine::IDENTITY": 1,
-        "vello::peniko::Color::WHITE": 1,
-        "vello::kurbo::Rect::new": 1,
-        "vello_backend::pop_scene_layer": 1
+        "vello::BumpReadback": 1
+      },
+      "verify_deferred_vello": {
+        "vello_layer_render_params": 1,
+        "vello_renderer_pool": 1,
+        "vello_renderer": 4
       },
       "clear_target_surface": {
         "vello::peniko::Color": 1
       },
       "render_scene_to_surface_with_alpha_mode": {
+        "vello::Renderer": 2,
+        "vello::BumpReadback": 1,
         "vello_indices": 3,
         "vello_scenes": 2,
         "vello::Scene": 1,
-        "vello_renderer_pool": 1
+        "vello_renderer_pool": 1,
+        "vello::BumpReadback::submission_index": 1
       }
     },
     "src/renderer/render/measurement.rs": {
