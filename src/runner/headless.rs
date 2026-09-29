@@ -57,8 +57,8 @@ impl HeadlessPlatformWindow {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PlatformWindow for HeadlessPlatformWindow {
-    fn surface(&mut self) -> &mut dyn crate::platform::SurfaceProvider {
-        self.inner.surface()
+    fn content_size(&self) -> (u32, u32) {
+        self.inner.content_size()
     }
 
     fn apply_properties(&mut self, window: &Window) {
@@ -95,6 +95,13 @@ impl PlatformWindow for HeadlessPlatformWindow {
 
     fn set_cursor_style(&mut self, style: waterui::cursor::CursorStyle) {
         self.inner.set_cursor_style(style);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::platform::GpuSurfaceWindow for HeadlessPlatformWindow {
+    fn surface(&mut self) -> &mut dyn crate::platform::SurfaceProvider {
+        crate::platform::GpuSurfaceWindow::surface(&mut self.inner)
     }
 }
 
@@ -828,7 +835,7 @@ impl HeadlessRuntime {
                 ));
             }
         }
-        // A pump must observe the frame it rendered — vello verification that
+        // A pump must observe the frame it rendered — legacy verification that
         // deferred by an interval is drained now, not by whatever renders
         // next. The settle passes are drain-only: damage a render left
         // pending is the next pump's work (one render per pump, as on the
@@ -844,7 +851,7 @@ impl HeadlessRuntime {
             render_result = Some(settled);
         }
         self.runtime.queued_deferred_flush = false;
-        if self.runtime.renderer.has_deferred_vello_frame() {
+        if self.runtime.renderer.has_deferred_legacy_frame() {
             render_result = Some(flush_deferred_window(
                 &mut self.runtime,
                 &self.env,
@@ -867,7 +874,7 @@ impl HeadlessRuntime {
                 }
             }
             popup.queued_deferred_flush = false;
-            if popup.renderer.has_deferred_vello_frame() {
+            if popup.renderer.has_deferred_legacy_frame() {
                 let settled = flush_deferred_window(popup, &self.env, capture);
                 if let (Some(popup_snapshot), Some(entry)) = (settled.snapshot, captured.as_mut()) {
                     entry.1 =

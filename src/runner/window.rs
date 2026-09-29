@@ -2,6 +2,7 @@
 //! scene rebuild/refresh/render phases, and input-event dispatch.
 
 use super::*;
+use crate::platform::GpuSurfaceWindow;
 
 /// The work scheduled for the next pump of a window.
 ///
@@ -55,14 +56,14 @@ pub(super) struct RuntimeWindow<P: PlatformWindow> {
     )>,
     /// A frame left a verified-but-unpresented vello composite stashed; the
     /// next wake should drain it (see
-    /// [`HydrolysisRenderer::flush_deferred_vello_frame_to_surface`]) unless
+    /// [`HydrolysisRenderer::flush_deferred_legacy_frame_to_surface`]) unless
     /// real scene work arrived first.
     pub(super) queued_deferred_flush: bool,
     /// The runner's wake for a resolved deferred stash — fires once per
     /// registered watch through the runner's own event path, never touching
     /// the GPU from the main thread.
     #[cfg(feature = "winit")]
-    pub(super) deferred_vello_wake: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
+    pub(super) deferred_legacy_wake: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
     /// The shared per-device poll driver carrying outstanding watches, set
     /// by runners whose platform can report GPU completion. `None` where
     /// there is no completion source (headless, web): those drive the same
@@ -81,7 +82,11 @@ pub(super) struct RuntimeWindow<P: PlatformWindow> {
     pub(super) deferred_wake_gen: u64,
 }
 
-impl<P: PlatformWindow> RuntimeWindow<P> {
+// `RuntimeWindow` is generic over the host-services contract; the GPU
+// painter's presentation attachment is the `GpuSurfaceWindow` refinement
+// below, so the construction site of a GPU-pumped window is a
+// compile-time painter boundary.
+impl<P: GpuSurfaceWindow> RuntimeWindow<P> {
     pub(super) fn new(
         window: Window,
         platform: P,
@@ -102,14 +107,16 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
             applied_size_limits: None,
             queued_deferred_flush: false,
             #[cfg(feature = "winit")]
-            deferred_vello_wake: None,
+            deferred_legacy_wake: None,
             #[cfg(feature = "winit")]
             deferred_poll_driver: None,
             deferred_stash_gen: 0,
             deferred_wake_gen: 0,
         }
     }
+}
 
+impl<P: PlatformWindow> RuntimeWindow<P> {
     /// Schedules a refresh of the retained window tree on the next pump (the first
     /// pump builds the tree).
     pub(super) fn request_refresh(&mut self) {
@@ -401,7 +408,7 @@ pub(crate) fn window_requires_transparency(window: &Window, env: &Environment) -
 
 /// Runs one frame and reports whether it was presented to the surface — an
 /// idle frame, or one whose surface had to be reconfigured, is not.
-pub(super) fn render_window<P: PlatformWindow>(
+pub(super) fn render_window<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     drain_local_tasks: &mut dyn FnMut() -> bool,
@@ -417,7 +424,7 @@ pub(super) fn render_window<P: PlatformWindow>(
             || runtime.renderer.has_patch_request()
             || runtime.renderer.take_redraw_request();
         if !damage_pending {
-            if !runtime.renderer.has_deferred_vello_frame() {
+            if !runtime.renderer.has_deferred_legacy_frame() {
                 return false;
             }
             // The wake arrives once every submission queued at stash time
@@ -427,7 +434,7 @@ pub(super) fn render_window<P: PlatformWindow>(
             // wake that arrived while tickets still read unresolved means
             // the device poll errored — drain anyway and let the verify
             // report the lost device.
-            if runtime.renderer.deferred_vello_frame_resolved()
+            if runtime.renderer.deferred_legacy_frame_resolved()
                 || runtime.deferred_wake_gen >= runtime.deferred_stash_gen
             {
                 let rendered = flush_deferred_window(runtime, env, false)
@@ -459,7 +466,7 @@ pub(super) fn render_window<P: PlatformWindow>(
 /// The drain-only settle pass: verifies and presents the frame the previous
 /// render deferred, without pumping the scene. Surfaces with nothing stashed
 /// produce an empty frame — the caller only reaches this with a queued flush.
-pub(super) fn flush_deferred_window<P: PlatformWindow>(
+pub(super) fn flush_deferred_window<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     capture_snapshot: bool,
@@ -471,7 +478,7 @@ pub(super) fn flush_deferred_window<P: PlatformWindow>(
         clear_color,
         capture_snapshot,
         |renderer, target, premultiply_alpha| {
-            renderer.flush_deferred_vello_frame_to_surface(target, premultiply_alpha);
+            renderer.flush_deferred_legacy_frame_to_surface(target, premultiply_alpha);
         },
     );
     let rendered = match render_result {
@@ -557,7 +564,7 @@ fn refresh_window_scene<P: PlatformWindow>(
 ) {
     let refresh_started_at = Instant::now();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height) = runtime.platform.surface().size();
+    let (width, height) = runtime.platform.content_size();
     let bounds = create_bounds(width, height, scale_factor);
     let transform = kurbo::Affine::scale(scale_factor);
     runtime
@@ -627,7 +634,7 @@ fn build_window_scene<P: PlatformWindow>(
 ///
 /// Returns whether the tree was built this pump, the number of build passes (0 or 1,
 /// kept for frame diagnostics), and the phase timing breakdown.
-pub(super) fn pump_window_scene<P: PlatformWindow>(
+pub(super) fn pump_window_scene<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     drain_local_tasks: &mut dyn FnMut() -> bool,
@@ -725,7 +732,7 @@ pub(super) struct ScenePumpOutcome {
 }
 
 #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "winit")))]
-pub(super) fn pump_window_semantics<P: PlatformWindow>(
+pub(super) fn pump_window_semantics<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
@@ -756,7 +763,7 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
     // pump below builds it first.
     if runtime.renderer.has_render_tree() {
         let scale_factor = runtime.platform.scale_factor();
-        let (width, height) = runtime.platform.surface().size();
+        let (width, height) = runtime.platform.content_size();
         let bounds = create_bounds(width, height, scale_factor);
         let transform = kurbo::Affine::scale(scale_factor);
         let flushed =
@@ -879,7 +886,7 @@ fn render_to_surface(
     })
 }
 
-pub(super) fn render_window_with_capture<P: PlatformWindow>(
+pub(super) fn render_window_with_capture<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     capture_snapshot: bool,
@@ -916,7 +923,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
 
         let root_transform = kurbo::Affine::scale(runtime.platform.scale_factor());
         #[cfg(hydrolysis_macos_system_webview)]
-        let (width, height) = runtime.platform.surface().size();
+        let (width, height) = runtime.platform.content_size();
         // The redraw-only filter refresh exists for frames that present without
         // re-flushing the tree (an animated filter while the scene is idle). Any
         // flush already ran every filter through its node, so refreshing again
@@ -1059,7 +1066,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                             measurement_cache_hits,
                             measurement_cache_misses,
                             scene_layers: layer_stats.composited_scene_layers,
-                            vello_scene_layers: layer_stats.vello_scene_layers,
+                            vello_scene_layers: layer_stats.legacy_scene_layers,
                             gpu_surface_layers: layer_stats.gpu_surface_layers,
                             direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
                             clip_layers,
@@ -1110,7 +1117,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 measurement_cache_hits,
                 measurement_cache_misses,
                 scene_layers: layer_stats.composited_scene_layers,
-                vello_scene_layers: layer_stats.vello_scene_layers,
+                vello_scene_layers: layer_stats.legacy_scene_layers,
                 gpu_surface_layers: layer_stats.gpu_surface_layers,
                 direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
                 clip_layers,
@@ -1160,8 +1167,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         runtime.platform.request_redraw();
         runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }
-    if runtime.renderer.has_deferred_vello_frame() {
-        // The frame deferred its vello verification — arm the settle and
+    if runtime.renderer.has_deferred_legacy_frame() {
+        // The frame deferred its legacy verification — arm the settle and
         // park a GPU-completion watch on the poll driver. Its wake fires
         // through the runner's user-event path the moment the stash's
         // submissions retire; the verified composite is then presented
@@ -1172,10 +1179,10 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         let stash_gen = runtime.deferred_stash_gen;
         #[cfg(feature = "winit")]
         if let (Some(driver), Some(wake)) =
-            (&runtime.deferred_poll_driver, &runtime.deferred_vello_wake)
+            (&runtime.deferred_poll_driver, &runtime.deferred_legacy_wake)
         {
             let wake = wake.clone();
-            let submissions = runtime.renderer.deferred_vello_watch_submissions();
+            let submissions = runtime.renderer.deferred_legacy_watch_submissions();
             if !driver.watch(submissions, move || wake(stash_gen)) {
                 // The driver thread is gone — treat it like a broken poll:
                 // the armed settle drains and lets the verify surface the
@@ -1217,7 +1224,7 @@ pub(super) fn physical_to_logical_dimension(value: u32, scale_factor: f64) -> f3
     (f64::from(value) / scale_factor) as f32
 }
 
-pub(super) fn handle_input_events<P: PlatformWindow>(
+pub(super) fn handle_input_events<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
@@ -1249,7 +1256,7 @@ pub(super) fn runtime_window_origin<P: PlatformWindow>(
 /// The refreshed registrations describe a frame the user has not seen yet, so
 /// the caller only runs this for scroll input — pointer events must keep
 /// resolving against the presented frame's geometry.
-fn refresh_pending_input_geometry<P: PlatformWindow>(
+fn refresh_pending_input_geometry<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) {
@@ -1297,7 +1304,7 @@ pub(super) fn handle_input_events_with<P, F>(
     input_env: F,
 ) -> bool
 where
-    P: PlatformWindow,
+    P: GpuSurfaceWindow,
     F: Fn(&RuntimeWindow<P>, &Environment) -> Environment,
 {
     let mut should_close = runtime.window.state.snapshot() == waterui::window::WindowState::Closed;
@@ -1741,6 +1748,7 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
         .platform
         .sync_text_input_state(runtime.renderer.focused_text_input_state());
     if runtime.renderer.poll_gpu_surface_redraw_handles() {
+        tracing::debug!("wake cause: gpu surface redraw handle");
         runtime.platform.request_redraw();
         runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }
@@ -1749,20 +1757,26 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     // `HydrolysisWindowOrigin`, the same extension pointer dispatch gets.
     let gesture_env = env.extending(runtime_window_origin(runtime));
     if runtime.renderer.handle_gesture_tick(now, &gesture_env) {
+        tracing::debug!("wake cause: gesture tick fired");
         runtime.request_refresh();
     }
     // Smoothed wheel scrolling eases offsets toward their targets per frame;
     // while any scroll view is still gliding, keep running full frames on the
     // redraw cadence.
     if runtime.renderer.tick_smooth_scrolls(now) {
+        tracing::debug!("wake cause: smooth scroll still gliding");
         runtime.request_refresh();
     }
     let animations_active = runtime.renderer.advance_animations();
+    if animations_active {
+        tracing::debug!("wake cause: animations active");
+    }
     schedule_animation_update(runtime, animations_active);
     // A pending fine-grained reactive patch composites through the window-refresh path,
     // which re-dispatches only the dirty Dynamic nodes. If there is no retained window
     // frame yet (or a structural rebuild is already pending), fall back to a rebuild.
     if runtime.renderer.take_patch_request() {
+        tracing::debug!("wake cause: reactive patch request");
         // The refresh re-flushes the retained tree, which applies the pending
         // Dynamic patch to only the affected subtree and relays out if it changed size.
         runtime.request_refresh();
@@ -1770,15 +1784,21 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
         runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }
     if runtime.renderer.advance_text_caret_animation(now) {
+        tracing::debug!("wake cause: text caret animation");
         runtime.renderer.request_redraw();
         runtime.platform.request_redraw();
         runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }
     if runtime.renderer.take_rebuild_request() {
+        tracing::debug!("wake cause: rebuild request");
         runtime.request_refresh();
     }
     let next_deadline = runtime.renderer.next_gesture_deadline();
+    if next_deadline.is_some() {
+        tracing::debug!(?next_deadline, "wake armed: engine deadline");
+    }
     if runtime.mode.is_pending() {
+        tracing::debug!("wake cause: frame mode still pending");
         runtime.platform.request_redraw();
         runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }

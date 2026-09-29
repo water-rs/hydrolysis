@@ -54,6 +54,7 @@ mod perf_scroll;
 mod popup_frame;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod popup_windows;
+mod render_identity;
 mod retained_scene;
 mod scene_offer;
 #[cfg(feature = "accessibility")]
@@ -97,7 +98,6 @@ use waterui_navigation::NavigationView;
 use waterui_navigation::tab::{Tab, TabsLayout};
 
 use crate::engine::{Brush, DrawContext, WidgetTheme};
-use crate::platform::PlatformWindow as _;
 use waterui_backend_core::widget::{
     BadgeMetrics, ButtonMetrics, DividerMetrics, InputFieldMetrics, InteractionFocusBinding,
     InteractionMotion, ListMetrics, ModalInteraction, NavigationMetrics, NavigationMotion,
