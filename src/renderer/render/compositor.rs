@@ -63,6 +63,7 @@ fn encode_vello_layers_parallel(
     scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)>,
     width: u32,
     height: u32,
+    counters: &mut MigrationCounters,
 ) -> Vec<(
     usize,
     vello::Renderer,
@@ -106,13 +107,16 @@ fn encode_vello_layers_parallel(
     // renderer pool. GL encodes the layers in order; every other backend
     // encodes them across cores.
     #[cfg(not(target_arch = "wasm32"))]
-    let rendered = if backend == wgpu::Backend::Gl {
+    let rendered: Vec<_> = if backend == wgpu::Backend::Gl {
         scenes.into_iter().map(render_layer).collect()
     } else {
         scenes.into_par_iter().map(render_layer).collect()
     };
     #[cfg(target_arch = "wasm32")]
-    let rendered = scenes.into_iter().map(render_layer).collect();
+    let rendered: Vec<_> = scenes.into_iter().map(render_layer).collect();
+    // Each rendered layer was one `render_to_texture` submission, counted
+    // once here because the workers run in parallel.
+    counters.gpu_submissions += u64::try_from(rendered.len()).unwrap_or(u64::MAX);
     rendered
 }
 
@@ -1614,6 +1618,7 @@ impl HydrolysisRenderer {
     ) -> (PooledLayerTexture, Option<vello::BumpReadback>) {
         let leased = self.compositor.acquire_layer_texture(device, width, height);
         let params = vello_layer_render_params(width, height);
+        self.state.counters.gpu_submissions += 1;
         let readback = self
             .vello_renderer
             .render_to_texture(device, queue, scene, &leased.view, &params)
@@ -1683,6 +1688,7 @@ impl HydrolysisRenderer {
             let DeferredVelloSource::Layer(scene) = &pending.source else {
                 unreachable!("hydrolysis renderer: pooled vello pending is not a layer")
             };
+            self.state.counters.gpu_submissions += 1;
             pending.readback = renderer
                 .render_to_texture(device, queue, scene.as_ref(), &pending.view, &params)
                 .expect("hydrolysis renderer: failed to re-render vello layer scene");
@@ -1744,6 +1750,7 @@ impl HydrolysisRenderer {
         for position in overflowed {
             let pending = &mut main[owners[position]];
             let view = pending.view.clone();
+            self.state.counters.gpu_submissions += 1;
             pending.readback = match &pending.source {
                 DeferredVelloSource::Layer(scene) => self.vello_renderer.render_to_texture(
                     device,
@@ -1945,7 +1952,7 @@ impl HydrolysisRenderer {
     }
 
     fn clear_target_surface(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         target: &wgpu::TextureView,
@@ -1973,6 +1980,7 @@ impl HydrolysisRenderer {
             multiview_mask: None,
         });
         drop(_pass);
+        self.state.counters.gpu_submissions += 1;
         queue.submit(std::iter::once(encoder.finish()));
     }
 
@@ -2071,6 +2079,7 @@ impl HydrolysisRenderer {
             pass.draw(0..6, 0..1);
         }
         drop(pass);
+        self.state.counters.gpu_submissions += 1;
         target.queue.submit(std::iter::once(encoder.finish()));
     }
 
@@ -2278,17 +2287,24 @@ impl HydrolysisRenderer {
                         (index, scene, leased)
                     })
                     .collect();
+                // `self.pipeline_cache()` borrows all of `self`; hoist it so
+                // the counter borrow below stays field-disjoint.
+                let pipeline_cache = self.pipeline_cache();
                 for (index, renderer, leased, readback) in encode_vello_layers_parallel(
                     &self.compositor.vello_renderer_pool,
                     PoolGpu {
                         device: target.device,
                         queue: target.queue,
                         backend: target.adapter.get_info().backend,
-                        pipeline_cache: self.pipeline_cache(),
+                        pipeline_cache,
                     },
                     vello_scenes,
                     target.width,
                     target.height,
+                    // Direct `core` field path: `self.state` would resolve
+                    // through `DerefMut` and mutably borrow all of `*self`,
+                    // colliding with the pool borrow above.
+                    &mut self.core.state.counters,
                 ) {
                     encoded_vello[index] = Some((renderer, leased, readback));
                 }
