@@ -16,19 +16,19 @@ use waterui_graphics::input::SurfaceInputEvent;
 const GPU_SURFACE_COMPOSITOR_SHADER: CompiledShader =
     include!(concat!(env!("OUT_DIR"), "/gpu_surface_compositor.rs"));
 
-/// Builds a fresh `vello::Renderer` for the parallel-encode pool, matching the main
-/// renderer's options (GPU-only, area AA, backend-appropriate init parallelism).
+/// Builds a fresh legacy render object for the parallel-encode pool, matching
+/// the main renderer's options (GPU-only, area AA, backend-appropriate init
+/// parallelism).
 fn build_pooled_vello_renderer(
     device: &wgpu::Device,
     backend: wgpu::Backend,
     pipeline_cache: Option<wgpu::PipelineCache>,
-) -> vello::Renderer {
-    vello::Renderer::new(
+) -> crate::engine::LegacyRenderer {
+    crate::engine::LegacyRenderer::new(
         device,
-        vello::RendererOptions {
+        crate::engine::LegacyRendererOptions {
             use_cpu: false,
-            antialiasing_support: vello::AaSupport::area_only(),
-            num_init_threads: crate::renderer::vello_init_threads(backend),
+            num_init_threads: crate::engine::legacy_init_threads(backend),
             pipeline_cache,
         },
     )
@@ -55,9 +55,9 @@ struct PoolGpu<'a> {
 /// sound; the GPU `Queue` is `Send + Sync` and each layer targets an independent texture,
 /// so submission order is irrelevant.
 fn encode_vello_layers_parallel(
-    pool: &std::sync::Mutex<Vec<vello::Renderer>>,
+    pool: &std::sync::Mutex<Vec<crate::engine::LegacyRenderer>>,
     gpu: PoolGpu<'_>,
-    scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)>,
+    scenes: Vec<(usize, &Recording, PooledLayerTexture)>,
     width: u32,
     height: u32,
     counters: &mut MigrationCounters,
@@ -72,7 +72,7 @@ fn encode_vello_layers_parallel(
         pipeline_cache,
     } = gpu;
 
-    let render_layer = |(index, scene, leased): (usize, &vello::Scene, PooledLayerTexture)| {
+    let render_layer = |(index, scene, leased): (usize, &Recording, PooledLayerTexture)| {
         let mut renderer = pool
             .lock()
             .expect("hydrolysis renderer: vello renderer pool poisoned")
@@ -81,14 +81,16 @@ fn encode_vello_layers_parallel(
                 build_pooled_vello_renderer(device, backend, pipeline_cache.clone())
             });
 
-        let params = vello::RenderParams {
-            base_color: peniko::Color::TRANSPARENT,
-            width,
-            height,
-            antialiasing_method: vello::AaConfig::Area,
-        };
         renderer
-            .render_to_texture(device, queue, scene, &leased.view, &params)
+            .render_recording(
+                device,
+                queue,
+                scene,
+                &leased.view,
+                width,
+                height,
+                peniko::Color::TRANSPARENT,
+            )
             .expect("hydrolysis renderer: failed to render vello layer scene");
 
         pool.lock()
@@ -128,7 +130,7 @@ pub(crate) struct Compositor {
     /// per-layer encoding. `vello::Renderer` is `!Sync` (it holds a `RefCell`), so each
     /// worker checks out its own instance; the `Mutex` only guards the free-list, not the
     /// (parallel) encode itself.
-    pub(crate) vello_renderer_pool: std::sync::Mutex<Vec<vello::Renderer>>,
+    pub(crate) vello_renderer_pool: std::sync::Mutex<Vec<crate::engine::LegacyRenderer>>,
     pub(crate) gpu_surface_compositor: Option<GpuSurfaceCompositorState>,
     pub(crate) render_layers: Vec<RenderLayer>,
     pub(crate) active_scene_layers: Vec<ActiveSceneLayer>,
@@ -351,7 +353,7 @@ pub(crate) struct NativeViewLayer {
 }
 
 pub(crate) enum RenderLayer {
-    Vello(vello::Scene),
+    Vello(Recording),
     GpuSurface(GpuSurfaceLayer),
     #[cfg(hydrolysis_macos_system_webview)]
     NativeView(NativeViewLayer),
@@ -366,7 +368,7 @@ pub(crate) struct HybridRenderSegment {
 pub(crate) struct HybridComposition {
     pub(crate) segments: Vec<HybridRenderSegment>,
     pub(crate) native_views: Vec<NativeViewLayer>,
-    pub(crate) transient_scene: Option<vello::Scene>,
+    pub(crate) transient_scene: Option<Recording>,
 }
 
 pub(crate) struct PreparedGpuSurfaceLayer {
@@ -469,10 +471,10 @@ struct ReadyLayerComposite {
 }
 
 impl ActiveSceneLayer {
-    pub(crate) fn push_to_scene(&self, scene: &mut vello::Scene) {
+    pub(crate) fn push_to_scene(&self, scene: &mut Recording) {
         match &self.shape {
             LayerShape::Rect(rect) => {
-                scene.push_layer(
+                scene.push_group(
                     peniko::Fill::NonZero,
                     peniko::BlendMode::default(),
                     self.alpha,
@@ -481,7 +483,7 @@ impl ActiveSceneLayer {
                 );
             }
             LayerShape::RoundedRect { path, .. } | LayerShape::Path(path) => {
-                scene.push_layer(
+                scene.push_group(
                     peniko::Fill::NonZero,
                     peniko::BlendMode::default(),
                     self.alpha,
@@ -1362,7 +1364,7 @@ impl HydrolysisRenderer {
     pub(crate) fn render_hybrid_segment_to_surface(
         &mut self,
         segment: &mut HybridRenderSegment,
-        transient_scene: Option<vello::Scene>,
+        transient_scene: Option<Recording>,
         target: HydrolysisRenderTarget<'_>,
         premultiply_alpha: bool,
     ) {
@@ -1484,20 +1486,22 @@ impl HydrolysisRenderer {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        scene: &vello::Scene,
+        scene: &Recording,
         width: u32,
         height: u32,
     ) -> PooledLayerTexture {
         let leased = self.compositor.acquire_layer_texture(device, width, height);
-        let params = vello::RenderParams {
-            base_color: peniko::Color::TRANSPARENT,
-            width,
-            height,
-            antialiasing_method: vello::AaConfig::Area,
-        };
         self.state.counters.gpu_submissions += 1;
-        self.vello_renderer
-            .render_to_texture(device, queue, scene, &leased.view, &params)
+        self.legacy_renderer
+            .render_recording(
+                device,
+                queue,
+                scene,
+                &leased.view,
+                width,
+                height,
+                peniko::Color::TRANSPARENT,
+            )
             .expect("hydrolysis renderer: failed to render vello layer scene");
         leased
     }
@@ -1514,19 +1518,19 @@ impl HydrolysisRenderer {
             !active_layers.is_empty(),
             "hydrolysis renderer: active layer mask requires at least one layer"
         );
-        let mut mask_scene = vello::Scene::new();
+        let mut mask_scene = Recording::new();
         for layer in active_layers {
             layer.push_to_scene(&mut mask_scene);
         }
         mask_scene.fill(
             peniko::Fill::NonZero,
             kurbo::Affine::IDENTITY,
-            peniko::Color::WHITE,
+            &peniko::Brush::Solid(peniko::Color::WHITE),
             None,
             &kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
         );
         for _ in 0..active_layers.len() {
-            crate::engine::vello_backend::pop_scene_layer(&mut mask_scene);
+            mask_scene.pop_scope();
         }
         self.render_vello_layer_to_texture(device, queue, &mask_scene, width, height)
     }
@@ -1849,7 +1853,7 @@ impl HydrolysisRenderer {
                 })
                 .collect();
             if vello_indices.len() > 1 {
-                let vello_scenes: Vec<(usize, &vello::Scene, PooledLayerTexture)> = vello_indices
+                let vello_scenes: Vec<(usize, &Recording, PooledLayerTexture)> = vello_indices
                     .iter()
                     .map(|&index| {
                         let leased = self.compositor.acquire_layer_texture(
@@ -1893,8 +1897,8 @@ impl HydrolysisRenderer {
                 RenderLayer::Vello(scene) => {
                     tracing::trace!(
                         layer_index,
-                        paths = scene.encoding().n_paths,
-                        segments = scene.encoding().n_path_segments,
+                        paths = scene.legacy_scene().encoding().n_paths,
+                        segments = scene.legacy_scene().encoding().n_path_segments,
                         "compositing Hydrolysis Vello layer"
                     );
                     let leased = match encoded_vello[layer_index].take() {
