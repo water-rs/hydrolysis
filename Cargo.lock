@@ -10690,7 +10690,7 @@ source = "git+https://github.com/water-rs/barcode?rev=7455379d3b6ef88a9a767c6243
 [[patch.unused]]
 name = "waterui-map-gpu"
 version = "0.3.0"
-source = "git+https://github.com/water-rs/map-gpu?rev=f463fd754e28f28e3d4f5ccf19d08a78051ccdb0#f463fd754e28f28e3d4f5ccf19d08a78051ccdb0"
+source = "git+https://github.com/water-rs/map-gpu?rev=40c63c94742d0abbd61719ad1754121be2670d01#40c63c94742d0abbd61719ad1754121be2670d01"
 
 [[patch.unused]]
 name = "waterui-particle"
