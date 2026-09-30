@@ -3236,14 +3236,15 @@ mod winit_impl {
         }
 
         /// Reads the platform's own visibility state into the cached
-        /// signals — `is_minimized` (the signal winit does not surface as
-        /// an event on X11, where `_NET_WM_STATE_HIDDEN` flips without a
-        /// `WindowEvent`) and, on Windows, `DWMWA_CLOAKED` (the
-        /// virtual-desktop or shell cloak, likewise delivered as no
-        /// `WindowEvent`). Called only from the events that can accompany
-        /// a state change, so it is a synchronous public-API read on a
-        /// wake already running, never a timer or a poll.
-        fn refresh_visibility_signals(&mut self) {
+        /// signals — `is_minimized` (winit surfaces no event on X11 when
+        /// `_NET_WM_STATE_HIDDEN` flips; the runner's `x11_state_watch`
+        /// turns that property change into a wake) and, on Windows,
+        /// `DWMWA_CLOAKED` (the virtual-desktop or shell cloak, likewise
+        /// delivered as no `WindowEvent`). Called only from the events
+        /// that can accompany a state change, so it is a synchronous
+        /// public-API read on a wake already running, never a timer or a
+        /// poll.
+        pub(crate) fn refresh_visibility_signals(&mut self) {
             if let Some(minimized) = self.window.is_minimized() {
                 self.minimized = minimized;
             }
@@ -3446,9 +3447,13 @@ mod winit_impl {
         /// the visibility signals the DWM lets a process query are the
         /// `DWMWINDOWATTRIBUTE` values of `DwmGetWindowAttribute`
         /// (<https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute>),
-        /// and covered-by-other-windows is not one of them. Wayland's
-        /// signal is instead the withheld frame callback, which
-        /// `pre_present_notify` in `present` arms.
+        /// and covered-by-other-windows is not one of them. X11's
+        /// `_NET_WM_STATE_HIDDEN` change reaches `is_minimized`'s query
+        /// through the runner's second-connection state watch
+        /// (`x11_state_watch`) — winit selects `PropertyChangeMask` but
+        /// drops the `PropertyNotify` itself. Wayland's signal is instead
+        /// the withheld frame callback, which `pre_present_notify` in
+        /// `present` arms.
         fn is_occluded(&self) -> bool {
             self.occluded || self.minimized || self.zero_sized || self.cloaked
         }
