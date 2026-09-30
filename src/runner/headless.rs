@@ -547,7 +547,7 @@ impl HeadlessRuntime {
     }
 
     pub fn request_redraw(&mut self) {
-        self.runtime.platform.request_redraw();
+        self.runtime.request_redraw();
         self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
     }
 
@@ -605,7 +605,7 @@ impl HeadlessRuntime {
             .handle_accessibility_action(request, &action_env);
         if changed {
             window.request_refresh();
-            window.platform.request_redraw();
+            window.request_redraw();
             window.renderer.migration_counters_mut().host_wakeups += 1;
         }
         changed
@@ -707,7 +707,7 @@ impl HeadlessRuntime {
         let changed = self.runtime.renderer.clear_ui_focus();
         if changed {
             self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
+            self.runtime.request_redraw();
             self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
         }
         changed
@@ -884,7 +884,7 @@ impl HeadlessRuntime {
                 popup.window.state.snapshot() != waterui::window::WindowState::Closed
             });
             self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
+            self.runtime.request_redraw();
             self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
         }
         let should_render = capture_snapshot

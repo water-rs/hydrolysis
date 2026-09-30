@@ -836,7 +836,7 @@ impl WinitRunner {
         for runtime in self.windows.values_mut() {
             if runtime.renderer.take_rebuild_request() {
                 runtime.request_refresh();
-                runtime.platform.request_redraw();
+                runtime.request_redraw();
                 runtime.renderer.migration_counters_mut().host_wakeups += 1;
             }
         }
@@ -848,7 +848,11 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
         let _ = self.drain_local_executor_queue();
         self.mount_pending_windows(event_loop);
         for runtime in self.windows.values_mut() {
-            runtime.platform.request_redraw();
+            // A resume can carry the window across a visibility boundary
+            // (iOS foregrounding); the pump reflects what the platform
+            // reports now.
+            runtime.sync_occlusion();
+            runtime.request_redraw();
             runtime.renderer.migration_counters_mut().host_wakeups += 1;
         }
     }
@@ -897,6 +901,10 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                 adapter.process_event(runtime.platform.native_window(), &event);
             }
             runtime.platform.handle_window_event(&event);
+            // The platform's occlusion report moves into the pump state
+            // here, so a `RedrawRequested` handled below and the next
+            // `about_to_wait` tick both see the window as it is now.
+            runtime.sync_occlusion();
             Self::handle_input_events(runtime, &self.env)
         };
 
@@ -1021,7 +1029,7 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                 // redraw; a wake for one the frame loop already presented
                 // resolves nothing.
                 if runtime.renderer.has_deferred_legacy_frame() {
-                    runtime.platform.request_redraw();
+                    runtime.request_redraw();
                 }
             }
             RunnerEvent::AccessKit(event) => {
@@ -1065,7 +1073,7 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                                 "missing accessibility tree update for initial request, scheduling rebuild"
                             );
                             runtime.request_refresh();
-                            runtime.platform.request_redraw();
+                            runtime.request_redraw();
                             runtime.renderer.migration_counters_mut().host_wakeups += 1;
                         }
                     }
@@ -1083,7 +1091,7 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                             .handle_accessibility_action(request, &action_env)
                         {
                             runtime.request_refresh();
-                            runtime.platform.request_redraw();
+                            runtime.request_redraw();
                             runtime.renderer.migration_counters_mut().host_wakeups += 1;
                         }
                         self.flush_cross_window_rebuild_requests();
