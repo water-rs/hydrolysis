@@ -190,6 +190,10 @@ impl BrowserRunner {
 
     fn frame(&mut self) -> bool {
         let _ = self.drain_local_executor_queue();
+        // The page's occlusion report drives the pump state each frame — a
+        // hidden page still drains events and executor work; only drawing
+        // stops.
+        self.runtime.sync_occlusion();
         // Same borrow discipline: handling an action may schedule work that
         // queues further accessibility requests.
         loop {
@@ -208,12 +212,21 @@ impl BrowserRunner {
             return false;
         }
         let _ = advance_runtime(&mut self.runtime, &self.env, Instant::now());
-        let presented = render_window(&mut self.runtime, &self.env, &mut || {
-            Self::drain_runnable_queue(&self.runnable_queue)
-        });
-        if presented && !self.first_frame_announced {
-            self.first_frame_announced = true;
-            self.runtime.platform.announce_first_frame();
+        // A hidden window produces no frame, and a wake that carried no
+        // armed work — a stale redraw post, or the restore wake landing
+        // after the frame it armed — answers without one. Only armed work
+        // encodes a frame.
+        if self.runtime.mode.is_pending()
+            || self.runtime.queued_deferred_flush
+            || self.runtime.renderer.take_redraw_request()
+        {
+            let presented = render_window(&mut self.runtime, &self.env, &mut || {
+                Self::drain_runnable_queue(&self.runnable_queue)
+            });
+            if presented && !self.first_frame_announced {
+                self.first_frame_announced = true;
+                self.runtime.platform.announce_first_frame();
+            }
         }
         if let Some(update) = self.runtime.renderer.take_accessibility_tree_update() {
             self.accessibility_bridge.update(update);
@@ -222,9 +235,13 @@ impl BrowserRunner {
     }
 
     fn needs_next_frame(&self) -> bool {
-        self.runtime.platform.take_redraw_request()
-            || self.runtime.queued_deferred_flush
-            || !self.runnable_queue.borrow().is_empty()
+        // A hidden page schedules nothing: the armed mode and queued
+        // redraws survive for the restore frame, but no rAF is posted
+        // into a parked pump.
+        !self.runtime.is_hidden()
+            && (self.runtime.platform.take_redraw_request()
+                || self.runtime.queued_deferred_flush
+                || !self.runnable_queue.borrow().is_empty())
     }
 }
 

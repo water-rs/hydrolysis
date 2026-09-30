@@ -233,6 +233,8 @@ web-sys = { version = "0.3", optional = true, features = [
     "HtmlCanvasElement",
     "HtmlElement",
     "HtmlInputElement",
+    "IntersectionObserver",
+    "IntersectionObserverEntry",
     "KeyboardEvent",
     "Node",
     "PointerEvent",
