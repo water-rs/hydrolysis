@@ -632,12 +632,21 @@ impl WinitRunner {
         );
         #[cfg(hydrolysis_wayland_platform)]
         if let Some(xid) = x11_state_watch::x11_window_id(&native_window) {
+            // The window is on X11, so the app's own server connection is
+            // already up — every watch step is expected to succeed, and a
+            // failure means minimize would go undetected. The window's
+            // creation fails rather than silently covering the gap.
             if self.x11_state_watch.is_none() {
-                self.x11_state_watch = X11StateWatch::connect(self.event_proxy.clone());
+                self.x11_state_watch = Some(
+                    X11StateWatch::connect(self.event_proxy.clone())
+                        .expect("hydrolysis runner: failed to start the X11 state watch"),
+                );
             }
-            if let Some(watch) = &self.x11_state_watch {
-                watch.select(xid);
-            }
+            self.x11_state_watch
+                .as_ref()
+                .expect("hydrolysis runner: X11 state watch missing after connect")
+                .select(xid)
+                .expect("hydrolysis runner: failed to subscribe to X11 window state events");
         }
         #[cfg(target_os = "windows")]
         if activates {
