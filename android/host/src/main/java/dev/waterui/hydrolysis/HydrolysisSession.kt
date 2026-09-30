@@ -35,6 +35,16 @@ class HydrolysisSession internal constructor() {
         if (hostView === view) hostView = null
     }
 
+    /**
+     * The owning Activity's started state (`onStart`/`onStop`). A stopped
+     * session parks the frame pump — no frames, no Choreographer wakes —
+     * until the next start; a start with a live surface renders exactly
+     * the one current frame.
+     */
+    internal fun setVisible(visible: Boolean) {
+        NativeBridge.nativeSetVisible(nativePtr, visible)
+    }
+
     /** Tears down the native session. Idempotent guard lives in the caller. */
     fun destroy() {
         NativeBridge.nativeDestroySession(nativePtr)
