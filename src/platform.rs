@@ -2609,6 +2609,12 @@ mod winit_impl {
         /// never on a timer. X11 emits no iconify `WindowEvent`, so the
         /// query on pump wakes is that platform's minimize signal.
         minimized: bool,
+        /// The DWM's cloaked report (`DWMWA_CLOAKED`), refreshed on the
+        /// same events as `minimized`: how a Windows window hidden by a
+        /// virtual-desktop switch or the shell is detected — cloaking
+        /// likewise arrives as no `WindowEvent`. Always false off
+        /// Windows, which is the only platform that cloaks.
+        cloaked: bool,
         /// Shared with the GPU-surface redraw waker: a wake posted for a
         /// window that cannot be seen is dropped before reaching the
         /// event loop, so external GPU content cannot un-park the pump.
@@ -2639,6 +2645,10 @@ mod winit_impl {
             let size = window.inner_size();
             let minimized = window.is_minimized().unwrap_or(false);
             let zero_sized = size.width == 0 || size.height == 0;
+            #[cfg(target_os = "windows")]
+            let cloaked = window_is_cloaked(&window);
+            #[cfg(not(target_os = "windows"))]
+            let cloaked = false;
             (
                 Self {
                     #[cfg(target_os = "macos")]
@@ -2652,7 +2662,8 @@ mod winit_impl {
                     occluded: false,
                     zero_sized,
                     minimized,
-                    occlusion_signal: Arc::new(AtomicBool::new(minimized || zero_sized)),
+                    cloaked,
+                    occlusion_signal: Arc::new(AtomicBool::new(minimized || zero_sized || cloaked)),
                     pending_surface_size: None,
                     pending_events: Vec::new(),
                     pointer_position: (0.0, 0.0),
@@ -2980,19 +2991,20 @@ mod winit_impl {
             match event {
                 WindowEvent::Occluded(occluded) => {
                     self.occluded = *occluded;
-                    self.refresh_minimized();
+                    self.refresh_visibility_signals();
                 }
                 WindowEvent::RedrawRequested => {
                     // The pump's own wake: the cheapest place to refresh
-                    // X11's minimize state, which arrives as no event.
-                    self.refresh_minimized();
+                    // the signals that arrive as no event — X11's minimize
+                    // and Windows' cloaked state.
+                    self.refresh_visibility_signals();
                 }
                 WindowEvent::CloseRequested => {
                     self.pending_events.push(InputEvent::CloseRequested);
                 }
                 WindowEvent::Resized(size) => {
                     self.zero_sized = size.width == 0 || size.height == 0;
-                    self.refresh_minimized();
+                    self.refresh_visibility_signals();
                     self.pending_surface_size = Some(*size);
                     self.pending_events.push(InputEvent::Resize {
                         width: size.width.max(1),
@@ -3019,7 +3031,7 @@ mod winit_impl {
                     });
                 }
                 WindowEvent::Focused(focused) => {
-                    self.refresh_minimized();
+                    self.refresh_visibility_signals();
                     self.pending_events.push(InputEvent::Focused(*focused));
                 }
                 WindowEvent::HoveredFile(path) => {
@@ -3223,16 +3235,53 @@ mod winit_impl {
                 .store(self.is_occluded(), Ordering::Relaxed);
         }
 
-        /// Reads the platform's own minimized state into the `minimized`
-        /// cache — the signal winit does not surface as an event on X11,
-        /// where `_NET_WM_STATE_HIDDEN` flips without a `WindowEvent`.
-        /// Called only from the events that can accompany a minimize, so
-        /// it is a synchronous public-API read on a wake already running,
-        /// never a timer or a poll.
-        fn refresh_minimized(&mut self) {
+        /// Reads the platform's own visibility state into the cached
+        /// signals — `is_minimized` (the signal winit does not surface as
+        /// an event on X11, where `_NET_WM_STATE_HIDDEN` flips without a
+        /// `WindowEvent`) and, on Windows, `DWMWA_CLOAKED` (the
+        /// virtual-desktop or shell cloak, likewise delivered as no
+        /// `WindowEvent`). Called only from the events that can accompany
+        /// a state change, so it is a synchronous public-API read on a
+        /// wake already running, never a timer or a poll.
+        fn refresh_visibility_signals(&mut self) {
             if let Some(minimized) = self.window.is_minimized() {
                 self.minimized = minimized;
             }
+            #[cfg(target_os = "windows")]
+            {
+                self.cloaked = window_is_cloaked(&self.window);
+            }
+        }
+    }
+
+    /// The DWM's cloaked report for the window's `HWND` — `DWMWA_CLOAKED`
+    /// is nonzero when the shell or a virtual-desktop switch hides the
+    /// window, the only visibility signal Windows gives a process beyond
+    /// minimization. The query itself is the public `DwmGetWindowAttribute`
+    /// API; when it fails the window is reported uncloaked rather than
+    /// guessed.
+    #[cfg(target_os = "windows")]
+    fn window_is_cloaked(native_window: &NativeWindow) -> bool {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+        let Ok(handle) = native_window.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return false;
+        };
+        let mut cloaked = 0i32;
+        // SAFETY: `hwnd` is the window's live handle for as long as the
+        // `NativeWindow` lives, and `pvAttribute` points at writable memory
+        // of exactly `cbAttribute` bytes, as the API requires.
+        unsafe {
+            DwmGetWindowAttribute(
+                win32.hwnd.get() as HWND,
+                DWMWA_CLOAKED as u32,
+                (&raw mut cloaked).cast(),
+                size_of::<i32>() as u32,
+            ) == 0
+                && cloaked != 0
         }
     }
 
@@ -3388,15 +3437,20 @@ mod winit_impl {
         /// occluded (macOS `NSWindow.occlusionState`, iOS scene state, X11
         /// `VisibilityFullyObscured`), it is minimized by the platform's
         /// own report (`IsIconic`, `_NET_WM_STATE_HIDDEN`,
-        /// `isMiniaturized`), or its client area is zero (Windows
-        /// `SIZE_MINIMIZED`, a 0x0 Wayland configure).
+        /// `isMiniaturized`), the DWM cloaked it (Windows `DWMWA_CLOAKED`),
+        /// or its client area is zero (Windows `SIZE_MINIMIZED`, a 0x0
+        /// Wayland configure).
         ///
-        /// Documented gaps: Windows reports nothing for a window fully
-        /// covered but not minimized (`DWMWA_CLOAKED` has no winit hook);
-        /// Wayland's signal is instead the withheld frame callback, which
+        /// Documented gaps: a Windows window fully covered by other
+        /// windows while neither cloaked nor minimized reports nothing —
+        /// the visibility signals the DWM lets a process query are the
+        /// `DWMWINDOWATTRIBUTE` values of `DwmGetWindowAttribute`
+        /// (<https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute>),
+        /// and covered-by-other-windows is not one of them. Wayland's
+        /// signal is instead the withheld frame callback, which
         /// `pre_present_notify` in `present` arms.
         fn is_occluded(&self) -> bool {
-            self.occluded || self.minimized || self.zero_sized
+            self.occluded || self.minimized || self.zero_sized || self.cloaked
         }
 
         /// The pointer's live position: the host's own answer where it can
