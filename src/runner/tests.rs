@@ -295,6 +295,31 @@ fn un_hide_sync_posts_exactly_one_restore_wake() {
     );
 }
 
+/// `request_redraw`'s hidden gate: callers outside `advance_runtime` —
+/// the winit runner's cross-window rebuild flush, GPU settle wakes, a
+/// stale in-flight platform post — reach the platform's redraw post
+/// directly, and a parked window must absorb them. Without the gate each
+/// of those would keep waking a hidden pump.
+#[test]
+fn a_hidden_window_absorbs_direct_redraw_requests() {
+    let mut runtime = test_runtime_window();
+    let _ = runtime.platform.take_redraw_request();
+
+    runtime.set_hidden(true);
+    runtime.request_redraw();
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "a hidden window must not reach the platform redraw post"
+    );
+
+    runtime.set_hidden(false);
+    runtime.request_redraw();
+    assert!(
+        runtime.platform.take_redraw_request(),
+        "a visible window's redraw request must reach the platform"
+    );
+}
+
 /// The window's effective size limits reach the platform: the content's
 /// measured minimum is the default, the maximum stays unbounded unless the
 /// app pins one, and explicit limits override both.
