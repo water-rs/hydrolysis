@@ -38,8 +38,8 @@ waterui-form = "0.5.0"
 waterui-backend-core = { version = "0.5.0", default-features = false, features = ["widgets", "gestures"] }
 waterkit-clipboard = "0.1.1"
 waterui-locale = "0.5.0"
-cherenkov = { git = "https://github.com/water-rs/cherenkov", rev = "bc688ad177f2bba9c3405aa6d7dc1d5b0d8031b9" }
-cherenkov-gpu = { git = "https://github.com/water-rs/cherenkov", rev = "bc688ad177f2bba9c3405aa6d7dc1d5b0d8031b9" }
+cherenkov = { git = "https://github.com/water-rs/cherenkov", rev = "f59766d0a165e35e2bb1965c4919e45b6895e357" }
+cherenkov-gpu = { git = "https://github.com/water-rs/cherenkov", rev = "f59766d0a165e35e2bb1965c4919e45b6895e357" }
 # `complex-scripts` ships the ICU4X segmentation dictionaries (CJ plus the
 # Southeast-Asian scripts) inside the one parley build: this runner owns the
 # `LayoutContext`, and without them its word segmenter logs `No segmentation
