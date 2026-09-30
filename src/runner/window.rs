@@ -176,6 +176,23 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
         self.set_hidden(self.platform.is_occluded());
     }
 
+    /// [`Self::sync_occlusion`] plus the wake the restore frame needs on
+    /// hosts whose frame loop never notices an armed [`FrameMode`] on its
+    /// own: Android's pump is only reached by a Choreographer post, so an
+    /// un-hide there that only armed the mode would leave the last
+    /// presented frame up until the next unrelated wake. Hosts whose
+    /// platform posts its own restore frame (winit desktops: `WM_PAINT`,
+    /// `drawRect`, `Expose`) use [`Self::sync_occlusion`], which arms
+    /// without posting — posting there would double the restore frame.
+    #[allow(dead_code)] // see is_hidden
+    pub(super) fn sync_occlusion_and_post_restore(&mut self) {
+        let was_hidden = self.hidden;
+        self.sync_occlusion();
+        if was_hidden && !self.hidden {
+            self.request_redraw();
+        }
+    }
+
     /// Posts the host wake the next frame needs. A hidden window posts no
     /// wakes: the work the wake carried stays armed and applies to the
     /// frame visibility restores.

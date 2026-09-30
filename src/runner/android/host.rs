@@ -718,13 +718,9 @@ impl AndroidSession {
     /// can present again.
     pub(crate) fn set_visible(&mut self, started: bool) {
         self.runtime.platform.started = started;
-        let was_hidden = self.runtime.is_hidden();
-        self.runtime.sync_occlusion();
         // Android has no about-to-wait pass to notice an armed mode — the
         // restore frame needs the explicit Choreographer post.
-        if was_hidden && !self.runtime.is_hidden() {
-            self.runtime.request_redraw();
-        }
+        self.runtime.sync_occlusion_and_post_restore();
     }
 
     /// The one coordinated frame transaction — the scheduler's
@@ -839,8 +835,7 @@ impl AndroidSession {
         // stale `surfaceCreated` delivered after `onStop` attaches nothing
         // the user sees, and `started` stays the lifecycle's report.
         self.runtime.request_refresh();
-        self.runtime.sync_occlusion();
-        self.runtime.request_redraw();
+        self.runtime.sync_occlusion_and_post_restore();
         Ok(())
     }
 
@@ -864,8 +859,9 @@ impl AndroidSession {
             .resize_for(width, height, generation)
             .map_err(|error| error.to_string())?;
         // A surface parked on a zero-size attach configures here — the
-        // resize that gave the band a real extent can be its un-hide.
-        self.runtime.sync_occlusion();
+        // resize that gave the band a real extent can be its un-hide, and
+        // the Choreographer post is the only wake the restore frame gets.
+        self.runtime.sync_occlusion_and_post_restore();
         Ok(())
     }
 

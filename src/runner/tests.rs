@@ -255,6 +255,46 @@ fn hidden_window_reports_no_deadline_for_an_armed_animation() {
     );
 }
 
+/// The un-hide contract hosts without an about-to-wait pass rely on:
+/// `sync_occlusion_and_post_restore` posts exactly one restore wake when
+/// the platform report flips the pump back to visible. It is what the
+/// Android host calls from `set_visible` and `surface_resized` — the
+/// resize that gives a band parked on a 0x0 attach its real extent —
+/// where only a Choreographer post reaches the frame scheduler.
+/// `sync_occlusion` itself must never post: a winit desktop's platform
+/// delivers its own restore event, and a second post would double the
+/// restore frame.
+#[test]
+fn un_hide_sync_posts_exactly_one_restore_wake() {
+    let mut runtime = test_runtime_window();
+    runtime.platform.set_occluded(true);
+    runtime.sync_occlusion();
+    assert!(runtime.is_hidden(), "an occluded report must park the pump");
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "sync_occlusion arms only — the restore post is the host's choice"
+    );
+
+    runtime.platform.set_occluded(false);
+    runtime.sync_occlusion_and_post_restore();
+    assert!(!runtime.is_hidden(), "a clear report must unpark the pump");
+    assert!(
+        runtime.platform.take_redraw_request(),
+        "un-hiding through the posting sync must wake the frame scheduler"
+    );
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "the restore wake is a single post, not a stream"
+    );
+
+    // Re-syncing a window already visible posts nothing again.
+    runtime.sync_occlusion_and_post_restore();
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "a sync that did not un-hide posts no wake"
+    );
+}
+
 /// The window's effective size limits reach the platform: the content's
 /// measured minimum is the default, the maximum stays unbounded unless the
 /// app pins one, and explicit limits override both.
