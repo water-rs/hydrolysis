@@ -1105,7 +1105,7 @@ mod tests {
     use super::{TerminationAction, TerminationRequests};
     use super::{ends_event_loop, native_window_attributes};
     use waterui::window::{Window, WindowState};
-    use waterui_core::{Binding, Environment, binding};
+    use waterui_core::{Binding, binding};
 
     #[cfg(any(unix, windows))]
     #[test]
@@ -1138,7 +1138,7 @@ mod tests {
     #[test]
     fn popup_window_attributes_do_not_activate() {
         let window = Window::new("", binding(WindowState::Normal), || ());
-        let env = Environment::new();
+        let env = crate::renderer::tests::test_environment();
 
         assert!(native_window_attributes(&window, &env, true, None).active);
         assert!(!native_window_attributes(&window, &env, false, None).active);
@@ -1173,7 +1173,7 @@ mod tests {
         let frame = Binding::container(Rect::new(Point::new(12.0, 34.0), Size::new(800.0, 300.0)));
         let mut window = Window::new("", binding(WindowState::Normal), || ());
         window.frame = frame;
-        let env = Environment::new();
+        let env = crate::renderer::tests::test_environment();
 
         let attributes = native_window_attributes(&window, &env, false, None);
         assert_eq!(
