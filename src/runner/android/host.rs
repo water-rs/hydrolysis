@@ -828,18 +828,16 @@ impl AndroidSession {
             height,
             "wake posted: surface attached"
         );
-        // A surface can only exist for a window the user can see — its
-        // creation is itself the started half of the visibility report
-        // for sessions mounted after the Activity's `onStart` fired.
-        self.runtime.platform.started = true;
         self.runtime
             .platform
             .surface
             .attach(native_window, width, height, generation)
             .map_err(|error| error.to_string())?;
         // A new surface never inherits the old one's presented frame — the
-        // next transaction must re-encode and present. Attaching also
-        // un-hides a session whose pump was parked on a missing surface.
+        // next transaction must re-encode and present. Attaching while
+        // `started` can un-hide a session parked on a missing surface; a
+        // stale `surfaceCreated` delivered after `onStop` attaches nothing
+        // the user sees, and `started` stays the lifecycle's report.
         self.runtime.request_refresh();
         self.runtime.sync_occlusion();
         self.runtime.request_redraw();
