@@ -1507,8 +1507,8 @@ mod winit_impl {
         },
         keyboard::{Key, ModifiersState, PhysicalKey},
         window::{
-            Cursor as WinitCursor, CursorIcon, Fullscreen, ImePurpose, Window as NativeWindow,
-            WindowId,
+            Cursor as WinitCursor, CursorIcon, Fullscreen, Icon, ImePurpose,
+            Window as NativeWindow, WindowId,
         },
     };
 
@@ -2550,6 +2550,7 @@ mod winit_impl {
         decorations: bool,
         state: WindowState,
         frame: waterui_core::layout::Rect,
+        icon: Option<waterui::graphics::peniko::ImageData>,
     }
 
     /// A monitor's logical rect: `(position, extent)` — the shape
@@ -2587,6 +2588,8 @@ mod winit_impl {
         /// event re-delivers it — the window manager's own initial state
         /// otherwise wins.
         pending_mapped_request: MappedRequestRetry,
+        /// The icon shown while the window declares none of its own.
+        application_icon: Option<Icon>,
         /// Whether the window currently presents as transparent, so a
         /// per-frame background push reaches winit and the surface only when
         /// the background switches between opaque and translucent.
@@ -2601,16 +2604,23 @@ mod winit_impl {
     }
 
     impl WinitWindow {
-        pub async fn new(window: Arc<NativeWindow>, requires_transparency: bool) -> Self {
-            Self::new_with_shared_gpu(window, None, requires_transparency)
+        pub async fn new(
+            window: Arc<NativeWindow>,
+            requires_transparency: bool,
+            application_icon: Option<Icon>,
+        ) -> Self {
+            Self::new_with_shared_gpu(window, None, requires_transparency, application_icon)
                 .await
                 .0
         }
 
+        /// `application_icon` is the icon a window shows while its own
+        /// `Window::icon` is `None` — the one the `water` CLI stages.
         pub async fn new_with_shared_gpu(
             window: Arc<NativeWindow>,
             shared_gpu: Option<&WinitGpuContext>,
             requires_transparency: bool,
+            application_icon: Option<Icon>,
         ) -> (Self, WinitGpuContext) {
             let (surface, gpu) =
                 WinitSurface::new(window.clone(), shared_gpu, requires_transparency).await;
@@ -2634,6 +2644,7 @@ mod winit_impl {
                     applied_properties: None,
                     pending_mapped_request: MappedRequestRetry::default(),
                     transparent: requires_transparency,
+                    application_icon,
                 },
                 gpu,
             )
@@ -3179,6 +3190,52 @@ mod winit_impl {
         }
     }
 
+    /// Converts a window's declared icon to winit's icon.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the pixels are in a format other than 8-bit RGBA/BGRA, or
+    /// their byte count does not match the declared size — the app handed
+    /// the window an image that is not one.
+    pub(crate) fn window_icon(image: &waterui::graphics::peniko::ImageData) -> Icon {
+        Icon::from_rgba(straight_rgba(image), image.width, image.height)
+            .unwrap_or_else(|error| panic!("hydrolysis window icon: {error}"))
+    }
+
+    /// The image's pixels as straight-alpha RGBA8, the layout winit icons take.
+    fn straight_rgba(image: &waterui::graphics::peniko::ImageData) -> Vec<u8> {
+        use waterui::graphics::peniko::{ImageAlphaType, ImageFormat};
+        let swap_red_blue = match image.format {
+            ImageFormat::Rgba8 => false,
+            ImageFormat::Bgra8 => true,
+            other => panic!("hydrolysis window icon: unsupported pixel format {other:?}"),
+        };
+        let premultiplied = matches!(image.alpha_type, ImageAlphaType::AlphaPremultiplied);
+        image
+            .data
+            .data()
+            .chunks_exact(4)
+            .flat_map(|pixel| {
+                let [mut red, green, mut blue, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+                if swap_red_blue {
+                    core::mem::swap(&mut red, &mut blue);
+                }
+                let straight = |channel: u8| {
+                    if !premultiplied {
+                        return channel;
+                    }
+                    if alpha == 0 {
+                        return 0;
+                    }
+                    let value =
+                        (u16::from(channel) * 255 + u16::from(alpha) / 2) / u16::from(alpha);
+                    u8::try_from(value.min(255)).expect("clamped to a byte")
+                };
+                [straight(red), straight(green), straight(blue), alpha]
+            })
+            .collect()
+    }
+
     fn map_cursor_position(position: &PhysicalPosition<f64>, scale_factor: f64) -> (f32, f32) {
         assert!(
             scale_factor.is_finite() && scale_factor > 0.0,
@@ -3252,6 +3309,7 @@ mod winit_impl {
                 decorations,
                 state,
                 frame,
+                icon: window.icon.snapshot(),
             };
             let previous = self.applied_properties.replace(properties.clone());
             let applied = previous.as_ref();
@@ -3263,6 +3321,15 @@ mod winit_impl {
             }
             if applied.is_none_or(|p| p.decorations != properties.decorations) {
                 self.window.set_decorations(properties.decorations);
+            }
+            if applied.is_none_or(|p| p.icon != properties.icon) {
+                self.window.set_window_icon(
+                    properties
+                        .icon
+                        .as_ref()
+                        .map(window_icon)
+                        .or_else(|| self.application_icon.clone()),
+                );
             }
             // The frame binding is pushed to the window only when it changed
             // since the previous pump. A user-driven resize or move lands in
@@ -3864,6 +3931,25 @@ mod winit_impl {
             assert!(result.is_err());
         }
 
+        /// A premultiplied BGRA icon reaches winit as straight RGBA: the
+        /// channels swap back and the colour is divided out of the alpha.
+        #[test]
+        fn a_premultiplied_bgra_icon_becomes_straight_rgba() {
+            use waterui::graphics::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+            let image = ImageData {
+                // Half-transparent pure red, premultiplied, then transparent.
+                data: Blob::from(vec![0, 0, 128, 128, 9, 9, 9, 0]),
+                format: ImageFormat::Bgra8,
+                alpha_type: ImageAlphaType::AlphaPremultiplied,
+                width: 2,
+                height: 1,
+            };
+            assert_eq!(
+                super::straight_rgba(&image),
+                vec![255, 0, 0, 128, 0, 0, 0, 0]
+            );
+        }
+
         fn caps_with_alpha_modes(
             alpha_modes: &[wgpu::CompositeAlphaMode],
         ) -> wgpu::SurfaceCapabilities {
@@ -4335,6 +4421,8 @@ pub use web_impl::ExportedBrowserWindow as BrowserWindow;
 pub(crate) use winit_impl::ExportedWinitGpuContext as WinitGpuContext;
 #[cfg(hydrolysis_winit)]
 pub(crate) use winit_impl::GpuPollDriver;
+#[cfg(hydrolysis_winit)]
+pub(crate) use winit_impl::window_icon;
 
 #[cfg(hydrolysis_winit)]
 pub use winit_impl::ExportedWinitWindow as WinitWindow;

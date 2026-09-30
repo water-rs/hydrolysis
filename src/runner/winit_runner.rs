@@ -484,7 +484,16 @@ fn native_window_attributes(
         waterui::window::WindowState::Fullscreen
     );
     let attributes = NativeWindow::default_attributes()
-        .with_window_icon(icon)
+        // The window's own icon when it declares one, the staged application
+        // icon otherwise.
+        .with_window_icon(
+            window
+                .icon
+                .snapshot()
+                .as_ref()
+                .map(crate::platform::window_icon)
+                .or(icon),
+        )
         .with_title(window.display_title().snapshot().as_str())
         .with_resizable(window.resizable)
         .with_visible(false)
@@ -630,6 +639,7 @@ impl WinitRunner {
             native_window,
             self.gpu_context.as_ref(),
             super::window_requires_transparency(&window, &self.env),
+            self.window_icon.clone(),
         ));
         if self.gpu_context.is_none() {
             self.gpu_context = Some(gpu_context);

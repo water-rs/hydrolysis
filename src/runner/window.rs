@@ -734,7 +734,7 @@ pub(super) fn pump_window_semantics<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
-    // `frame`, `state` and `style` drive `apply_properties` below: keep
+    // `frame`, `state`, `style` and `icon` drive `apply_properties` below: keep
     // them subscribed so an app write to any of these bindings schedules a
     // pump instead of needing an unrelated event to wake the loop.
     let _ = runtime.renderer.read_signal(&runtime.window.frame);
@@ -743,6 +743,7 @@ pub(super) fn pump_window_semantics<P: GpuSurfaceWindow>(
     // A replaced background repaints with a new clear colour and may switch
     // the surface between opaque and translucent.
     let _ = runtime.renderer.read_signal(&runtime.window.background);
+    let _ = runtime.renderer.read_signal(&runtime.window.icon);
     runtime.platform.apply_properties(&runtime.window);
     #[cfg(hydrolysis_winit)]
     runtime
