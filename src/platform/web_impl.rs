@@ -180,7 +180,7 @@ impl core::fmt::Debug for BrowserWindow {
 }
 
 impl BrowserWindow {
-    pub async fn new(schedule_frame: Rc<dyn Fn()>) -> Self {
+    pub async fn new(schedule_frame: Rc<dyn Fn()>, occlusion_wake: Rc<dyn Fn()>) -> Self {
         let browser_window =
             web_sys::window().expect("hydrolysis web platform: browser window unavailable");
         let document = browser_window
@@ -214,11 +214,12 @@ impl BrowserWindow {
             pending_resize.clone(),
             schedule_frame.clone(),
         );
-        // A hidden page posts no rAF on its own — this wake is what
-        // schedules the restore frame when the tab can draw again.
+        // A hidden page's rAF callback never fires, so the wake also
+        // pulls the occlusion report into the pump synchronously — the
+        // hide must be learned here, or the pump could never log it.
         listeners.push(add_event_listener(document.as_ref(), "visibilitychange", {
-            let schedule_frame = schedule_frame.clone();
-            move |_event| schedule_frame()
+            let occlusion_wake = occlusion_wake.clone();
+            move |_event| occlusion_wake()
         }));
         // `document.hidden` covers a backgrounded tab; what it cannot see
         // is the page visible while its canvas is not — scrolled out of
@@ -235,7 +236,7 @@ impl BrowserWindow {
                                 entry.unchecked_into::<web_sys::IntersectionObserverEntry>();
                             offscreen.set(!entry.is_intersecting());
                         }
-                        schedule_frame();
+                        occlusion_wake();
                     },
                 ));
             let observer = web_sys::IntersectionObserver::new(callback.as_ref().unchecked_ref())
