@@ -383,7 +383,7 @@ hydrolysis = { path = "." }
 # The Material 3 theme must implement the five-argument
 # `WidgetTheme::draw_button_chrome` contract added for
 # water-rs/hydrolysis#115.
-hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "9a11dec695e751332a743257eac9089799a269bb" }
+hydrolysis-m3 = { git = "https://github.com/water-rs/hydrolysis-m3", rev = "0f468a4113744096355d386521f41a4b384bcfb0" }
 
 
 # Framework crates pinned to the waterui revision that makes the window
@@ -436,7 +436,7 @@ waterkit-video-player = { git = "https://github.com/water-rs/waterkit", rev = "f
 waterkit-video-streaming = { git = "https://github.com/water-rs/waterkit", rev = "f48ab29c10e0c7214aa6850c024eab2b4cbb43ae" }
 waterui-image = { git = "https://github.com/water-rs/image", rev = "27ab17cad98e8b08f50d9df5a66d9ec11529a69f" }
 waterui = { git = "https://github.com/water-rs/waterui", rev = "9e41cffc2266ff0cba9f264892489b949f0abb6a" }
-waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "c4f68918aa1fec77b4637779543bba19f5fef1c6" }
+waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "743642ebae12f0b5f3316c646dc69ef6e8ca85b4" }
 waterui-chart = { git = "https://github.com/water-rs/chart", rev = "ff481c3d319b7d025a1fa0c1dcdb283f92be9689" }
 waterui-barcode = { git = "https://github.com/water-rs/barcode", rev = "4c530503f6e3277f44511f327db463a195482abd" }
 waterui-map-gpu = { git = "https://github.com/water-rs/map-gpu", rev = "13e199d255a11637e03341e0a947447851eff85e" }
