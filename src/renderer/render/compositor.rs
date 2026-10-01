@@ -148,6 +148,13 @@ struct PendingLegacyRender {
     readback: Option<crate::engine::LegacyBumpReadback>,
 }
 
+/// The grow-and-re-render bound for [`HydrolysisRenderer::verify_deferred_legacy`]:
+/// every round grows at least one bump buffer past a verified demand, so a
+/// real scene converges well inside it — the bound exists to stop a scene
+/// whose accounting never converges (a satisfy/covers disagreement, or a
+/// render that keeps reporting overflow the growth path cannot satisfy).
+const MAX_BUMP_VERIFY_ROUNDS: usize = 8;
+
 /// A frame's legacy outputs held between encode and presentation: the
 /// painter's-order composite inputs plus every unverified render ticket.
 /// Verification is deferred one frame so a completed render resolves with
@@ -164,6 +171,12 @@ struct DeferredLegacyFrame {
     /// damage batches is an early present, never a hole the following
     /// frame must bootstrap around.
     presented: bool,
+    /// A frame whose bump verification never converged: a stage still
+    /// overflowed at [`MAX_BUMP_VERIFY_ROUNDS`], so compositing it would
+    /// present a truncated render. The stash stays — wasm32 keeps live
+    /// tickets it cannot wait on, and a replaced stash's pendings ride
+    /// along to the next frame — but nothing ever composites it.
+    dead: bool,
     /// The `queue.submit` index of every render this stash's tickets depend
     /// on — one per ticket, all of them, because the parallel layer encode
     /// makes their relative order unknowable from the outside. A completion
@@ -1661,17 +1674,25 @@ impl HydrolysisRenderer {
     }
 
     /// Resolve the deferred bump-buffer verification carried by `deferred`,
-    /// re-rendering any render that overflowed, in place.
+    /// re-rendering any render that overflowed, in place, until no stage
+    /// reports overflow. Returns `false` when a stage made no progress — it
+    /// still overflowed at [`MAX_BUMP_VERIFY_ROUNDS`] — which is reported as
+    /// a hard error naming the stage; such a frame is dead and must never
+    /// be presented.
     ///
     /// Called once per frame, before that frame's phase-1 work, on the
     /// [`DeferredLegacyFrame`] the previous frame stashed: its renders had a
     /// whole present interval to finish on the GPU, so a verified render
     /// costs a non-blocking drain — steady-state frames never wait on GPU
     /// completion. An overflowed render is re-issued at its freshly grown
-    /// sizes and drained again; a scene that keeps outgrowing stops at
-    /// [`MAX_BUMP_VERIFY_ROUNDS`] and is reported, same as the old inline
-    /// retry bound. That wait is the overflowed frame's own GPU-completion
-    /// cost, paid once, not overhead every frame carries.
+    /// sizes and drained again — every round grows at least one bump
+    /// buffer past a verified demand, so the loop terminates for a real
+    /// scene; a re-render can only surface demand from a downstream stage
+    /// the truncated pass never reached. A stage that still overflows at
+    /// [`MAX_BUMP_VERIFY_ROUNDS`] is the accounting violation the bound
+    /// exists to surface. The wait is the overflowed frame's own
+    /// GPU-completion cost, paid per round, not overhead every frame
+    /// carries.
     ///
     /// `pooled` carries the renderers checked out by
     /// [`encode_legacy_layers_parallel`], each with its own readback ticket;
@@ -1683,63 +1704,55 @@ impl HydrolysisRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         deferred: &mut DeferredLegacyFrame,
-    ) {
+    ) -> bool {
         let (width, height) = deferred.surface_size;
+        let mut converged = true;
+        let mut worst_rounds = 0usize;
         for (renderer, pending) in &mut deferred.pooled {
-            // Growth is one-shot by construction: `BumpBufferSizes::satisfy`
-            // raises every bump-managed buffer to at least the demand this
-            // scene reported, so re-rendering the identical scene cannot
-            // overflow the same buffers again. The second verify exists to
-            // surface a violation of that invariant — a satisfy/covers
-            // disagreement with the shader accounting — not to converge.
-            let Some(ticket) = take_readback_ticket(pending) else {
-                continue;
-            };
-            let overflowed = match renderer.verify_bump_readbacks(device, vec![ticket]) {
-                Ok(overflowed) => overflowed,
-                Err(error) => {
-                    tracing::error!(
-                        "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
-                    );
-                    continue;
+            let mut rounds = 0usize;
+            loop {
+                let Some(ticket) = take_readback_ticket(pending) else {
+                    break;
+                };
+                let overflowed = match renderer.verify_bump_readbacks(device, vec![ticket]) {
+                    Ok(overflowed) => overflowed,
+                    Err(error) => {
+                        tracing::error!(
+                            "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
+                        );
+                        break;
+                    }
+                };
+                if overflowed.is_empty() {
+                    break;
                 }
-            };
-            if overflowed.is_empty() {
-                continue;
+                if rounds == MAX_BUMP_VERIFY_ROUNDS {
+                    tracing::error!(
+                        "hydrolysis renderer: pooled legacy layer bump buffers still \
+                         overflowing after {MAX_BUMP_VERIFY_ROUNDS} grow-and-re-render \
+                         rounds — the stage made no progress"
+                    );
+                    converged = false;
+                    break;
+                }
+                rounds += 1;
+                let DeferredLegacySource::Layer(scene) = &pending.source else {
+                    unreachable!("hydrolysis renderer: pooled legacy pending is not a layer")
+                };
+                self.state.counters.gpu_submissions += 1;
+                pending.readback = renderer
+                    .render_recording(
+                        device,
+                        queue,
+                        scene.as_ref(),
+                        &pending.view,
+                        width,
+                        height,
+                        peniko::Color::TRANSPARENT,
+                    )
+                    .expect("hydrolysis renderer: failed to re-render legacy layer scene");
             }
-            let DeferredLegacySource::Layer(scene) = &pending.source else {
-                unreachable!("hydrolysis renderer: pooled legacy pending is not a layer")
-            };
-            self.state.counters.gpu_submissions += 1;
-            pending.readback = renderer
-                .render_recording(
-                    device,
-                    queue,
-                    scene.as_ref(),
-                    &pending.view,
-                    width,
-                    height,
-                    peniko::Color::TRANSPARENT,
-                )
-                .expect("hydrolysis renderer: failed to re-render legacy layer scene");
-            let Some(ticket) = take_readback_ticket(pending) else {
-                continue;
-            };
-            match renderer.verify_bump_readbacks(device, vec![ticket]) {
-                Ok(overflowed) if overflowed.is_empty() => {}
-                Ok(_) => {
-                    tracing::error!(
-                        "hydrolysis renderer: legacy bump buffers still overflowing after \
-                         a demand-sized re-render — satisfy/covers disagree with the \
-                         shader accounting"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
-                    );
-                }
-            }
+            worst_rounds = worst_rounds.max(rounds);
         }
         for (renderer, pending) in core::mem::take(&mut deferred.pooled) {
             if pending.readback.is_some() {
@@ -1757,90 +1770,89 @@ impl HydrolysisRenderer {
         }
 
         let main = &mut deferred.main;
-        // Same one-shot construction as the pooled loop above: verify, then
-        // re-render each overflowed render once at its reported demand and
-        // verify once more — a second overflow means the growth accounting
-        // is buggy, which is reported rather than retried.
-        let mut owners = Vec::new();
-        let mut tickets = Vec::new();
-        for (index, pending) in main.iter_mut().enumerate() {
-            if let Some(ticket) = take_readback_ticket(pending) {
-                owners.push(index);
-                tickets.push(ticket);
+        let mut rounds = 0usize;
+        let main_converged = loop {
+            let mut owners = Vec::new();
+            let mut tickets = Vec::new();
+            for (index, pending) in main.iter_mut().enumerate() {
+                if let Some(ticket) = take_readback_ticket(pending) {
+                    owners.push(index);
+                    tickets.push(ticket);
+                }
             }
-        }
-        if tickets.is_empty() {
-            return;
-        }
-        let overflowed = match self.legacy_renderer.verify_bump_readbacks(device, tickets) {
-            Ok(overflowed) => overflowed,
-            Err(error) => {
-                tracing::error!(
-                    "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
-                );
-                return;
+            if tickets.is_empty() {
+                break true;
             }
-        };
-        if overflowed.is_empty() {
-            return;
-        }
-        for position in overflowed {
-            let pending = &mut main[owners[position]];
-            let view = pending.view.clone();
-            self.state.counters.gpu_submissions += 1;
-            pending.readback = match &pending.source {
-                DeferredLegacySource::Layer(scene) => self.legacy_renderer.render_recording(
-                    device,
-                    queue,
-                    scene.as_ref(),
-                    &view,
-                    width,
-                    height,
-                    peniko::Color::TRANSPARENT,
-                ),
-                DeferredLegacySource::Mask(active_layers) => {
-                    let mask_scene = build_active_layers_mask_scene(
-                        active_layers,
-                        deferred.surface_size.0,
-                        deferred.surface_size.1,
+            let overflowed = match self.legacy_renderer.verify_bump_readbacks(device, tickets) {
+                Ok(overflowed) => overflowed,
+                Err(error) => {
+                    tracing::error!(
+                        "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
                     );
-                    self.legacy_renderer.render_recording(
+                    break true;
+                }
+            };
+            if overflowed.is_empty() {
+                break true;
+            }
+            if rounds == MAX_BUMP_VERIFY_ROUNDS {
+                for position in &overflowed {
+                    let stage = match &main[owners[*position]].source {
+                        DeferredLegacySource::Layer(_) => "layer",
+                        DeferredLegacySource::Mask(_) => "active-layers mask",
+                    };
+                    tracing::error!(
+                        "hydrolysis renderer: legacy {stage} bump buffers still \
+                         overflowing after {MAX_BUMP_VERIFY_ROUNDS} grow-and-re-render \
+                         rounds — the stage made no progress"
+                    );
+                }
+                break false;
+            }
+            rounds += 1;
+            for position in overflowed {
+                let pending = &mut main[owners[position]];
+                let view = pending.view.clone();
+                self.state.counters.gpu_submissions += 1;
+                pending.readback = match &pending.source {
+                    DeferredLegacySource::Layer(scene) => self.legacy_renderer.render_recording(
                         device,
                         queue,
-                        &mask_scene,
+                        scene.as_ref(),
                         &view,
                         width,
                         height,
                         peniko::Color::TRANSPARENT,
-                    )
+                    ),
+                    DeferredLegacySource::Mask(active_layers) => {
+                        let mask_scene = build_active_layers_mask_scene(
+                            active_layers,
+                            deferred.surface_size.0,
+                            deferred.surface_size.1,
+                        );
+                        self.legacy_renderer.render_recording(
+                            device,
+                            queue,
+                            &mask_scene,
+                            &view,
+                            width,
+                            height,
+                            peniko::Color::TRANSPARENT,
+                        )
+                    }
                 }
+                .expect("hydrolysis renderer: failed to re-render legacy layer scene");
             }
-            .expect("hydrolysis renderer: failed to re-render legacy layer scene");
+        };
+        worst_rounds = worst_rounds.max(rounds);
+        converged &= main_converged;
+        if worst_rounds > 0 {
+            tracing::info!(
+                rounds = worst_rounds,
+                "legacy bump verification converged after grow-and-re-render rounds"
+            );
         }
-        let mut tickets = Vec::new();
-        for pending in main.iter_mut() {
-            if let Some(ticket) = take_readback_ticket(pending) {
-                tickets.push(ticket);
-            }
-        }
-        if tickets.is_empty() {
-            return;
-        }
-        match self.legacy_renderer.verify_bump_readbacks(device, tickets) {
-            Ok(overflowed) if overflowed.is_empty() => {}
-            Ok(_) => {
-                tracing::error!(
-                    "hydrolysis renderer: legacy bump buffers still overflowing after \
-                     a demand-sized re-render — satisfy/covers disagree with the \
-                     shader accounting"
-                );
-            }
-            Err(error) => {
-                tracing::error!(
-                    "hydrolysis renderer: legacy bump-buffer verification failed: {error}"
-                );
-            }
-        }
+        converged
     }
 
     /// Whether the last rendered frame left its legacy verification deferred:
@@ -1853,7 +1865,9 @@ impl HydrolysisRenderer {
         self.compositor
             .deferred_legacy_frame
             .as_ref()
-            .is_some_and(|deferred| !deferred.presented || !deferred.verify_ready())
+            .is_some_and(|deferred| {
+                !deferred.dead && (!deferred.presented || !deferred.verify_ready())
+            })
     }
 
     /// The `queue.submit` indices the stashed frame's tickets depend on —
@@ -1910,7 +1924,19 @@ impl HydrolysisRenderer {
         let Some(mut deferred) = self.compositor.deferred_legacy_frame.take() else {
             return false;
         };
-        self.verify_deferred_legacy(target.device, target.queue, &mut deferred);
+        if !self.verify_deferred_legacy(target.device, target.queue, &mut deferred) {
+            deferred.dead = true;
+        }
+        if deferred.dead {
+            // A stage made no progress: never composite the truncated
+            // frame — dead stays dead even if every ticket has since
+            // resolved. The stash stays (wasm32 may still hold live
+            // tickets it cannot wait on) and settles as presented — the
+            // surface keeps what it had.
+            deferred.presented = true;
+            self.compositor.deferred_legacy_frame = Some(deferred);
+            return false;
+        }
         tracing::debug!(
             target: "hydrolysis::vello_deferred",
             tail_latency_ms = deferred.stashed_at.elapsed().as_secs_f64() * 1_000.0,
@@ -1950,8 +1976,13 @@ impl HydrolysisRenderer {
         let Some(mut deferred) = self.compositor.deferred_legacy_frame.take() else {
             return false;
         };
-        self.verify_deferred_legacy(target.device, target.queue, &mut deferred);
-        let presented = deferred.surface_size == (target.width, target.height);
+        if !self.verify_deferred_legacy(target.device, target.queue, &mut deferred) {
+            // A stage made no progress: never composite the truncated
+            // frame — the caller fills the target with this frame's own
+            // work instead.
+            deferred.dead = true;
+        }
+        let presented = !deferred.dead && deferred.surface_size == (target.width, target.height);
         if presented {
             if deferred.ready.is_empty() {
                 self.clear_target_surface(
@@ -2552,6 +2583,7 @@ impl HydrolysisRenderer {
                 main: pending_main,
                 surface_size: (target.width, target.height),
                 presented: false,
+                dead: false,
                 #[cfg(hydrolysis_winit)]
                 watch_submissions,
                 stashed_at: Instant::now(),
@@ -2561,23 +2593,31 @@ impl HydrolysisRenderer {
                 // this frame's tickets in-frame is the stream's one wait
                 // (bounded, once per burst, not a per-frame cost). Presenting
                 // cleared colour or an unverified frame are both wrong.
-                self.verify_deferred_legacy(target.device, target.queue, &mut deferred);
-                if deferred.ready.is_empty() {
-                    self.clear_target_surface(
-                        target.device,
-                        target.queue,
-                        target.view,
-                        target.base_color,
-                        encoding,
-                        premultiply_alpha,
-                    );
+                if self.verify_deferred_legacy(target.device, target.queue, &mut deferred) {
+                    if deferred.ready.is_empty() {
+                        self.clear_target_surface(
+                            target.device,
+                            target.queue,
+                            target.view,
+                            target.base_color,
+                            encoding,
+                            premultiply_alpha,
+                        );
+                    } else {
+                        self.composite_ready_layers(&target, &deferred.ready, premultiply_alpha);
+                    }
+                    // Its content just reached the surface in this frame —
+                    // mark it presented so no settle pass re-presents it;
+                    // the next frame still composites the verified output
+                    // at its top.
+                    deferred.presented = true;
                 } else {
-                    self.composite_ready_layers(&target, &deferred.ready, premultiply_alpha);
+                    // A stage made no progress: never composite the
+                    // truncated frame — the surface keeps what the drain
+                    // left, and the stash rides along marked dead so its
+                    // unresolved tickets still resolve.
+                    deferred.dead = true;
                 }
-                // Its content just reached the surface in this frame — mark
-                // it presented so no settle pass re-presents it; the next
-                // frame still composites the verified output at its top.
-                deferred.presented = true;
             }
             // A stash kept for unresolved tickets (wasm32 cannot wait on
             // the GPU) must not be dropped — vello's map callback panics
