@@ -43,7 +43,9 @@ use crate::platform::{
     validated_window_frame,
 };
 use crate::renderer::{HydrolysisRenderer, HydrolysisTextContextMenuMode, MenuShortcutRegistry};
-use crate::runner::window::{RuntimeWindow, advance_runtime, handle_input_events, render_window};
+use crate::runner::window::{
+    RuntimeWindow, advance_runtime, handle_input_events, render_window, reports_ui_idle,
+};
 use crate::runner::{
     RenderDiagnosticsConfig, init_main_thread_executors, install_headless_window_managers,
     install_native_component_hooks, menu_bar,
@@ -773,7 +775,12 @@ impl AndroidSession {
         let redraw_pending = self.runtime.platform.take_redraw_pending();
         let wants_next_frame =
             !self.runtime.is_hidden() && (self.runtime.mode.is_pending() || redraw_pending);
-        if self.presented_once.get() && !wants_next_frame && !self.ready_logged.get() {
+        if reports_ui_idle(
+            self.presented_once.get(),
+            wants_next_frame,
+            self.runtime.is_hidden(),
+        ) && !self.ready_logged.get()
+        {
             tracing::info!(
                 target: "waterui::hydrolysis::android",
                 "hydrolysis android: first frame presented; ui idle"

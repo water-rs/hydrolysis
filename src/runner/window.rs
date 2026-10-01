@@ -203,6 +203,16 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
     }
 }
 
+/// Whether a frame transaction may report the pump's "first frame presented;
+/// ui idle" readiness line: it has presented at least once, and this wake
+/// leaves it idle — but never while hidden. A wake that arrives on a parked
+/// pump presents nothing, and a present-named readiness line emitted there
+/// reads as a frame presented while hidden.
+#[allow(dead_code)] // see RuntimeWindow::is_hidden
+pub(super) fn reports_ui_idle(presented_once: bool, wants_next_frame: bool, hidden: bool) -> bool {
+    presented_once && !wants_next_frame && !hidden
+}
+
 /// Applies the window's effective inner-size limits to the platform window:
 /// the explicit `Window::min_size`/`max_size` signals when set (read through
 /// the renderer so a change schedules a frame). The minimum defaults to the

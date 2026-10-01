@@ -1,7 +1,7 @@
 use super::headless::HeadlessPlatformWindow;
 use super::{
     FrameMode, RenderDiagnosticsConfig, RuntimeWindow, acquire_surface_frame, advance_runtime,
-    clamp_window_size, handle_input_events, pump_window_semantics, render_window,
+    clamp_window_size, handle_input_events, pump_window_semantics, render_window, reports_ui_idle,
     schedule_animation_update, schedule_redraw_or_refresh, surface_error_requires_reconfigure,
 };
 use crate::platform::{
@@ -252,6 +252,30 @@ fn hidden_window_reports_no_deadline_for_an_armed_animation() {
     assert!(
         !render_window(&mut runtime, &env, &mut || false),
         "a hidden window presents no frame"
+    );
+}
+
+/// The pump's "first frame presented; ui idle" readiness line must stay
+/// quiet while parked: the Choreographer wake a parked pump cannot unpost
+/// presents nothing, and a present-named line there reads as a frame
+/// presented while hidden — the false positive a device run counts.
+#[test]
+fn hidden_window_reports_no_ui_idle_readiness() {
+    assert!(
+        !reports_ui_idle(true, false, true),
+        "a parked pump must not report 'first frame presented; ui idle'"
+    );
+    assert!(
+        reports_ui_idle(true, false, false),
+        "a visible pump going idle after presenting reports readiness"
+    );
+    assert!(
+        !reports_ui_idle(false, false, false),
+        "readiness requires a presented frame"
+    );
+    assert!(
+        !reports_ui_idle(true, true, false),
+        "readiness requires the pump to be idle"
     );
 }
 
