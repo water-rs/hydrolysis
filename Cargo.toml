@@ -436,7 +436,7 @@ waterkit-video-player = { git = "https://github.com/water-rs/waterkit", rev = "f
 waterkit-video-streaming = { git = "https://github.com/water-rs/waterkit", rev = "f48ab29c10e0c7214aa6850c024eab2b4cbb43ae" }
 waterui-image = { git = "https://github.com/water-rs/image", rev = "27ab17cad98e8b08f50d9df5a66d9ec11529a69f" }
 waterui = { git = "https://github.com/water-rs/waterui", rev = "bfe92448c3f81e5704d89553215bc59bf195dc9f" }
-waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "49688bbba4a4f202eb1390f5cdc7eff2511c3554" }
+waterui-video-gpu = { git = "https://github.com/water-rs/video-gpu", rev = "d084827eab8b066f555c59c4d2db177530549c25" }
 waterui-chart = { git = "https://github.com/water-rs/chart", rev = "ff481c3d319b7d025a1fa0c1dcdb283f92be9689" }
 waterui-barcode = { git = "https://github.com/water-rs/barcode", rev = "4c530503f6e3277f44511f327db463a195482abd" }
 waterui-map-gpu = { git = "https://github.com/water-rs/map-gpu", rev = "13e199d255a11637e03341e0a947447851eff85e" }
