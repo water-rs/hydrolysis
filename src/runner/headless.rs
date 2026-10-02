@@ -237,9 +237,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            |env| {
-                native_resource_fonts(waterui_core::ResourceContext::from_environment(env))
-            },
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
         )
     }
 
@@ -268,9 +266,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            |env| {
-                native_resource_fonts(waterui_core::ResourceContext::from_environment(env))
-            },
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
         )
     }
 
@@ -360,9 +356,9 @@ impl HeadlessRuntime {
             height,
             style,
             |env| {
-                super::fonts::native_test_fonts(
-                    waterui_core::ResourceContext::from_environment(env),
-                )
+                super::fonts::native_test_fonts(waterui_core::ResourceContext::from_environment(
+                    env,
+                ))
             },
         )
     }

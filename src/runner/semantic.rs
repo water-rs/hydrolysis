@@ -113,9 +113,7 @@ impl SemanticRuntime {
             native_resource_fonts(waterui_core::ResourceContext::from_environment(env))
         });
         #[cfg(target_arch = "wasm32")]
-        Self::on_env(env, content, width, height, |_| {
-            parley::FontContext::new()
-        })
+        Self::on_env(env, content, width, height, |_| parley::FontContext::new())
     }
 
     /// Creates a semantic runtime for WaterUI test hosts: the same runtime

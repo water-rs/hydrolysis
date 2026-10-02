@@ -335,9 +335,7 @@ pub(super) fn native_resource_fonts(
 /// which is what lets a test name a bundled family like `Pacifico` and reach
 /// the overhang face on a host (macOS included) that does not carry it.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
-pub(crate) fn native_test_fonts(
-    resources: &waterui_core::ResourceContext,
-) -> parley::FontContext {
+pub(crate) fn native_test_fonts(resources: &waterui_core::ResourceContext) -> parley::FontContext {
     use parley::fontique::Blob;
     use std::sync::Arc;
 
@@ -367,9 +365,7 @@ mod tests {
     use waterui_core::layout::HorizontalAlignment;
     use waterui_text::styled::StyledStr;
 
-    use super::{
-        TEST_FALLBACK_FONTS, TEST_FONTS, deterministic_test_fonts, native_resource_fonts,
-    };
+    use super::{TEST_FALLBACK_FONTS, TEST_FONTS, deterministic_test_fonts, native_resource_fonts};
     use crate::renderer::{TextMeasureService, resolve_text_layout_input};
 
     /// One sample per script a `WaterUI` application is expected to draw.
@@ -434,10 +430,8 @@ mod tests {
     /// own location for one.
     #[test]
     fn staged_fonts_directory_supplies_resource_fonts() {
-        let staged = std::env::temp_dir().join(format!(
-            "hydrolysis-fonts-test-{}",
-            std::process::id()
-        ));
+        let staged =
+            std::env::temp_dir().join(format!("hydrolysis-fonts-test-{}", std::process::id()));
         let fonts_dir = staged.join("fonts");
         std::fs::create_dir_all(&fonts_dir).unwrap();
         let (name, bytes) = TEST_FALLBACK_FONTS
@@ -446,8 +440,7 @@ mod tests {
             .expect("PacificoSubset is pinned in TEST_FALLBACK_FONTS");
         std::fs::write(fonts_dir.join(name), bytes).unwrap();
 
-        let resources =
-            waterui_core::ResourceContext::new(staged.join("assets"), &fonts_dir);
+        let resources = waterui_core::ResourceContext::new(staged.join("assets"), &fonts_dir);
         let mut font_cx = native_resource_fonts(&resources);
 
         let family = font_cx
