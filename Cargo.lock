@@ -2981,6 +2981,7 @@ dependencies = [
 [[package]]
 name = "hydrolysis-m3"
 version = "0.3.1"
+source = "git+https://github.com/water-rs/hydrolysis-m3?rev=c16c410866c4694ada6cf110b83f946e0f30a079#c16c410866c4694ada6cf110b83f946e0f30a079"
 dependencies = [
  "cherenkov",
  "hydrolysis",
@@ -8459,6 +8460,7 @@ dependencies = [
 [[package]]
 name = "waterui-image"
 version = "0.5.0"
+source = "git+https://github.com/water-rs/image?rev=149fcea688d90ffa8edd1b66e64796dc1b7c3f38#149fcea688d90ffa8edd1b66e64796dc1b7c3f38"
 dependencies = [
  "half",
  "image",
@@ -8686,6 +8688,7 @@ dependencies = [
 [[package]]
 name = "waterui-svg"
 version = "0.4.0"
+source = "git+https://github.com/water-rs/svg?rev=bdc07b2488cef4823ed7995dd56384b2383d7348#bdc07b2488cef4823ed7995dd56384b2383d7348"
 dependencies = [
  "cherenkov",
  "suiteki",
@@ -10200,22 +10203,9 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "waterui-map-gpu"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "waterui-math"
-version = "0.2.0"
-
-[[patch.unused]]
 name = "cherenkov-cpu"
 version = "0.0.0"
 source = "git+https://github.com/water-rs/cherenkov?rev=2cae05177f4ae0252ae225ab9796a016037e8076#2cae05177f4ae0252ae225ab9796a016037e8076"
-
-[[patch.unused]]
-name = "xcb"
-version = "1.7.0"
-source = "git+https://github.com/rust-x-bindings/rust-xcb?rev=ae3b2cd080e78173223038ccbebdc644eaf4a9ad#ae3b2cd080e78173223038ccbebdc644eaf4a9ad"
 
 [[patch.unused]]
 name = "waterkit-camera"
@@ -10238,6 +10228,16 @@ version = "0.3.0"
 source = "git+https://github.com/water-rs/barcode?rev=8fce880bc3d053e5c49dcf9e695f0308ccfa38a0#8fce880bc3d053e5c49dcf9e695f0308ccfa38a0"
 
 [[patch.unused]]
+name = "waterui-map-gpu"
+version = "0.3.0"
+source = "git+https://github.com/water-rs/map-gpu?rev=fadcb404b749b70907d535a2449a6a9fcad798a7#fadcb404b749b70907d535a2449a6a9fcad798a7"
+
+[[patch.unused]]
+name = "waterui-math"
+version = "0.2.0"
+source = "git+https://github.com/water-rs/math?rev=d263e493d39e93ca822e621b0b951e377cbf496d#d263e493d39e93ca822e621b0b951e377cbf496d"
+
+[[patch.unused]]
 name = "waterui-particle"
 version = "0.2.0"
 source = "git+https://github.com/water-rs/particle?rev=039e0b9e7a15ea4a2b7651bbdce3d9dee0ba1752#039e0b9e7a15ea4a2b7651bbdce3d9dee0ba1752"
@@ -10246,3 +10246,8 @@ source = "git+https://github.com/water-rs/particle?rev=039e0b9e7a15ea4a2b7651bbd
 name = "wgpu-core-deps-wasm"
 version = "30.0.1"
 source = "git+https://github.com/water-rs/wgpu?rev=4b35d8bc968f6968b3cbae65b6e2e2ee132aa038#4b35d8bc968f6968b3cbae65b6e2e2ee132aa038"
+
+[[patch.unused]]
+name = "xcb"
+version = "1.7.0"
+source = "git+https://github.com/rust-x-bindings/rust-xcb?rev=ae3b2cd080e78173223038ccbebdc644eaf4a9ad#ae3b2cd080e78173223038ccbebdc644eaf4a9ad"
