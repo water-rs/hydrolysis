@@ -13,6 +13,9 @@ pub(super) struct HeadlessPlatformWindow {
     inner: OffscreenWindow,
     pending_events: VecDeque<InputEvent>,
     redraw_requested: Cell<bool>,
+    /// The occlusion report tests drive through [`Self::set_occluded`] —
+    /// the default `false` a headless window behaves with in production.
+    occluded: Cell<bool>,
     /// The pointer position the host knows right now — tracked from the
     /// positional events it dispatched, or set directly when the test's host
     /// knows a position it delivered no event for (an OS drag suppresses
@@ -42,6 +45,7 @@ impl HeadlessPlatformWindow {
             inner: OffscreenWindow::on_context(gpu, width, height, format),
             pending_events: VecDeque::new(),
             redraw_requested: Cell::new(false),
+            occluded: Cell::new(false),
             pointer_position: None,
         }
     }
@@ -100,6 +104,10 @@ impl PlatformWindow for HeadlessPlatformWindow {
         self.redraw_requested.set(true);
     }
 
+    fn is_occluded(&self) -> bool {
+        self.occluded.get()
+    }
+
     fn scale_factor(&self) -> f64 {
         self.inner.scale_factor()
     }
@@ -122,6 +130,12 @@ impl crate::platform::GpuSurfaceWindow for HeadlessPlatformWindow {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 impl HeadlessPlatformWindow {
+    /// The occlusion report the next [`RuntimeWindow::sync_occlusion`] pulls
+    /// — a test's stand-in for the window-system visibility signal.
+    pub(super) fn set_occluded(&self, occluded: bool) {
+        self.occluded.set(occluded);
+    }
+
     /// The last (min, max) content-size limits the runner applied, for tests.
     pub(super) fn applied_size_limits(
         &self,
@@ -223,7 +237,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            native_resource_fonts,
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
         )
     }
 
@@ -252,7 +266,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            native_resource_fonts,
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
         )
     }
 
@@ -289,7 +303,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            super::fonts::deterministic_test_fonts,
+            |_| super::fonts::deterministic_test_fonts(),
         )
     }
 
@@ -312,13 +326,14 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            super::fonts::deterministic_test_fonts,
+            |_| super::fonts::deterministic_test_fonts(),
         )
     }
 
     /// Same as [`Self::new_for_tests`] but loads the fonts the windowed
-    /// runners use — the system font collection plus `resources/fonts` — via
-    /// [`native_resource_fonts`] instead of the bundled deterministic set.
+    /// runners use — the system font collection plus the staged fonts
+    /// directory — via [`native_resource_fonts`] instead of the bundled
+    /// deterministic set.
     ///
     /// Text-measurement fidelity tests belong here: the deterministic fonts
     /// shape snugly, so a measure-versus-paint divergence that only appears on
@@ -340,7 +355,11 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            super::fonts::native_test_fonts,
+            |env| {
+                super::fonts::native_test_fonts(waterui_core::ResourceContext::from_environment(
+                    env,
+                ))
+            },
         )
     }
 
@@ -370,7 +389,7 @@ impl HeadlessRuntime {
             width,
             height,
             style,
-            super::fonts::deterministic_test_fonts,
+            |_| super::fonts::deterministic_test_fonts(),
         )
     }
 
@@ -381,13 +400,14 @@ impl HeadlessRuntime {
         width: u32,
         height: u32,
         style: impl crate::Style,
-        build_fonts: fn() -> parley::FontContext,
+        build_fonts: fn(&Environment) -> parley::FontContext,
     ) -> Self {
         let inspector = init_main_thread_executors();
         let inspector_probe = inspector
             .as_ref()
             .map(waterui::inspector::InspectorRuntime::runtime_probe);
-        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        let mut env = env.extending(waterui_graphics::scene_view::SceneViewMergeToParent);
+        waterui_core::install_application_resources(&mut env);
         waterui::inspector::install(&mut env, inspector);
         let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
         install_native_component_hooks(&mut env);
@@ -402,7 +422,7 @@ impl HeadlessRuntime {
         // seeded from this collection, and a self-drawn component that typesets
         // text itself reads it out of the environment instead of enumerating
         // the system's fonts for itself.
-        let fonts = FontCollection::new(build_fonts());
+        let fonts = FontCollection::new(build_fonts(&env));
         fonts.clone().install(&mut env);
 
         // Headless binaries (preview, tests) have no platform runner to install
@@ -459,7 +479,7 @@ impl HeadlessRuntime {
             popup_windows: Vec::new(),
             theme,
             fonts,
-            _executor_teardown: DrainExecutorOnDrop(local_executor.clone()),
+            _executor_teardown: DrainExecutorOnDrop::new(local_executor.clone()),
             _gpu_reclaim: ReclaimGpuOnDrop(gpu.clone()),
             gpu,
             local_executor,
@@ -547,8 +567,8 @@ impl HeadlessRuntime {
     }
 
     pub fn request_redraw(&mut self) {
-        self.runtime.platform.request_redraw();
-        self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
+        self.runtime.request_redraw();
+        self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
 
     /// The adapter and device this runtime renders on — attribution for a
@@ -605,8 +625,8 @@ impl HeadlessRuntime {
             .handle_accessibility_action(request, &action_env);
         if changed {
             window.request_refresh();
-            window.platform.request_redraw();
-            window.renderer.migration_counters_mut().host_wakeups += 1;
+            window.request_redraw();
+            window.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
         changed
     }
@@ -707,8 +727,8 @@ impl HeadlessRuntime {
         let changed = self.runtime.renderer.clear_ui_focus();
         if changed {
             self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
-            self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
+            self.runtime.request_redraw();
+            self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
         changed
     }
@@ -891,8 +911,8 @@ impl HeadlessRuntime {
                 popup.window.state.snapshot() != waterui::window::WindowState::Closed
             });
             self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
-            self.runtime.renderer.migration_counters_mut().host_wakeups += 1;
+            self.runtime.request_redraw();
+            self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
         let should_render = capture_snapshot
             || self.runtime.mode.is_pending()
@@ -905,13 +925,13 @@ impl HeadlessRuntime {
                 &mut || self.local_executor.drain(),
             )
         });
-        // Every pass below — popup renders, deferred-flush settles — can
-        // rebuild; `rebuilt` reports the OR of all of them, not only the
-        // last pass that replaced `render_result`.
+        // The popup renders below can rebuild too; `rebuilt` reports the OR
+        // of every pass this pump ran, not only the main window's render.
         let mut rebuilt = render_result.as_ref().is_some_and(|result| result.rebuilt);
-        // The pump's profile is the frame it rendered: the settle passes below
-        // only verify and present that frame's stash, and they replace
-        // `render_result` for its snapshot, not for what the frame did.
+        // The pump's profile is the main window's frame: a capture's readback
+        // ran inside that same render — queued after the frame's submissions
+        // on the same queue — and the popup passes below only composite their
+        // snapshots into it.
         let rendered_profile = render_result.as_ref().map(|result| result.profile);
         // A popup window pumps its scene the way the main window does: the
         // scene pump is where its retained tree — and with it the window's
@@ -945,54 +965,6 @@ impl HeadlessRuntime {
                 ));
             }
         }
-        // A pump must observe the frame it rendered — legacy verification that
-        // deferred by an interval is drained now, not by whatever renders
-        // next. The settle passes are drain-only: damage a render left
-        // pending is the next pump's work (one render per pump, as on the
-        // window path's single merge), while an armed animation keeps
-        // `mode`/`redraw` pending across every settle and would otherwise
-        // burn a full scene encode per pass on identical content.
-        // The settle passes below replace `render_result`; the pump's `rebuilt`
-        // must still reflect every pass, not only the last one.
-        while self.runtime.queued_deferred_flush {
-            self.runtime.queued_deferred_flush = false;
-            let settled = flush_deferred_window(&mut self.runtime, &self.env, capture_snapshot);
-            rebuilt |= settled.rebuilt;
-            render_result = Some(settled);
-        }
-        self.runtime.queued_deferred_flush = false;
-        if self.runtime.renderer.has_deferred_legacy_frame() {
-            render_result = Some(flush_deferred_window(
-                &mut self.runtime,
-                &self.env,
-                capture_snapshot,
-            ));
-        }
-        for (popup_index, popup) in self.popup_windows.iter_mut().enumerate() {
-            let mut captured = popup_snapshots
-                .iter_mut()
-                .find(|(index, _, _)| *index == popup_index);
-            let capture = captured.is_some();
-            while popup.queued_deferred_flush {
-                popup.queued_deferred_flush = false;
-                let settled = flush_deferred_window(popup, &self.env, capture);
-                rebuilt |= settled.rebuilt;
-                if let (Some(popup_snapshot), Some(entry)) = (settled.snapshot, captured.as_mut()) {
-                    entry.1 =
-                        crate::platform::validated_window_frame(popup.window.frame.snapshot());
-                    entry.2 = popup_snapshot;
-                }
-            }
-            popup.queued_deferred_flush = false;
-            if popup.renderer.has_deferred_legacy_frame() {
-                let settled = flush_deferred_window(popup, &self.env, capture);
-                if let (Some(popup_snapshot), Some(entry)) = (settled.snapshot, captured.as_mut()) {
-                    entry.1 =
-                        crate::platform::validated_window_frame(popup.window.frame.snapshot());
-                    entry.2 = popup_snapshot;
-                }
-            }
-        }
         if let Some(snapshot) = render_result
             .as_mut()
             .and_then(|result| result.snapshot.as_mut())
@@ -1009,10 +981,10 @@ impl HeadlessRuntime {
             .or_else(|| render_result.as_ref().map(|result| result.profile))
             .unwrap_or_default();
         if render_result.is_some() {
-            // The renderer's migration counters run from the frame's scene
-            // reset through every settle pass, so they include the GPU work
-            // verification and overflow re-renders did after the render.
-            profile.counters.migration = self.runtime.renderer.migration_counters();
+            // The renderer's frame-work counters are sampled after the frame's
+            // render and its readback have both submitted on the same queue,
+            // so they cover all the GPU work this pump ran for it.
+            profile.counters.frame_work = self.runtime.renderer.frame_work_counters();
         }
         profile.phases.executor_before = executor_before;
         profile.phases.input = input;

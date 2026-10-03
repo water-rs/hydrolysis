@@ -1,12 +1,12 @@
-mod cherenkov_migration;
-mod clip_transform;
 mod collection_update;
+mod frame_work;
 mod slider_size_indicator;
 use super::*;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use executor_core::LocalExecutor;
 use executor_core::async_task::{self, AsyncTask, Runnable};
@@ -32,6 +32,7 @@ mod gpu_surface_idle;
 mod gpu_surface_input;
 mod image_ingest;
 mod ime;
+mod interaction_state;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod layer_occlusion;
 mod layout_contract;
@@ -48,6 +49,8 @@ mod list_visibility;
 #[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
 mod menu_shortcuts;
 mod mid_flush_subview;
+#[cfg(all(feature = "accessibility", not(target_arch = "wasm32")))]
+mod nested_menu_dispatch;
 mod perf_full_rebuild;
 mod perf_scroll;
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,8 +79,9 @@ mod when_payload;
 mod window_background;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_mount;
-use kurbo::{Affine, BezPath, Point, Rect};
+use kurbo::{Affine, BezPath, Point, Rect, RoundedRectRadii};
 use waterui::gesture::{DragGesture, GestureObserver, MagnificationGesture};
+use waterui::interaction::InteractionState;
 use waterui::prelude::text;
 use waterui::style::FloatingStyle;
 use waterui::{Binding, Color, Computed, Signal, SignalExt as _, ViewExt as _};
@@ -99,7 +103,8 @@ use waterui_navigation::NavigationView;
 #[cfg(feature = "accessibility")]
 use waterui_navigation::tab::{Tab, TabsLayout};
 
-use crate::engine::{Brush, DrawContext, WidgetTheme};
+use crate::engine::WidgetTheme;
+use cherenkov::{Draw, Paint, Recorder, Shadow, WorkingColor};
 use waterui_backend_core::widget::{
     BadgeMetrics, ButtonMetrics, DividerMetrics, InputFieldMetrics, InteractionFocusBinding,
     InteractionMotion, ListMetrics, ModalInteraction, NavigationMetrics, NavigationMotion,
@@ -119,14 +124,7 @@ fn test_renderer_with_theme(theme: MinimalTestTheme) -> HydrolysisRenderer {
     let mut platform =
         crate::platform::OffscreenWindow::new_for_tests(160, 160, wgpu::TextureFormat::Rgba8Unorm);
     let surface = platform.surface();
-    let mut renderer = HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme));
-    renderer.set_frame_resources(
-        surface.adapter(),
-        surface.device(),
-        surface.queue(),
-        surface.device_loss(),
-    );
-    renderer
+    HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::new(theme))
 }
 
 /// Emits the semantic node a real widget emits for an interaction identity:
@@ -164,17 +162,34 @@ fn emit_focusable_node(
 ///
 /// This mirrors what the Apple path does in a test: `spawn_local` hands the work
 /// to the main queue and returns, and a unit test never runs a main loop, so the
-/// future is simply never polled. Runnables are therefore parked in a
-/// thread-local queue and dropped when the thread ends. Do not run them inline —
-/// these futures re-enter the renderer and its GPU work, which deadlocks when
-/// polled in the middle of the render call that spawned them.
-#[derive(Clone, Copy, Debug, Default)]
-struct TestLocalExecutor;
+/// future is simply never polled. Runnables are parked in a channel the test
+/// environment owns (`ParkedRunnables` below), so they are dropped when the
+/// test's last `Environment` clone drops — while this thread's locals are still
+/// alive — instead of inside thread-local teardown, where a task future whose
+/// drop touches a dead thread-local aborts the process
+/// (water-rs/hydrolysis#332). Do not run them inline — these futures re-enter
+/// the renderer and its GPU work, which deadlocks when polled in the middle of
+/// the render call that spawned them.
+#[derive(Clone, Debug)]
+struct TestLocalExecutor {
+    parked_tx: mpsc::Sender<Runnable>,
+}
 
-thread_local! {
-    /// Parks runnables so dropping them (which would cancel the task) is deferred
-    /// to thread teardown rather than happening inside `schedule`.
-    static PARKED_RUNNABLES: RefCell<Vec<Runnable>> = const { RefCell::new(Vec::new()) };
+/// Owns the queue [`TestLocalExecutor`] parks runnables into.
+///
+/// Stored in the environment by [`test_environment`], so the queue's lifetime
+/// is the test's `Environment`: dropping the receiver empties the channel on
+/// the owning thread. A schedule arriving after the owner is gone finds a dead
+/// channel and takes the same bounded-leak path the headless executor uses for
+/// its teardown race — the runnable cannot be dropped on the waker's thread
+/// (async-task's `spawn_local` thread check) and must not wait for
+/// thread-local teardown.
+struct ParkedRunnables {
+    #[expect(
+        dead_code,
+        reason = "held for its Drop — empties the parked queue while thread-locals are alive"
+    )]
+    rx: mpsc::Receiver<Runnable>,
 }
 
 impl LocalExecutor for TestLocalExecutor {
@@ -184,8 +199,11 @@ impl LocalExecutor for TestLocalExecutor {
     where
         Fut: Future + 'static,
     {
-        let (runnable, task) = async_task::spawn_local(fut, |runnable: Runnable| {
-            PARKED_RUNNABLES.with(|parked| parked.borrow_mut().push(runnable));
+        let parked_tx = self.parked_tx.clone();
+        let (runnable, task) = async_task::spawn_local(fut, move |runnable| {
+            if let Err(unsent) = parked_tx.send(runnable) {
+                std::mem::forget(unsent.0);
+            }
         });
         runnable.schedule();
         task
@@ -193,11 +211,17 @@ impl LocalExecutor for TestLocalExecutor {
 }
 
 pub(crate) fn test_environment() -> Environment {
+    let (parked_tx, parked_rx) = mpsc::channel();
     let _ = executor_core::try_init_local_executor(waterui::task::monitored_local_executor(
-        TestLocalExecutor,
+        TestLocalExecutor { parked_tx },
         waterui::task::RefreshRate::HEADLESS,
     ));
-    themed_test_environment()
+    let mut env = themed_test_environment();
+    // The receiver's owner is the environment itself: it drops with the
+    // test's last env clone, emptying the parked queue while thread-locals
+    // are still alive.
+    env.insert(ParkedRunnables { rx: parked_rx });
+    env
 }
 
 /// The same environment, but without pinning this thread's local executor, so
@@ -799,20 +823,42 @@ fn stacked_icon_buttons_above_gesture_surface_receive_clicks() {
 }
 
 #[test]
-fn gpu_surface_external_redraw_is_consumed_during_continuous_frames() {
-    use waterui_graphics::RedrawHandle;
+fn gpu_content_box_starts_dirty_and_coalesces_requests() {
+    // The redraw coalescing the retired `take_gpu_surface_redraw_request`
+    // owned now lives in `cherenkov_gpu::GpuContentBox`: a freshly installed
+    // producer is dirty (so its first frame draws without a request), and a
+    // request on an already-dirty producer does not re-wake the host. The
+    // consumption side — a render clearing `dirty` — is pinned by the
+    // gpu_surface_idle end-to-end render counts on Metal.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use waterui_graphics::{GpuContent, GpuContentView};
 
-    let redraw_handle = RedrawHandle::new();
-    redraw_handle.request_redraw();
+    struct Probe;
+    impl GpuContent for Probe {
+        fn setup(&mut self, _gpu: &waterui_graphics::gpu::Context<'_>) {}
+        fn render(&mut self, _frame: &mut waterui_graphics::gpu::Frame<'_>) {}
+    }
 
-    assert!(super::render::take_gpu_surface_redraw_request(
-        true,
-        &redraw_handle
-    ));
+    let wakes = Arc::new(AtomicU32::new(0));
+    let wake_counter = wakes.clone();
+    let mut view = GpuContentView::new(Probe);
+    let content = view.take_engine_content(move || {
+        wake_counter.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let handle = content.redraw_handle();
     assert!(
-        !redraw_handle.is_dirty(),
-        "a continuous inner frame must not leave the external wake coalesced forever"
+        handle.is_dirty(),
+        "freshly installed content draws on the next engine frame"
     );
+    handle.request_redraw();
+    assert_eq!(
+        wakes.load(Ordering::Relaxed),
+        0,
+        "a request on an already-dirty producer must not re-wake the host"
+    );
+    assert!(handle.is_dirty(), "the coalesced request stays outstanding");
 }
 
 #[test]
@@ -910,13 +956,6 @@ fn renderer_magnification_targets_outer_observer_in_stacked_gesture_chain() {
     };
     let env = test_environment();
     let bounds = kurbo::Rect::new(0.0, 0.0, 160.0, 160.0);
-    let surface = platform.surface();
-    renderer.set_frame_resources(
-        surface.adapter(),
-        surface.device(),
-        surface.queue(),
-        surface.device_loss(),
-    );
     capture_root_window(&mut renderer, view, &env, bounds);
 
     let point = kurbo::Point::new(60.0, 60.0);
@@ -1860,7 +1899,7 @@ fn interaction_state_does_not_migrate_between_semantic_identities() {
     let (state, _, _) =
         renderer.bind_interaction_target(second_key, Rect::new(100.0, 100.0, 180.0, 180.0), &env);
 
-    assert!(!state.pressed);
+    assert!(!state.state.contains(InteractionState::PRESSED));
     assert!(state.press_waves.is_empty());
 }
 
@@ -1895,7 +1934,10 @@ fn began_press_samples_a_visible_press_layer_after_fade_in() {
     renderer.set_frame_instant(later);
     renderer.begin_rebuild_frame();
     let (state, _, _) = renderer.bind_interaction_target(key, bounds, &env);
-    assert!(state.pressed, "held press must stay visually pressed");
+    assert!(
+        state.state.contains(InteractionState::PRESSED),
+        "held press must stay visually pressed"
+    );
     let wave = state
         .press_waves
         .latest()
@@ -1924,7 +1966,7 @@ fn interaction_engine_resolves_focus_state() {
         false,
     );
 
-    assert!(state.focus_visible);
+    assert!(state.state.contains(InteractionState::FOCUSED));
     assert_eq!(state.focus_progress, 1.0);
 }
 
@@ -2236,6 +2278,8 @@ pub(crate) struct MinimalTestTheme {
     slider_metric_sizes: Rc<RefCell<Vec<ControlSize>>>,
     /// Every slider track rect the theme was asked to draw.
     slider_track_draws: Rc<RefCell<Vec<Rect>>>,
+    /// Every `draw_interaction_state_layer` call, as `(state, resolved radii)`.
+    state_layer_draws: Rc<RefCell<Vec<(WidgetInteractionState, RoundedRectRadii)>>>,
 }
 
 impl crate::Style for MinimalTestTheme {
@@ -2305,12 +2349,23 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_button_chrome(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _style: ButtonStyle,
         _icon_only: bool,
         _state: WidgetInteractionState,
     ) {
+    }
+
+    fn draw_interaction_state_layer(
+        &self,
+        _draw: &mut Recorder,
+        _bounds: Rect,
+        radii: RoundedRectRadii,
+        _color: WorkingColor,
+        state: WidgetInteractionState,
+    ) {
+        self.state_layer_draws.borrow_mut().push((state, radii));
     }
 
     fn toggle_metrics(&self, _style: ToggleStyle) -> ToggleMetrics {
@@ -2327,7 +2382,7 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_toggle_switch(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _progress: f32,
         _selected: bool,
@@ -2337,7 +2392,7 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_toggle_checkbox(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _progress: f32,
         _state: WidgetInteractionState,
@@ -2356,14 +2411,14 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_stepper_button(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _end: StepperEnd,
         _state: WidgetInteractionState,
     ) {
     }
-    fn draw_stepper_decrement_icon(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_stepper_increment_icon(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_stepper_decrement_icon(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_stepper_increment_icon(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
     fn input_field_metrics(&self) -> InputFieldMetrics {
         InputFieldMetrics {
@@ -2379,17 +2434,25 @@ impl WidgetTheme for MinimalTestTheme {
         waterui_graphics::color::Color::srgb(0, 0, 0)
     }
 
-    fn input_selection_brush(&self) -> Brush {
-        Brush::from(peniko::Color::new([0.20, 0.45, 0.90, 0.28]))
+    fn input_selection_paint(&self) -> Paint {
+        Paint::Solid(
+            waterui::color::Srgb::new(0.20, 0.45, 0.90)
+                .resolve()
+                .with_alpha(0.28),
+        )
     }
 
-    fn input_caret_brush(&self, opacity: f32) -> Brush {
-        Brush::from(peniko::Color::new([0.12, 0.14, 0.18, opacity]))
+    fn input_caret_paint(&self, opacity: f32) -> Paint {
+        Paint::Solid(
+            waterui::color::Srgb::new(0.12, 0.14, 0.18)
+                .resolve()
+                .with_alpha(opacity),
+        )
     }
 
     fn draw_input_field(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _state: WidgetInteractionState,
     ) {
@@ -2409,27 +2472,29 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_text_context_menu_panel(&self, draw: &mut dyn DrawContext, bounds: Rect) {
+    fn draw_text_context_menu_panel(&self, draw: &mut Recorder, bounds: Rect) {
         let radii = kurbo::RoundedRectRadii::from_single_radius(
             self.text_context_menu_metrics().corner_radius,
         );
         // A level-2-like shadow under the panel, deep enough for tests to
         // distinguish it from the scrim's uniform dim.
-        draw.draw_shadow(
-            bounds,
-            radii,
-            kurbo::Vec2::new(0.0, 3.0),
-            6.0,
-            peniko::Color::new([0.0, 0.0, 0.0, 0.35]),
+        draw.shadow(
+            kurbo::RoundedRect::from_rect(bounds, radii),
+            Shadow::new(6.0, WorkingColor::new([0.0, 0.0, 0.0, 0.35]))
+                .offset(kurbo::Vec2::new(0.0, 3.0)),
         );
-        draw.fill_rounded_rect(
-            bounds,
-            radii,
-            &Brush::Solid(peniko::Color::new([0.96, 0.94, 0.97, 1.0])),
+        draw.fill(
+            kurbo::RoundedRect::from_rect(bounds, radii),
+            // `WorkingColor` components are linear Display P3; the intended
+            // panel colour is sRGB (0.96, 0.94, 0.97), so it converts rather
+            // than passing raw.
+            Paint::Solid(crate::renderer::working_color(peniko::Color::new([
+                0.96, 0.94, 0.97, 1.0,
+            ]))),
         );
     }
 
-    fn draw_text_context_menu_separator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_text_context_menu_separator(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
     fn picker_metrics(&self, _style: PickerStyle) -> PickerMetrics {
         PickerMetrics {
@@ -2457,23 +2522,23 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_picker_indicator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_picker_indicator(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
-    fn draw_picker_popup(&self, _draw: &mut dyn DrawContext, _popup_rect: Rect) {}
+    fn draw_picker_popup(&self, _draw: &mut Recorder, _popup_rect: Rect) {}
 
     fn draw_picker_popup_row_background(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _row_rect: Rect,
         _selected: bool,
     ) {
     }
 
-    fn draw_picker_separator(&self, _draw: &mut dyn DrawContext, _separator: Rect) {}
+    fn draw_picker_separator(&self, _draw: &mut Recorder, _separator: Rect) {}
 
     fn draw_radio_indicator(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _center: Point,
         _radius: f64,
         _state: RadioIndicatorState,
@@ -2497,7 +2562,7 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_slider_track(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         track_rect: Rect,
         _fill_rect: Rect,
         _size: ControlSize,
@@ -2508,7 +2573,7 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_slider_thumb(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _center: Point,
         _radius: f64,
         _size: ControlSize,
@@ -2528,7 +2593,7 @@ impl WidgetTheme for MinimalTestTheme {
         waterui_text::font::Font::default()
     }
 
-    fn draw_slider_value_indicator(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+    fn draw_slider_value_indicator(&self, _draw: &mut Recorder, bounds: Rect) {
         self.slider_value_indicator_draws.borrow_mut().push(bounds);
     }
 
@@ -2562,15 +2627,15 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_progress_linear_track(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _active_end: Option<f64>,
     ) {
     }
-    fn draw_progress_linear_fill(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_progress_linear_fill(&self, _draw: &mut Recorder, _bounds: Rect) {}
     fn draw_progress_linear_indeterminate(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _elapsed: Duration,
         _four_color: bool,
@@ -2578,23 +2643,17 @@ impl WidgetTheme for MinimalTestTheme {
     }
     fn draw_progress_circular_track(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _center: Point,
         _radius: f64,
         _width: f64,
         _active_turns: Option<f64>,
     ) {
     }
-    fn draw_progress_circular_fill(
-        &self,
-        _draw: &mut dyn DrawContext,
-        _path: &BezPath,
-        _width: f64,
-    ) {
-    }
+    fn draw_progress_circular_fill(&self, _draw: &mut Recorder, _path: &BezPath, _width: f64) {}
     fn draw_progress_loading(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _bounds: Rect,
         _elapsed: Duration,
         _four_color: bool,
@@ -2603,7 +2662,7 @@ impl WidgetTheme for MinimalTestTheme {
 
     fn draw_progress_circular_indeterminate(
         &self,
-        _draw: &mut dyn DrawContext,
+        _draw: &mut Recorder,
         _center: Point,
         _radius: f64,
         _width: f64,
@@ -2634,11 +2693,10 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_navigation_bar(&self, _draw: &mut dyn DrawContext, _bounds: Rect, _background: &Brush) {
-    }
+    fn draw_navigation_bar(&self, _draw: &mut Recorder, _bounds: Rect, _background: &Paint) {}
 
-    fn draw_navigation_bar_separator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_navigation_back_button(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_navigation_bar_separator(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_navigation_back_button(&self, _draw: &mut Recorder, _bounds: Rect) {}
     fn tabs_item_layout(&self, bar_width: f64, item_count: usize) -> TabItemLayout {
         self.tabs_layout_queries
             .borrow_mut()
@@ -2664,24 +2722,19 @@ impl WidgetTheme for MinimalTestTheme {
             icon_label_spacing: 4.0,
         }
     }
-    fn draw_tabs_bar(&self, _draw: &mut dyn DrawContext, _bounds: Rect, _top_edge: bool) {}
-    fn draw_tabs_highlight(
-        &self,
-        _draw: &mut dyn DrawContext,
-        bounds: Rect,
-        layout: TabItemLayout,
-    ) {
+    fn draw_tabs_bar(&self, _draw: &mut Recorder, _bounds: Rect, _top_edge: bool) {}
+    fn draw_tabs_highlight(&self, _draw: &mut Recorder, bounds: Rect, layout: TabItemLayout) {
         self.tabs_highlight_draws
             .borrow_mut()
             .push((bounds, layout));
     }
-    fn draw_scroll_indicator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_scroll_indicator(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
     fn divider_metrics(&self) -> DividerMetrics {
         DividerMetrics { thickness: 1.0 }
     }
 
-    fn draw_divider(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_divider(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
     fn badge_metrics(&self) -> BadgeMetrics {
         BadgeMetrics {
@@ -2703,10 +2756,10 @@ impl WidgetTheme for MinimalTestTheme {
         waterui_text::font::Font::default()
     }
 
-    fn draw_badge_small(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+    fn draw_badge_small(&self, _draw: &mut Recorder, bounds: Rect) {
         self.badge_draws.borrow_mut().push(bounds);
     }
-    fn draw_badge_large(&self, _draw: &mut dyn DrawContext, bounds: Rect) {
+    fn draw_badge_large(&self, _draw: &mut Recorder, bounds: Rect) {
         self.badge_draws.borrow_mut().push(bounds);
     }
 
@@ -2726,16 +2779,10 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_list_row_background(
-        &self,
-        _draw: &mut dyn DrawContext,
-        _bounds: Rect,
-        _alternate: bool,
-    ) {
-    }
-    fn draw_list_move_control(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_list_delete_control(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_list_separator(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
+    fn draw_list_row_background(&self, _draw: &mut Recorder, _bounds: Rect, _alternate: bool) {}
+    fn draw_list_move_control(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_list_delete_control(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_list_separator(&self, _draw: &mut Recorder, _bounds: Rect) {}
 
     fn table_metrics(&self) -> TableMetrics {
         TableMetrics {
@@ -2748,10 +2795,10 @@ impl WidgetTheme for MinimalTestTheme {
         }
     }
 
-    fn draw_table_background(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_table_header_background(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_table_cell_border(&self, _draw: &mut dyn DrawContext, _bounds: Rect) {}
-    fn draw_table_column_separator(&self, _draw: &mut dyn DrawContext, _from: Point, _to: Point) {}
+    fn draw_table_background(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_table_header_background(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_table_cell_border(&self, _draw: &mut Recorder, _bounds: Rect) {}
+    fn draw_table_column_separator(&self, _draw: &mut Recorder, _from: Point, _to: Point) {}
 }
 
 #[test]
@@ -3068,12 +3115,12 @@ fn secure_text_context_menu_excludes_copy_and_cut() {
 
     let mut env = test_environment();
     crate::localization::install(&mut env);
-    let entries = SemanticCore::build_text_context_menu_entries(&target, &env);
-    let labels = entries
+    let nodes = SemanticCore::build_text_context_menu_nodes(&target, &env);
+    let labels = nodes
         .iter()
-        .filter_map(|entry| match entry {
-            TextContextMenuEntry::Command { label, .. } => Some(label.as_str()),
-            TextContextMenuEntry::Divider => None,
+        .filter_map(|node| match node {
+            PopupMenuNode::Command { plain_label, .. } => Some(plain_label.as_str()),
+            PopupMenuNode::Menu { .. } | PopupMenuNode::Divider => None,
         })
         .collect::<Vec<_>>();
 
@@ -3388,4 +3435,147 @@ fn badge_indicator_anchors_to_the_content_trailing_edge() {
     assert_eq!(draws.len(), 1, "one badge indicator draw, got {draws:?}");
     assert_eq!(draws[0].x1, 12.0);
     assert_eq!(draws[0].y0, -2.0);
+}
+
+/// water-rs/hydrolysis#51: after the single-child collapse the surviving
+/// element reports the labelled container's resolved extent — the size it
+/// answered to the placement proposal, centred on the assigned frame — not
+/// the child's assigned frame. A root `button.padding(8)` is assigned the
+/// whole window while the padding answers only the button's fit plus its
+/// insets, so announcing the child's (8, 8, 144, 144) frame announces the
+/// button without its padding.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_collapsed_naming_scope_reports_the_containers_resolved_extent() {
+    let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+    let mut state = HydroState::default();
+    let measured = measure_view_dimensions_with_proposal(
+        &normalize_layout_view(AnyView::new(button("OK").padding_with(8.0)), &env),
+        ProposalSize::new(Some(160.0), Some(160.0)),
+        &mut state,
+        &env,
+        &theme,
+    )
+    .size;
+    let mut renderer = test_renderer();
+    let view = button("OK").padding_with(8.0).a11y_label("Named");
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled padding container must publish an accessibility tree");
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Named"))
+        .expect("the labelled element must exist");
+    let bounds = node.bounds().expect("the element must carry bounds");
+    assert!(
+        (bounds.width() - f64::from(measured.width)).abs() < 0.5
+            && (bounds.height() - f64::from(measured.height)).abs() < 0.5,
+        "the element must report the padding's resolved {}x{}, got {}x{}",
+        measured.width,
+        measured.height,
+        bounds.width(),
+        bounds.height(),
+    );
+    // Symmetric padding's envelope and the assigned frame share the window's
+    // centre — either anchor gives (80, 80) here.
+    let center_x = (bounds.x0 + bounds.x1) / 2.0;
+    let center_y = (bounds.y0 + bounds.y1) / 2.0;
+    assert!(
+        (center_x - 80.0).abs() < 0.5 && (center_y - 80.0).abs() < 0.5,
+        "the resolved extent must centre on the assigned frame, got centre ({center_x}, {center_y})",
+    );
+}
+
+/// water-rs/hydrolysis#51: the resolved extent is centred on the assigned
+/// frame — asymmetric insets shift the placed envelope off the window's
+/// centre, but the view's own answer to its proposal is positioned within the
+/// assigned bounds, so the reported bounds must not follow the content.
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_collapsed_naming_scope_centres_the_resolved_extent_on_the_assigned_frame() {
+    let env = test_environment();
+    let theme: Rc<dyn WidgetTheme> = Rc::new(MinimalTestTheme::default());
+    let mut state = HydroState::default();
+    let measured = measure_view_dimensions_with_proposal(
+        &normalize_layout_view(
+            AnyView::new(button("OK").padding_with([0.0, 0.0, 20.0, 0.0])),
+            &env,
+        ),
+        ProposalSize::new(Some(160.0), Some(160.0)),
+        &mut state,
+        &env,
+        &theme,
+    )
+    .size;
+    let mut renderer = test_renderer();
+    let view = button("OK")
+        .padding_with([0.0, 0.0, 20.0, 0.0])
+        .a11y_label("Named");
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled padding container must publish an accessibility tree");
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Named"))
+        .expect("the labelled element must exist");
+    let bounds = node.bounds().expect("the element must carry bounds");
+    assert!(
+        (bounds.width() - f64::from(measured.width)).abs() < 0.5
+            && (bounds.height() - f64::from(measured.height)).abs() < 0.5,
+        "the element must report the padding's resolved {}x{}, got {}x{}",
+        measured.width,
+        measured.height,
+        bounds.width(),
+        bounds.height(),
+    );
+    // Leading-only insets place the content envelope at (20, 0, 140, 160),
+    // centred at (90, 80) — the resolved extent must NOT follow it: the
+    // padded view's answer centres on the assigned frame (80, 80), and every
+    // edge of the reported bounds must stay inside the 160x160 window.
+    let center_x = (bounds.x0 + bounds.x1) / 2.0;
+    let center_y = (bounds.y0 + bounds.y1) / 2.0;
+    assert!(
+        (center_x - 80.0).abs() < 0.5 && (center_y - 80.0).abs() < 0.5,
+        "the resolved extent must centre on the assigned frame (80, 80), got ({center_x}, {center_y})",
+    );
+    assert!(
+        bounds.x0 >= -0.5 && bounds.y0 >= -0.5 && bounds.x1 <= 160.5 && bounds.y1 <= 160.5,
+        "a view entirely inside the window must report bounds inside it, got {bounds:?}",
+    );
+}
+
+/// A labelled container with several semantic children stands as a `Group`
+/// and reports the frame it was assigned — the frozen contract makes the
+/// assigned frame the view's frame (water-rs/hydrolysis#51 amendment).
+#[cfg(feature = "accessibility")]
+#[test]
+fn a_labelled_container_that_stands_reports_its_assigned_frame() {
+    let env = test_environment();
+    let mut renderer = test_renderer();
+    let view = vstack((text("A"), text("B"))).a11y_label("Named");
+    capture_root_window(&mut renderer, view, &env, Rect::new(0.0, 0.0, 160.0, 160.0));
+
+    let update = renderer
+        .take_accessibility_tree_update()
+        .expect("a labelled stack must publish an accessibility tree");
+    let (_, node) = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some("Named"))
+        .expect("the labelled element must exist");
+    assert_eq!(node.role(), AccessibilityNodeRole::Group);
+    let bounds = node.bounds().expect("the element must carry bounds");
+    assert!(
+        (bounds.width() - 160.0).abs() < 0.5 && (bounds.height() - 160.0).abs() < 0.5,
+        "a standing container reports its assigned frame, got {}x{}",
+        bounds.width(),
+        bounds.height(),
+    );
 }

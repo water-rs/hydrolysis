@@ -26,7 +26,7 @@ fn mount() -> OffscreenApp {
     let label = Binding::container(String::from("count: 0"));
     let name = Binding::container(Str::from_static(""));
     ui().theme(hydrolysis_m3::Material3::defaults())
-        .viewport(200, 100)
+        .viewport(200, 180)
         .mount_offscreen(move || {
             let count = count.clone();
             let label = label.clone();
@@ -218,6 +218,66 @@ fn screenshot_and_advance(client: &mut DuplexTransport, node: u64) {
         panic!("expected image content, got {:?}", frame.content);
     };
     assert_eq!(image.mime_type, "image/png");
+}
+
+/// water-rs/hydrolysis#324 repro: `screenshot` must return the current
+/// composite — the same image `advance(screenshot: true)` produces — not the
+/// frame from before the state change.
+#[test]
+fn mcp_screenshot_matches_advance_capture() {
+    let (mut client, server) = DuplexTransport::pair();
+    let info = ServerInfo {
+        name: "waterui-mcp-324".to_owned(),
+        version: Some("0.0.0".to_owned()),
+    };
+    let server_thread = std::thread::spawn(move || serve(server, mount, info));
+
+    initialize(&mut client);
+
+    let shot_png = |client: &mut DuplexTransport, tool: &str, args: serde_json::Value| {
+        let result = call_tool(client, tool, args);
+        let [Content::Image(image)] = result.content.as_slice() else {
+            panic!("expected image content, got {:?}", result.content);
+        };
+        image.data.clone()
+    };
+
+    let first = shot_png(&mut client, "screenshot", serde_json::json!({}));
+
+    let found = call_tool(
+        &mut client,
+        "find",
+        serde_json::json!({"label": "Increment"}),
+    );
+    let node = first_node_id(tool_text(&found));
+    let clicked = call_tool(
+        &mut client,
+        "act",
+        serde_json::json!({"node": node, "action": "click"}),
+    );
+    assert!(!clicked.is_error);
+    assert!(tool_text(&clicked).contains("count: 1"));
+
+    let stale = shot_png(&mut client, "screenshot", serde_json::json!({}));
+    let advanced = shot_png(
+        &mut client,
+        "advance",
+        serde_json::json!({"duration_ms": 16, "screenshot": true}),
+    );
+    assert_ne!(
+        first, stale,
+        "the capture after the state change must not equal the pre-change image"
+    );
+    assert_eq!(
+        stale, advanced,
+        "screenshot and advance(screenshot: true) must return the same image"
+    );
+
+    block_on(client.close()).expect("close transport");
+    server_thread
+        .join()
+        .expect("server thread panicked")
+        .expect("serve returned an error");
 }
 
 /// State filters (`checked`, `enabled`) and scope anchors (`within`,

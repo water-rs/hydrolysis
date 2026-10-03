@@ -12,13 +12,15 @@ import android.view.Surface
 object NativeBridge {
     /**
      * Incremented in lock-step with `JNI_SCHEMA` in the Rust runner.
-     * History: 1 = surface/input/IME events; 2 = the InputConnection range
-     * protocol (`nativeEditOp`/`nativeEditingState`, the `onNative*` editing
-     * pushes) and the `Context` handed to [nativeCreateSession]; 3 =
-     * `nativeAccessibilityAction` takes the accesskit action index plus
-     * selection-bounds, text and numeric payload channels.
+     * History: 1 = surface/input/IME events; 2 = `nativeSetVisible`
+     * (Activity `onStart`/`onStop` → pump visibility); 3 = the
+     * InputConnection range protocol (`nativeEditOp`/`nativeEditingState`,
+     * the `onNative*` editing pushes) and the `Context` handed to
+     * [nativeCreateSession]; 4 = `nativeAccessibilityAction` takes the
+     * accesskit action index plus selection-bounds, text and numeric
+     * payload channels.
      */
-    private const val SCHEMA: Int = 3
+    private const val SCHEMA: Int = 4
 
     private var initialized = false
 
@@ -94,6 +96,12 @@ object NativeBridge {
     )
 
     @JvmStatic external fun nativeSurfaceDestroyed(sessionPtr: Long, generation: Long)
+
+    /**
+     * The Activity's started state (`onStart`/`onStop`) — drives the frame
+     * pump's hidden flag together with the surface's attach/detach.
+     */
+    @JvmStatic external fun nativeSetVisible(sessionPtr: Long, visible: Boolean)
 
     @JvmStatic external fun nativeSetHighRefresh(sessionPtr: Long, fps: Float)
 

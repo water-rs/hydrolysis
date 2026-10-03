@@ -24,7 +24,12 @@ fn app_view(
     scroll(
         vstack((
             text("Hydrolysis on Android").title(),
-            "Vello paints this UI through the Kotlin host's SurfaceView band.",
+            "Cherenkov paints this UI through the Kotlin host's SurfaceView band.",
+            // Keeps the pump visibly pumping: the Material indeterminate
+            // indicator animates on the shared animation clock, so logcat
+            // shows `frame presented` lines while the window is visible and
+            // none while it is hidden.
+            loading(),
             Divider,
             text!("Tap count: {count}", count = count),
             button("Increment")
@@ -36,9 +41,14 @@ fn app_view(
             text!("Notifications: {enabled}", enabled = enabled),
             slider("Volume", &volume),
             text!("Volume: {volume}", volume = volume),
-            TextField::new("Email address", &name).prompt("Autofill: email"),
-            SecureField::new("Password", &password),
-            text!("Hello, {name}!", name = name),
+            // The autofill/IME cluster nests: the outer column would otherwise
+            // exceed `TupleViews`' arity once every control the Android landing
+            // tests drive sits in a single tuple.
+            vstack((
+                TextField::new("Email address", &name).prompt("Autofill: email"),
+                SecureField::new("Password", &password),
+                text!("Hello, {name}!", name = name),
+            )),
             Divider,
             layout::frame::Frame::new(Native::new(hydrolysis::PlatformView::new("webview")))
                 .height(220.0),

@@ -3,15 +3,198 @@ use std::path::PathBuf;
 use nami::Signal;
 use waterui::cursor::CursorStyle;
 use waterui::window::{Window as WuiWindow, WindowState};
-use waterui_graphics::RedrawHandle;
+use waterui_graphics::gpu::RedrawHandle;
 
 #[cfg(any(
     hydrolysis_winit,
     all(target_arch = "wasm32", feature = "web"),
     target_os = "android"
 ))]
-use waterui_graphics::gpu_surface::preferred_surface_format;
-use waterui_graphics::shared_context::reclaim_device;
+use waterui_graphics::gpu::preferred_surface_format;
+
+/// Releases the resources whose destruction `device` deferred.
+///
+/// `wgpu` retires finished submissions from inside `Queue::submit`, but the
+/// bookkeeping of the objects those submissions dropped is released only
+/// from `Device::poll`. A frame loop that only ever submits and presents
+/// therefore keeps every frame's share of it forever, so every frame owner
+/// calls this once per presented frame.
+///
+/// Non-blocking: `PollType::Poll` processes what has already completed and
+/// returns.
+pub(crate) fn reclaim_device(device: &wgpu::Device) {
+    if let Err(error) = poll_device(device, wgpu::PollType::Poll) {
+        tracing::warn!("GPU device did not reclaim deferred resources: {error}");
+    }
+}
+
+/// Lets `device` release everything dropped since the last call, then returns
+/// once its submitted work has finished.
+///
+/// Every type that owns a device to the end of its life calls this from
+/// `Drop`. A device with nothing outstanding returns immediately.
+pub(crate) fn drain_device_before_teardown(device: &wgpu::Device) {
+    if let Err(error) = poll_device(
+        device,
+        wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        },
+    ) {
+        tracing::warn!("GPU device did not drain before teardown: {error}");
+    }
+}
+
+/// Polls the device, treating a panic from inside `wgpu`'s bookkeeping as one
+/// more failed poll.
+///
+/// Device loss is detected lazily: the driver notices mid-call, purges the
+/// resource storage, and only then reports through the device-lost callback.
+/// A poll that lands in that window can dereference a resource the loss
+/// already removed, and `wgpu-core`'s storage lookup panics rather than
+/// erroring. The device is dead either way, so the poll reports failure and
+/// lets the owner move on instead of taking the process down over bookkeeping
+/// for a device that no longer exists.
+fn poll_device(
+    device: &wgpu::Device,
+    poll_type: wgpu::PollType,
+) -> Result<wgpu::PollStatus, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| device.poll(poll_type))) {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            Err(format!(
+                "poll panicked inside wgpu after device loss: {message}"
+            ))
+        }
+    }
+}
+
+/// The features a host-provided wgpu device must carry for the Cherenkov
+/// engine and the media the UI draws.
+///
+/// `PASSTHROUGH_SHADERS` loads the engine's precompiled fixed shaders on
+/// Metal and Vulkan (water-rs/cherenkov#57); adapters that lack it get the
+/// same hard `Engine::new` failure the engine documents. Normalized 16-bit
+/// textures feed HDR media paths wherever the adapter provides them.
+#[must_use]
+pub(crate) fn required_media_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    if cfg!(target_vendor = "apple") {
+        assert!(
+            adapter_features.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+            "the Apple GPU backend requires normalized 16-bit textures for HDR media"
+        );
+        assert!(
+            adapter_features.contains(wgpu::Features::PASSTHROUGH_SHADERS),
+            "the Apple GPU backend requires native shader passthrough for the engine's precompiled shaders"
+        );
+    }
+
+    let mut required =
+        adapter_features & (wgpu::Features::PIPELINE_CACHE | wgpu::Features::PASSTHROUGH_SHADERS);
+    if adapter_features.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+        required |= wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+    }
+    required
+}
+
+/// The GPU context a [`DeviceLoss`] handle was taken on: the device-creation
+/// chain and its engine-pool identity.
+#[derive(Clone, Debug)]
+pub(crate) struct GpuContextHandle {
+    /// Identity of this device creation chain for the engine pool.
+    pub(crate) context_id: u64,
+    /// The instance/adapter/device/queue of that chain, which the shared
+    /// Cherenkov engine requires of its `SharedDevice`.
+    pub(crate) shared_device: cherenkov_gpu::interop::SharedDevice,
+}
+
+/// A view onto whether one context's device has been lost.
+///
+/// wgpu reports a loss exactly once, through the callback installed at
+/// creation, and every resource call after it fails. Work that runs off the
+/// frame path takes a clone of this handle and asks it before each batch of
+/// wgpu calls; once the answer is `true` the only correct move is to stop.
+///
+/// The handle also carries the context it was created on, so a caller that
+/// only sees surface handles — adapter, device, queue and this handle —
+/// still reaches the device's full creation chain.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceLoss {
+    reason: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    gpu_context: Option<GpuContextHandle>,
+}
+
+impl DeviceLoss {
+    /// Starts observing a device: installs its device-lost callback so the
+    /// returned handle reports the loss the moment the driver announces it.
+    /// `context_id` identifies the creation chain `shared_device` names for
+    /// the engine pool.
+    ///
+    /// wgpu keeps one lost callback per device, so this belongs to whoever
+    /// owns the device and is called once, right after the device is created.
+    #[must_use]
+    pub(crate) fn observe(
+        shared_device: cherenkov_gpu::interop::SharedDevice,
+        context_id: u64,
+    ) -> Self {
+        let handle = Self {
+            reason: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu_context: Some(GpuContextHandle {
+                context_id,
+                shared_device: shared_device.clone(),
+            }),
+        };
+        // The callback must be `Send` — a `DeviceLoss` clone is not, since it
+        // carries the device's `SharedDevice` — so capture only the reason
+        // cell it writes to.
+        let reason_cell = std::sync::Arc::clone(&handle.reason);
+        shared_device
+            .device
+            .set_device_lost_callback(move |reason, message| {
+                tracing::error!(?reason, message, "GPU device was lost");
+                *reason_cell
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(format!("{reason:?}: {message}"));
+            });
+        handle
+    }
+
+    /// The GPU context this handle was taken on.
+    ///
+    /// # Panics
+    /// When the handle was built without a context (`DeviceLoss::default`) —
+    /// only [`SurfaceProvider`] device-loss handles can drive the engine pool.
+    pub(crate) fn gpu_context(&self) -> GpuContextHandle {
+        self.gpu_context.clone().unwrap_or_else(|| {
+            panic!(
+                "hydrolysis: a DeviceLoss outside a hydrolysis surface carries no GPU context; \
+                 take the handle from the surface's device_loss()"
+            )
+        })
+    }
+
+    /// Whether the driver has reported this device lost.
+    #[must_use]
+    pub(crate) fn is_lost(&self) -> bool {
+        self.reason().is_some()
+    }
+
+    /// The reason the driver gave for the loss, once it reported one.
+    #[must_use]
+    pub(crate) fn reason(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
 
 /// Input button mapped from a platform pointer event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +420,11 @@ pub enum InputEvent {
     /// told focus left and returned so it can report the transition (a
     /// terminal's DECSET 1004 focus tracking, for one).
     Focused(bool),
+    /// The window server reports the window's maximized flag — carried with
+    /// the `Resized` a chrome-driven maximize or restore produces, so the
+    /// app-side `Window::state` binding tracks the real window instead of
+    /// drifting when the user toggles maximization through the titlebar.
+    Maximized(bool),
     CloseRequested,
     /// One file of an OS file drag is hovering the window (winit
     /// `WindowEvent::HoveredFile`). winit emits one event per file of the
@@ -339,7 +527,7 @@ impl SurfaceFrame {
 pub(crate) fn select_hydrolysis_surface_format(
     caps: &wgpu::SurfaceCapabilities,
 ) -> wgpu::TextureFormat {
-    let preferred = preferred_surface_format(caps);
+    let preferred = preferred_surface_format(caps, true);
     if supports_hydrolysis_surface_format(preferred) {
         return normalize_surface_format(caps, preferred);
     }
@@ -417,18 +605,32 @@ pub trait SurfaceProvider {
     fn device(&self) -> &wgpu::Device;
     fn queue(&self) -> &wgpu::Queue;
     /// Reports this surface's device lost; taken when the device was opened.
-    fn device_loss(&self) -> &waterui_graphics::DeviceLoss;
+    fn device_loss(&self) -> &DeviceLoss;
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError>;
     fn present(&mut self, frame: SurfaceFrame);
     fn size(&self) -> (u32, u32);
     fn format(&self) -> wgpu::TextureFormat;
     fn resize(&mut self, width: u32, height: u32);
+    /// The identity of the GPU context this surface's device belongs to: the
+    /// key that binds one shared Cherenkov engine to one device creation
+    /// chain.
+    fn gpu_context_id(&self) -> u64;
+    /// The instance/adapter/device/queue this surface's device was created
+    /// from — all four from the same creation chain, which the shared
+    /// Cherenkov engine requires of its [`SharedDevice`].
+    fn shared_device(&self) -> cherenkov_gpu::interop::SharedDevice;
     /// Whether the pixels written into this surface's textures are consumed
     /// as premultiplied-alpha. True only for an OS surface configured
     /// `CompositeAlphaMode::PreMultiplied`; offscreen/readback targets keep
     /// their straight-alpha bytes and stay `false`.
     fn premultiply_alpha(&self) -> bool {
         false
+    }
+    /// The display's HDR headroom — the brightest white the surface
+    /// presents, relative to SDR white. Every current surface is SDR, so
+    /// the default is 1.0; an HDR presentation surface overrides it.
+    fn display_headroom(&self) -> f32 {
+        1.0
     }
 }
 
@@ -513,6 +715,16 @@ pub trait PlatformWindow: 'static {
     fn applies_size_limits(&self) -> bool {
         false
     }
+    /// Makes the window transparent or opaque to the compositor, following
+    /// a window background that switches between a translucent colour and an
+    /// opaque one after the window exists.
+    ///
+    /// Targets whose presentation has no composite alpha to switch —
+    /// offscreen surfaces keep their straight alpha regardless, and web and
+    /// embedded hosts present into a fixed surface — keep this default no-op.
+    fn set_transparent(&mut self, transparent: bool) {
+        let _ = transparent;
+    }
     fn drain_events(&mut self) -> Vec<InputEvent>;
     fn request_redraw(&self);
     fn scale_factor(&self) -> f64;
@@ -537,6 +749,19 @@ pub trait PlatformWindow: 'static {
     /// stream delivered.
     fn pointer_position(&self) -> Option<(f32, f32)> {
         None
+    }
+    /// Whether the host reports the window cannot be seen right now:
+    /// minimized, fully occluded, backgrounded, or without a surface to
+    /// present into. The runner parks the frame pump while this holds —
+    /// no frames, no wakes, no GPU-content pulls — and unparks it on the
+    /// first report that flips back.
+    ///
+    /// The default `false` is the explicit gap: a host with no visibility
+    /// signal keeps pumping rather than guessing, which is what the
+    /// contract requires — a platform without a signal is documented,
+    /// never polled.
+    fn is_occluded(&self) -> bool {
+        false
     }
     fn sync_text_input_state(&mut self, state: Option<TextInputState>);
     fn set_cursor_style(&mut self, style: CursorStyle);
@@ -588,16 +813,29 @@ pub struct OffscreenGpuContext {
 
 #[derive(Debug)]
 struct OffscreenGpuContextInner {
+    /// The instance this adapter came from — the shared Cherenkov engine
+    /// keeps it alive for as long as the device is in use.
+    instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Identity of this device creation chain for the engine pool.
+    context_id: u64,
     /// Reports this device lost; taken when the device was opened.
-    device_loss: waterui_graphics::DeviceLoss,
+    device_loss: DeviceLoss,
+}
+
+/// One id per device creation chain — instances, adapters, devices and
+/// queues are only shared inside one, so it is also the Cherenkov engine key.
+static NEXT_GPU_CONTEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_gpu_context_id() -> u64 {
+    NEXT_GPU_CONTEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Drop for OffscreenGpuContextInner {
     fn drop(&mut self) {
-        waterui_graphics::shared_context::drain_device_before_teardown(&self.device);
+        crate::platform::drain_device_before_teardown(&self.device);
     }
 }
 
@@ -643,7 +881,7 @@ impl OffscreenGpuContext {
         )
     )]
     async fn new_with_adapter_selection(selection: AdapterSelection) -> Self {
-        let (_instance, adapter) =
+        let (instance, adapter) =
             request_instance_and_adapter("hydrolysis offscreen surface", selection).await;
 
         ensure_compute_capable_adapter(
@@ -655,21 +893,24 @@ impl OffscreenGpuContext {
         // PIPELINE_CACHE is requested wherever the adapter has it: without the
         // feature `create_pipeline_cache` errors, so the persistent store in
         // `pipeline_cache.rs` can only exist when it was requested here.
+        // PASSTHROUGH_SHADERS loads the engine's precompiled fixed shaders on
+        // Metal and Vulkan (water-rs/cherenkov#57); adapters that lack it get
+        // the same hard Engine::new failure the engine documents.
         #[cfg(not(feature = "frame-profile"))]
-        let required_features =
-            waterui_graphics::shared_context::required_media_features(adapter.features())
-                | (adapter.features() & wgpu::Features::PIPELINE_CACHE);
+        let required_features = crate::platform::required_media_features(adapter.features())
+            | (adapter.features()
+                & (wgpu::Features::PIPELINE_CACHE | wgpu::Features::PASSTHROUGH_SHADERS));
         // The frame profiler timestamps GPU work through timestamp queries
         // written between submits, which needs both timestamp features;
         // request them where the adapter has them and report absent where it
         // does not — the feature never fails a device request over this.
         #[cfg(feature = "frame-profile")]
-        let required_features =
-            waterui_graphics::shared_context::required_media_features(adapter.features())
-                | (adapter.features()
-                    & (wgpu::Features::TIMESTAMP_QUERY
-                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-                        | wgpu::Features::PIPELINE_CACHE));
+        let required_features = crate::platform::required_media_features(adapter.features())
+            | (adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                    | wgpu::Features::PIPELINE_CACHE
+                    | wgpu::Features::PASSTHROUGH_SHADERS));
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("hydrolysis-offscreen-device"),
@@ -681,13 +922,22 @@ impl OffscreenGpuContext {
             })
             .await
             .expect("hydrolysis offscreen surface: failed to request wgpu device");
-        let device_loss = waterui_graphics::DeviceLoss::observe(&device);
+        let context_id = next_gpu_context_id();
+        let shared_device = cherenkov_gpu::interop::SharedDevice {
+            instance: instance.clone(),
+            adapter: adapter.clone(),
+            device: device.clone(),
+            queue: queue.clone(),
+        };
+        let device_loss = DeviceLoss::observe(shared_device, context_id);
 
         Self {
             inner: std::sync::Arc::new(OffscreenGpuContextInner {
+                instance,
                 adapter,
                 device,
                 queue,
+                context_id,
                 device_loss,
             }),
         }
@@ -845,7 +1095,8 @@ mod adapter_selection_tests {
             backend: wgpu::Backend::Vulkan,
             subgroup_min_size: 0,
             subgroup_max_size: 0,
-            transient_saves_memory: false,
+            transient_saves_memory: Some(false),
+            limit_bucket: None,
         }
     }
 
@@ -936,7 +1187,7 @@ async fn probe_adapters(
         // renderer whatever `request_adapter` returns. Asking wgpu for a
         // fallback adapter directly skipped the compute-capability filter and
         // the ranking below, which is how a CPU adapter that cannot run the
-        // compute pipelines reached vello's shader init.
+        // compute pipelines reached the engine's shader init.
         let mut best_candidate: Option<(AdapterPreference, wgpu::Adapter)> = None;
         let mut inspected_adapters: Vec<String> = Vec::new();
 
@@ -1037,6 +1288,7 @@ async fn request_instance_and_adapter(
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: selection.force_fallback_adapter(),
+                apply_limit_buckets: false,
             })
             .await
             .expect("hydrolysis adapter selection: failed to find web adapter");
@@ -1215,7 +1467,7 @@ impl SurfaceProvider for OffscreenSurface {
         &self.gpu.inner.queue
     }
 
-    fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+    fn device_loss(&self) -> &DeviceLoss {
         &self.gpu.inner.device_loss
     }
 
@@ -1282,6 +1534,156 @@ impl SurfaceProvider for OffscreenSurface {
             self.height = height;
             self.last_presented = None;
         }
+    }
+
+    fn gpu_context_id(&self) -> u64 {
+        self.gpu.inner.context_id
+    }
+
+    fn shared_device(&self) -> cherenkov_gpu::interop::SharedDevice {
+        let inner = &*self.gpu.inner;
+        cherenkov_gpu::interop::SharedDevice {
+            instance: inner.instance.clone(),
+            adapter: inner.adapter.clone(),
+            device: inner.device.clone(),
+            queue: inner.queue.clone(),
+        }
+    }
+}
+
+/// An offscreen Cherenkov surface on the shared engine, for scene-level tests
+/// and exports that mount [`cherenkov::Content`] directly instead of driving
+/// the full view pipeline.
+///
+/// One `OffscreenSceneSurface` owns a GPU context, the engine shared on that
+/// context, an engine surface the caller mounts content onto through
+/// [`Self::surface`], and an offscreen presentation target for
+/// [`Self::readback_rgba8`]. Frames are rendered explicitly through
+/// [`Self::engine`]'s `Engine::render`; nothing pumps or pumps-on-wake here.
+pub struct OffscreenSceneSurface {
+    target: OffscreenSurface,
+    cherenkov: crate::engine::CherenkovSurface,
+    engine: std::rc::Rc<crate::engine::GpuEngine>,
+}
+
+impl core::fmt::Debug for OffscreenSceneSurface {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OffscreenSceneSurface")
+            .field("size", &self.target.size())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OffscreenSceneSurface {
+    crate::engine::cfg_async_fn! {
+        /// Creates the host on the adapter WaterUI would render an
+        /// application on, at `width × height` sRGB pixels.
+        ///
+        /// # Panics
+        /// Panics when no compute-capable adapter exists or the engine cannot
+        /// be created — same failure contract as [`OffscreenGpuContext::new`].
+        /// Async on wasm32, where the engine surface creation inside awaits
+        /// the browser's GPU device.
+        #[must_use]
+        pub fn new(width: u32, height: u32) -> Self {
+            crate::engine::engine_await!(Self::on_context(
+                pollster::block_on(OffscreenGpuContext::new()),
+                width,
+                height,
+            ))
+        }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    crate::engine::cfg_async_fn! {
+        /// Creates the host on a test context, allowing compute-capable
+        /// software adapters so CI can run on llvmpipe.
+        #[must_use]
+        pub fn new_for_tests(width: u32, height: u32) -> Self {
+            crate::engine::engine_await!(Self::on_context(
+                OffscreenGpuContext::new_for_tests_blocking(),
+                width,
+                height
+            ))
+        }
+    }
+
+    crate::engine::cfg_async_fn! {
+        /// Creates the host on an already-requested [`OffscreenGpuContext`],
+        /// so every surface built on one context shares its device and engine.
+        ///
+        /// Async on wasm32, where `shared_engine` and `CherenkovSurface::new`
+        /// await the browser's GPU device.
+        #[must_use]
+        pub fn on_context(gpu: OffscreenGpuContext, width: u32, height: u32) -> Self {
+            let target = OffscreenSurface::on_context(
+                gpu,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+            );
+            let engine = crate::engine::engine_await!(crate::engine::shared_engine(
+                target.gpu_context_id(),
+                target.adapter(),
+                target.shared_device(),
+                || {},
+            ));
+            let cherenkov = crate::engine::engine_await!(crate::engine::CherenkovSurface::new(
+                std::rc::Rc::clone(&engine),
+                target.device(),
+                target.adapter().get_info().backend,
+                (width.max(1), height.max(1)),
+            ));
+            Self {
+                target,
+                cherenkov,
+                engine,
+            }
+        }
+    }
+
+    /// The engine this host renders with — callers drive
+    /// `engine.render(FrameTime)` themselves.
+    #[must_use]
+    pub fn engine(&self) -> &std::rc::Rc<crate::engine::GpuEngine> {
+        &self.engine
+    }
+
+    /// The engine surface behind this host — `clear_color`, `update`, layer
+    /// mounts and transactions route through it.
+    #[must_use]
+    pub fn surface(&self) -> &cherenkov::Surface<cherenkov_gpu::Gpu> {
+        self.cherenkov.engine_surface()
+    }
+
+    /// Presents the last rendered engine frame into the offscreen target and
+    /// reads it back as premultiplied sRGB RGBA8 rows (`width * 4` bytes per
+    /// row).
+    ///
+    /// Call after `engine.render(..)`; a call before the engine produces its
+    /// first texture panics through the surface's presentation contract.
+    #[must_use]
+    pub fn readback_rgba8(&mut self) -> Vec<u8> {
+        let (width, height) = self.target.size();
+        let frame = self
+            .target
+            .acquire()
+            .expect("hydrolysis offscreen scene surface: acquire failed");
+        let texture = frame.texture().clone();
+        self.cherenkov.present_into(
+            self.target.device(),
+            self.target.queue(),
+            &texture,
+            true,
+            1.0,
+        );
+        crate::readback::readback_texture_rgba8(
+            self.target.device(),
+            self.target.queue(),
+            &texture,
+            width,
+            height,
+        )
     }
 }
 
@@ -1469,6 +1871,7 @@ mod winit_impl {
     #[cfg(hydrolysis_macos_system_webview)]
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use nami::Signal;
     #[cfg(hydrolysis_macos_system_webview)]
@@ -1487,7 +1890,7 @@ mod winit_impl {
     use objc2_quartz_core::{CAMetalLayer, CAShapeLayer};
     #[cfg(hydrolysis_macos_system_webview)]
     use objc2_web_kit::WKWebView;
-    use waterui::window::WindowState;
+    use waterui::window::{UserAttention, WindowLevel, WindowState};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::{
         dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
@@ -1503,9 +1906,10 @@ mod winit_impl {
     };
 
     use super::{
-        CursorStyle, GpuSurfaceWindow, InputEvent, KeyCode, KeyState, Modifiers, PlatformWindow,
-        PointerButton, PointerKind, RedrawHandle, SurfaceError, SurfaceFrame, SurfaceProvider,
-        TextInputPurpose, TextInputState, TouchPhase, reclaim_device, validated_window_frame,
+        CursorStyle, DeviceLoss, GpuSurfaceWindow, InputEvent, KeyCode, KeyState, Modifiers,
+        PlatformWindow, PointerButton, PointerKind, RedrawHandle, SurfaceError, SurfaceFrame,
+        SurfaceProvider, TextInputPurpose, TextInputState, TouchPhase, reclaim_device,
+        validated_window_frame,
     };
 
     #[derive(Clone)]
@@ -1514,110 +1918,22 @@ mod winit_impl {
         adapter: wgpu::Adapter,
         device: wgpu::Device,
         queue: wgpu::Queue,
+        /// Identity of this device creation chain for the engine pool.
+        context_id: u64,
         /// Reports this device lost; taken when the device was opened.
-        device_loss: waterui_graphics::DeviceLoss,
-        /// One parked `device.poll` thread for this device, spawned on first
-        /// watch — shared by every surface cloned from this context.
-        poll_driver: std::sync::Arc<std::sync::OnceLock<GpuPollDriver>>,
-    }
-
-    impl WinitGpuContext {
-        /// The device's shared poll driver, started on first use.
-        pub(crate) fn poll_driver(&self) -> &GpuPollDriver {
-            self.poll_driver
-                .get_or_init(|| GpuPollDriver::spawn(self.device.clone()))
-        }
-    }
-
-    /// Drives wgpu's asynchronous callback delivery for one device so the
-    /// event loop never polls the GPU itself.
-    ///
-    /// The driver owns a single parked thread: each `watch` registration
-    /// blocks it in `device.poll(PollType::Wait)` for exactly the
-    /// submissions its tickets were issued on — never `None`, which would
-    /// wait on the latest submission at poll time and let later frames'
-    /// submissions (including presents that may depend on the settle
-    /// itself) extend the wait indefinitely. Watches run in registration
-    /// order, so one registration waits out at most its own submissions.
-    #[derive(Clone)]
-    pub(crate) struct GpuPollDriver {
-        tx: std::sync::mpsc::Sender<Watch>,
-    }
-
-    /// One parked watch: the submissions to wait out, then the wake.
-    struct Watch {
-        submissions: Vec<wgpu::SubmissionIndex>,
-        wake: Box<dyn FnOnce() + Send + 'static>,
-    }
-
-    /// Delivers the watch's wake if the driver thread exits its service
-    /// loop early — a poll panic is the only path no log line covers, and
-    /// an undelivered wake strands the armed settle exactly like a lost
-    /// completion would.
-    struct WakeOnDrop(Option<Box<dyn FnOnce() + Send + 'static>>);
-
-    impl Drop for WakeOnDrop {
-        fn drop(&mut self) {
-            if let Some(wake) = self.0.take() {
-                wake();
-            }
-        }
-    }
-
-    impl GpuPollDriver {
-        fn spawn(device: wgpu::Device) -> Self {
-            let (tx, rx) = std::sync::mpsc::channel::<Watch>();
-            std::thread::Builder::new()
-                .name("hydrolysis-gpu-poll".to_owned())
-                .spawn(move || {
-                    while let Ok(watch) = rx.recv() {
-                        let wake = WakeOnDrop(Some(watch.wake));
-                        for submission_index in watch.submissions {
-                            if let Err(error) = device.poll(wgpu::PollType::Wait {
-                                submission_index: Some(submission_index),
-                                timeout: None,
-                            }) {
-                                // The wake still fires: the drain re-checks
-                                // the tickets itself, and a lost device must
-                                // be surfaced there rather than strand the
-                                // last frame off-screen.
-                                tracing::warn!(
-                                    "hydrolysis gpu poll driver: device poll failed: {error:?}"
-                                );
-                                break;
-                            }
-                        }
-                        drop(wake);
-                    }
-                })
-                .expect("hydrolysis: failed to spawn the gpu poll driver thread");
-            Self { tx }
-        }
-
-        /// Park until the GPU retires `submissions` — the queue indexes the
-        /// watch's tickets were issued on — then run `wake`. Returns
-        /// `false` when the driver thread is gone, which callers treat the
-        /// same as a lost device: drain now and let the verify report it.
-        /// An empty list resolves immediately, matching a stash that owes
-        /// no readbacks.
-        pub(crate) fn watch(
-            &self,
-            submissions: Vec<wgpu::SubmissionIndex>,
-            wake: impl FnOnce() + Send + 'static,
-        ) -> bool {
-            self.tx
-                .send(Watch {
-                    submissions,
-                    wake: Box::new(wake),
-                })
-                .is_ok()
-        }
+        device_loss: DeviceLoss,
     }
 
     pub struct WinitSurface {
         surface: wgpu::Surface<'static>,
         gpu: WinitGpuContext,
         config: wgpu::SurfaceConfiguration,
+        /// The window this surface presents into — `present` asks it for
+        /// the platform's next-frame pacing (`pre_present_notify`), which
+        /// on Wayland requests the frame callback a compositor withholds
+        /// from a hidden surface. `None` for the macOS CoreAnimationLayer
+        /// overlay, which has no winit window of its own.
+        window: Option<Arc<NativeWindow>>,
     }
 
     impl core::fmt::Debug for WinitSurface {
@@ -1739,6 +2055,7 @@ mod winit_impl {
             height: u32,
             requires_transparency: bool,
             on_x11: bool,
+            window: Option<Arc<NativeWindow>>,
         ) -> Self {
             let caps = surface.get_capabilities(&gpu.adapter);
             let format = super::select_hydrolysis_surface_format(&caps);
@@ -1753,6 +2070,7 @@ mod winit_impl {
             let config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 width: width.max(1),
                 height: height.max(1),
                 present_mode: wgpu::PresentMode::AutoVsync,
@@ -1765,6 +2083,7 @@ mod winit_impl {
                 surface,
                 gpu,
                 config,
+                window,
             }
         }
 
@@ -1800,9 +2119,10 @@ mod winit_impl {
                     );
                     let required_limits = super::required_device_limits(&adapter);
                     let required_features =
-                        waterui_graphics::shared_context::required_media_features(
-                            adapter.features(),
-                        ) | (adapter.features() & wgpu::Features::PIPELINE_CACHE);
+                        crate::platform::required_media_features(adapter.features())
+                            | (adapter.features()
+                                & (wgpu::Features::PIPELINE_CACHE
+                                    | wgpu::Features::PASSTHROUGH_SHADERS));
                     let (device, queue) = adapter
                         .request_device(&wgpu::DeviceDescriptor {
                             label: Some("hydrolysis-winit-device"),
@@ -1814,15 +2134,22 @@ mod winit_impl {
                         })
                         .await
                         .expect("hydrolysis winit surface: failed to request device");
-                    let device_loss = waterui_graphics::DeviceLoss::observe(&device);
+                    let context_id = super::next_gpu_context_id();
+                    let shared_device = cherenkov_gpu::interop::SharedDevice {
+                        instance: instance.clone(),
+                        adapter: adapter.clone(),
+                        device: device.clone(),
+                        queue: queue.clone(),
+                    };
+                    let device_loss = DeviceLoss::observe(shared_device, context_id);
                     (
                         WinitGpuContext {
                             instance,
                             adapter,
                             device,
                             queue,
+                            context_id,
                             device_loss,
-                            poll_driver: std::sync::Arc::new(std::sync::OnceLock::new()),
                         },
                         surface,
                     )
@@ -1838,9 +2165,26 @@ mod winit_impl {
                     size.height,
                     requires_transparency,
                     Self::window_is_x11(&window),
+                    Some(window),
                 ),
                 gpu,
             )
+        }
+
+        /// Re-selects the composite alpha mode for a window whose background
+        /// switched between opaque and translucent, reconfiguring only when
+        /// the mode actually changes. The selection is the one creation uses,
+        /// so a surface that offers no transparency-capable mode fails the
+        /// same way — on X11 that is a window created opaque, whose visual
+        /// cannot gain an alpha channel afterwards.
+        fn set_transparent(&mut self, transparent: bool) {
+            let caps = self.surface.get_capabilities(&self.gpu.adapter);
+            let alpha_mode =
+                Self::select_alpha_mode(&caps, transparent, &self.gpu.adapter.get_info());
+            if alpha_mode != self.config.alpha_mode {
+                self.config.alpha_mode = alpha_mode;
+                self.surface.configure(&self.gpu.device, &self.config);
+            }
         }
 
         #[cfg(hydrolysis_macos_system_webview)]
@@ -1861,7 +2205,7 @@ mod winit_impl {
                     .create_surface_unsafe(target)
                     .expect("Hydrolysis failed to create a Metal overlay surface")
             };
-            Self::from_surface(surface, gpu.clone(), width, height, true, false)
+            Self::from_surface(surface, gpu.clone(), width, height, true, false, None)
         }
     }
 
@@ -1878,7 +2222,7 @@ mod winit_impl {
             &self.gpu.queue
         }
 
-        fn device_loss(&self) -> &waterui_graphics::DeviceLoss {
+        fn device_loss(&self) -> &DeviceLoss {
             &self.gpu.device_loss
         }
 
@@ -1893,7 +2237,16 @@ mod winit_impl {
         fn present(&mut self, frame: SurfaceFrame) {
             match frame {
                 SurfaceFrame::Window { output, .. } => {
-                    output.present();
+                    // Ask for the platform's next-frame pacing before
+                    // submitting this frame: on Wayland this requests the
+                    // frame callback that gates `RedrawRequested` — a
+                    // compositor withholds it from a hidden surface, so the
+                    // pump parks there without any explicit signal. The
+                    // call is a no-op on every other platform.
+                    if let Some(window) = &self.window {
+                        window.pre_present_notify();
+                    }
+                    self.gpu.queue.present(output);
                     reclaim_device(&self.gpu.device);
                 }
                 SurfaceFrame::Offscreen { .. } => {
@@ -1918,6 +2271,20 @@ mod winit_impl {
 
         fn premultiply_alpha(&self) -> bool {
             self.config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied
+        }
+
+        fn gpu_context_id(&self) -> u64 {
+            self.gpu.context_id
+        }
+
+        fn shared_device(&self) -> cherenkov_gpu::interop::SharedDevice {
+            let gpu = &self.gpu;
+            cherenkov_gpu::interop::SharedDevice {
+                instance: gpu.instance.clone(),
+                adapter: gpu.adapter.clone(),
+                device: gpu.device.clone(),
+                queue: gpu.queue.clone(),
+            }
         }
     }
 
@@ -2515,6 +2882,31 @@ mod winit_impl {
         }
     }
 
+    /// One platform call toward a requested `WindowState`. Entering a state
+    /// clears the states it is leaving first — an X11 `set_maximized(true)`
+    /// on a minimized or fullscreen window is dropped or applied on top of
+    /// the stale state, so every transition unwinds the rest.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WindowStateOp {
+        Maximized(bool),
+        Minimized(bool),
+        Fullscreen,
+        NoFullscreen,
+        Hide,
+    }
+
+    /// The ordered calls realizing `state` from any prior state.
+    fn window_state_ops(state: WindowState) -> &'static [WindowStateOp] {
+        use WindowStateOp::{Fullscreen, Hide, Maximized, Minimized, NoFullscreen};
+        match state {
+            WindowState::Normal => &[Maximized(false), Minimized(false), NoFullscreen],
+            WindowState::Minimized => &[Maximized(false), NoFullscreen, Minimized(true)],
+            WindowState::Maximized => &[Minimized(false), NoFullscreen, Maximized(true)],
+            WindowState::Fullscreen => &[Maximized(false), Minimized(false), Fullscreen],
+            WindowState::Closed => &[Hide],
+        }
+    }
+
     /// Snapshot of the window properties `apply_properties` last pushed to the
     /// native window, so unchanged syncs cost no platform calls.
     #[derive(Clone, Debug, PartialEq)]
@@ -2524,6 +2916,9 @@ mod winit_impl {
         decorations: bool,
         state: WindowState,
         frame: waterui_core::layout::Rect,
+        level: WindowLevel,
+        attention: Option<UserAttention>,
+        resize_increments: Option<waterui_core::layout::Size>,
     }
 
     /// A monitor's logical rect: `(position, extent)` — the shape
@@ -2561,6 +2956,36 @@ mod winit_impl {
         /// event re-delivers it — the window manager's own initial state
         /// otherwise wins.
         pending_mapped_request: MappedRequestRetry,
+        /// Latest `WindowEvent::Occluded` report: macOS's
+        /// `NSWindow.occlusionState` (miniaturize counts there), the iOS
+        /// scene's backgrounded state, X11 `VisibilityFullyObscured`, the
+        /// web's IntersectionObserver. Winit emits no `Occluded` on
+        /// Windows, Wayland or Android, so this stays false there.
+        occluded: bool,
+        /// The last `Resized` carried a zero client area — how Windows'
+        /// `SIZE_MINIMIZED` reaches winit, and a 0x0 Wayland configure. A
+        /// later `Resized` with a real extent clears it.
+        zero_sized: bool,
+        /// The window's own minimized query — `IsIconic` on Windows,
+        /// `_NET_WM_STATE_HIDDEN` on X11, `isMiniaturized` on AppKit —
+        /// refreshed on the events that can accompany a state change,
+        /// never on a timer. X11 emits no iconify `WindowEvent`, so the
+        /// query on pump wakes is that platform's minimize signal.
+        minimized: bool,
+        /// The DWM's cloaked report (`DWMWA_CLOAKED`), refreshed on the
+        /// same events as `minimized`: how a Windows window hidden by a
+        /// virtual-desktop switch or the shell is detected — cloaking
+        /// likewise arrives as no `WindowEvent`. Always false off
+        /// Windows, which is the only platform that cloaks.
+        cloaked: bool,
+        /// Shared with the GPU-surface redraw waker: a wake posted for a
+        /// window that cannot be seen is dropped before reaching the
+        /// event loop, so external GPU content cannot un-park the pump.
+        occlusion_signal: Arc<AtomicBool>,
+        /// Whether the window currently presents as transparent, so a
+        /// per-frame background push reaches winit and the surface only when
+        /// the background switches between opaque and translucent.
+        transparent: bool,
         /// Explicit ProMotion opt-in: declares the 120Hz frame-rate demand to
         /// the window server while redraws are being requested. `None` before
         /// macOS 14.
@@ -2584,6 +3009,13 @@ mod winit_impl {
         ) -> (Self, WinitGpuContext) {
             let (surface, gpu) =
                 WinitSurface::new(window.clone(), shared_gpu, requires_transparency).await;
+            let size = window.inner_size();
+            let minimized = window.is_minimized().unwrap_or(false);
+            let zero_sized = size.width == 0 || size.height == 0;
+            #[cfg(target_os = "windows")]
+            let cloaked = window_is_cloaked(&window);
+            #[cfg(not(target_os = "windows"))]
+            let cloaked = false;
             (
                 Self {
                     #[cfg(target_os = "macos")]
@@ -2594,6 +3026,11 @@ mod winit_impl {
                     hybrid_compositor: MacHybridCompositor::new(gpu.clone()),
                     window,
                     surface,
+                    occluded: false,
+                    zero_sized,
+                    minimized,
+                    cloaked,
+                    occlusion_signal: Arc::new(AtomicBool::new(minimized || zero_sized || cloaked)),
                     pending_surface_size: None,
                     pending_events: Vec::new(),
                     pointer_position: (0.0, 0.0),
@@ -2603,6 +3040,7 @@ mod winit_impl {
                     applied_size_limits: None,
                     applied_properties: None,
                     pending_mapped_request: MappedRequestRetry::default(),
+                    transparent: requires_transparency,
                 },
                 gpu,
             )
@@ -2644,24 +3082,47 @@ mod winit_impl {
             self.hybrid_compositor.overlay_surface(index)
         }
 
+        /// Pushes the requested `WindowLevel` to the window server. Shared by
+        /// `apply_properties` and the first-mapped-event re-delivery.
+        fn apply_window_level(&self, level: WindowLevel) {
+            self.window.set_window_level(match level {
+                WindowLevel::Normal => winit::window::WindowLevel::Normal,
+                WindowLevel::AlwaysOnTop => winit::window::WindowLevel::AlwaysOnTop,
+            });
+        }
+
+        /// Pushes the requested `UserAttention` to the window server. Shared by
+        /// `apply_properties` and the first-mapped-event re-delivery.
+        fn apply_window_attention(&self, attention: Option<UserAttention>) {
+            self.window
+                .request_user_attention(attention.map(|urgency| match urgency {
+                    UserAttention::Informational => winit::window::UserAttentionType::Informational,
+                    UserAttention::Critical => winit::window::UserAttentionType::Critical,
+                }));
+        }
+
         /// Pushes the requested `WindowState` to the window server. Shared
         /// by `apply_properties` and the first-mapped-event re-delivery: on
         /// X11 the same call made of an unmapped window is dropped.
         fn apply_window_state(&self, state: WindowState) {
-            match state {
-                WindowState::Normal => {
-                    self.window.set_minimized(false);
-                    self.window.set_fullscreen(None);
-                }
-                WindowState::Minimized => {
-                    self.window.set_minimized(true);
-                }
-                WindowState::Fullscreen => {
-                    self.window
-                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
-                }
-                WindowState::Closed => {
-                    self.window.set_visible(false);
+            for op in window_state_ops(state) {
+                match op {
+                    WindowStateOp::Maximized(maximized) => {
+                        self.window.set_maximized(*maximized);
+                    }
+                    WindowStateOp::Minimized(minimized) => {
+                        self.window.set_minimized(*minimized);
+                    }
+                    WindowStateOp::Fullscreen => {
+                        self.window
+                            .set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    }
+                    WindowStateOp::NoFullscreen => {
+                        self.window.set_fullscreen(None);
+                    }
+                    WindowStateOp::Hide => {
+                        self.window.set_visible(false);
+                    }
                 }
             }
         }
@@ -2917,17 +3378,41 @@ mod winit_impl {
                 self.window.set_outer_position(request.position);
                 let _ = self.window.request_inner_size(request.size);
                 self.apply_window_state(request.state);
+                // Level and attention are EWMH client messages too: requests
+                // made of the unmapped window were dropped the same way, so
+                // the last-applied values are re-delivered here.
+                if let Some(properties) = self.applied_properties.clone() {
+                    self.apply_window_level(properties.level);
+                    self.apply_window_attention(properties.attention);
+                }
             }
             match event {
+                WindowEvent::Occluded(occluded) => {
+                    self.occluded = *occluded;
+                    self.refresh_visibility_signals();
+                }
+                WindowEvent::RedrawRequested => {
+                    // The pump's own wake: the cheapest place to refresh
+                    // the signals that arrive as no event — X11's minimize
+                    // and Windows' cloaked state.
+                    self.refresh_visibility_signals();
+                }
                 WindowEvent::CloseRequested => {
                     self.pending_events.push(InputEvent::CloseRequested);
                 }
                 WindowEvent::Resized(size) => {
+                    self.zero_sized = size.width == 0 || size.height == 0;
+                    self.refresh_visibility_signals();
                     self.pending_surface_size = Some(*size);
                     self.pending_events.push(InputEvent::Resize {
                         width: size.width.max(1),
                         height: size.height.max(1),
                     });
+                    // A maximize or restore through the window chrome arrives
+                    // as this same `Resized` — the binding write-back rides on
+                    // it so `Window::state` observes the chrome's move.
+                    self.pending_events
+                        .push(InputEvent::Maximized(self.window.is_maximized()));
                 }
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                     assert!(
@@ -2949,6 +3434,7 @@ mod winit_impl {
                     });
                 }
                 WindowEvent::Focused(focused) => {
+                    self.refresh_visibility_signals();
                     self.pending_events.push(InputEvent::Focused(*focused));
                 }
                 WindowEvent::HoveredFile(path) => {
@@ -3145,6 +3631,61 @@ mod winit_impl {
                 },
                 _ => {}
             }
+            // The GPU-content waker reads this before posting a wake: a
+            // signal produced while the window cannot be seen is dropped
+            // rather than waking the loop to render nothing.
+            self.occlusion_signal
+                .store(self.is_occluded(), Ordering::Relaxed);
+        }
+
+        /// Reads the platform's own visibility state into the cached
+        /// signals — `is_minimized` (winit surfaces no event on X11 when
+        /// `_NET_WM_STATE_HIDDEN` flips; the runner's `x11_state_watch`
+        /// turns that property change into a wake) and, on Windows,
+        /// `DWMWA_CLOAKED` (the virtual-desktop or shell cloak, likewise
+        /// delivered as no `WindowEvent`). Called only from the events
+        /// that can accompany a state change, so it is a synchronous
+        /// public-API read on a wake already running, never a timer or a
+        /// poll.
+        pub(crate) fn refresh_visibility_signals(&mut self) {
+            if let Some(minimized) = self.window.is_minimized() {
+                self.minimized = minimized;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                self.cloaked = window_is_cloaked(&self.window);
+            }
+        }
+    }
+
+    /// The DWM's cloaked report for the window's `HWND` — `DWMWA_CLOAKED`
+    /// is nonzero when the shell or a virtual-desktop switch hides the
+    /// window, the only visibility signal Windows gives a process beyond
+    /// minimization. The query itself is the public `DwmGetWindowAttribute`
+    /// API; when it fails the window is reported uncloaked rather than
+    /// guessed.
+    #[cfg(target_os = "windows")]
+    fn window_is_cloaked(native_window: &NativeWindow) -> bool {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+        let Ok(handle) = native_window.window_handle() else {
+            return false;
+        };
+        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+            return false;
+        };
+        let mut cloaked = 0i32;
+        // SAFETY: `hwnd` is the window's live handle for as long as the
+        // `NativeWindow` lives, and `pvAttribute` points at writable memory
+        // of exactly `cbAttribute` bytes, as the API requires.
+        unsafe {
+            DwmGetWindowAttribute(
+                win32.hwnd.get() as HWND,
+                DWMWA_CLOAKED as u32,
+                (&raw mut cloaked).cast(),
+                size_of::<i32>() as u32,
+            ) == 0
+                && cloaked != 0
         }
     }
 
@@ -3198,9 +3739,21 @@ mod winit_impl {
             self.applied_size_limits = Some((min, max));
         }
 
+        fn set_transparent(&mut self, transparent: bool) {
+            if self.transparent == transparent {
+                return;
+            }
+            self.window.set_transparent(transparent);
+            self.surface.set_transparent(transparent);
+            self.transparent = transparent;
+        }
+
         fn apply_properties(&mut self, window: &waterui::window::Window) {
             let title = window.display_title().snapshot();
-            let decorations = !matches!(window.style, waterui::window::WindowStyle::Borderless);
+            let decorations = !matches!(
+                window.style.snapshot(),
+                waterui::window::WindowStyle::Borderless
+            );
             let state = window.state.snapshot();
             let frame = validated_window_frame(window.frame.snapshot());
             let properties = AppliedWindowProperties {
@@ -3209,6 +3762,12 @@ mod winit_impl {
                 decorations,
                 state,
                 frame,
+                level: window.level.snapshot(),
+                attention: window.attention.snapshot(),
+                resize_increments: window
+                    .resize_increments
+                    .as_ref()
+                    .map(|signal| signal.snapshot()),
             };
             let previous = self.applied_properties.replace(properties.clone());
             let applied = previous.as_ref();
@@ -3220,6 +3779,19 @@ mod winit_impl {
             }
             if applied.is_none_or(|p| p.decorations != properties.decorations) {
                 self.window.set_decorations(properties.decorations);
+            }
+            if applied.is_none_or(|p| p.level != properties.level) {
+                self.apply_window_level(properties.level);
+            }
+            if applied.is_none_or(|p| p.attention != properties.attention) {
+                self.apply_window_attention(properties.attention);
+            }
+            if applied.is_none_or(|p| p.resize_increments != properties.resize_increments) {
+                self.window.set_resize_increments(
+                    properties.resize_increments.map(|size| {
+                        LogicalSize::new(f64::from(size.width), f64::from(size.height))
+                    }),
+                );
             }
             // The frame binding is pushed to the window only when it changed
             // since the previous pump. A user-driven resize or move lands in
@@ -3294,6 +3866,30 @@ mod winit_impl {
 
         fn drain_events(&mut self) -> Vec<InputEvent> {
             core::mem::take(&mut self.pending_events)
+        }
+
+        /// The window cannot be seen: the window server reported it fully
+        /// occluded (macOS `NSWindow.occlusionState`, iOS scene state, X11
+        /// `VisibilityFullyObscured`), it is minimized by the platform's
+        /// own report (`IsIconic`, `_NET_WM_STATE_HIDDEN`,
+        /// `isMiniaturized`), the DWM cloaked it (Windows `DWMWA_CLOAKED`),
+        /// or its client area is zero (Windows `SIZE_MINIMIZED`, a 0x0
+        /// Wayland configure).
+        ///
+        /// Documented gaps: a Windows window fully covered by other
+        /// windows while neither cloaked nor minimized reports nothing —
+        /// the visibility signals the DWM lets a process query are the
+        /// `DWMWINDOWATTRIBUTE` values of `DwmGetWindowAttribute`
+        /// (<https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute>),
+        /// and covered-by-other-windows is not one of them. X11's
+        /// `_NET_WM_STATE_HIDDEN` change reaches `is_minimized`'s query
+        /// through the runner's second-connection state watch
+        /// (`x11_state_watch`) — winit selects `PropertyChangeMask` but
+        /// drops the `PropertyNotify` itself. Wayland's signal is instead
+        /// the withheld frame callback, which `pre_present_notify` in
+        /// `present` arms.
+        fn is_occluded(&self) -> bool {
+            self.occluded || self.minimized || self.zero_sized || self.cloaked
         }
 
         /// The pointer's live position: the host's own answer where it can
@@ -3373,10 +3969,16 @@ mod winit_impl {
         }
 
         fn gpu_surface_redraw_handle(&self) -> Option<RedrawHandle> {
-            let handle = RedrawHandle::new();
             let window = Arc::clone(&self.window);
-            handle.set_waker(Some(Arc::new(move || window.request_redraw())));
-            Some(handle)
+            let occluded = Arc::clone(&self.occlusion_signal);
+            Some(RedrawHandle::new(move || {
+                // GPU content cannot see the window's pump state, so the
+                // occlusion report is shared as a flag: a frame produced
+                // while the window is hidden posts no wake.
+                if !occluded.load(Ordering::Relaxed) {
+                    window.request_redraw();
+                }
+            }))
         }
     }
 
@@ -3560,6 +4162,82 @@ mod winit_impl {
                 width: 2.0,
                 height: 14.0,
                 purpose,
+            }
+        }
+
+        /// Every window-state transition must land in the requested state from
+        /// any prior state: entering a state unwinds the ones it leaves, the
+        /// way `Normal` always did.
+        #[test]
+        fn window_state_transitions_land_from_any_prior_state() {
+            use super::{WindowStateOp, window_state_ops};
+            use waterui::window::WindowState;
+
+            // The flags a platform window carries between calls, applied in
+            // the order `window_state_ops` emits them.
+            #[derive(Clone, Copy)]
+            struct Flags {
+                maximized: bool,
+                minimized: bool,
+                fullscreen: bool,
+            }
+            let start = |state: WindowState| match state {
+                WindowState::Normal | WindowState::Closed => Flags {
+                    maximized: false,
+                    minimized: false,
+                    fullscreen: false,
+                },
+                WindowState::Minimized => Flags {
+                    maximized: false,
+                    minimized: true,
+                    fullscreen: false,
+                },
+                WindowState::Maximized => Flags {
+                    maximized: true,
+                    minimized: false,
+                    fullscreen: false,
+                },
+                WindowState::Fullscreen => Flags {
+                    maximized: false,
+                    minimized: false,
+                    fullscreen: true,
+                },
+            };
+            let settle = |mut flags: Flags, ops: &[WindowStateOp]| {
+                for op in ops {
+                    match op {
+                        WindowStateOp::Maximized(v) => flags.maximized = *v,
+                        WindowStateOp::Minimized(v) => flags.minimized = *v,
+                        WindowStateOp::Fullscreen => flags.fullscreen = true,
+                        WindowStateOp::NoFullscreen => flags.fullscreen = false,
+                        WindowStateOp::Hide => {}
+                    }
+                }
+                flags
+            };
+
+            for from in [
+                WindowState::Normal,
+                WindowState::Minimized,
+                WindowState::Maximized,
+                WindowState::Fullscreen,
+            ] {
+                for to in [
+                    WindowState::Normal,
+                    WindowState::Minimized,
+                    WindowState::Maximized,
+                    WindowState::Fullscreen,
+                ] {
+                    let flags = settle(start(from), window_state_ops(to));
+                    let landed = match (flags.maximized, flags.minimized, flags.fullscreen) {
+                        (false, false, false) => WindowState::Normal,
+                        (false, true, false) => WindowState::Minimized,
+                        (true, false, false) => WindowState::Maximized,
+                        (false, false, true) => WindowState::Fullscreen,
+                        _ => panic!("{from:?} -> {to:?} left a mixed state"),
+                    };
+                    assert_eq!(landed, to, "{from:?} -> {to:?} must land in {to:?}");
+                }
             }
         }
 
@@ -3842,7 +4520,8 @@ mod winit_impl {
                 backend: wgpu::Backend::Gl,
                 subgroup_min_size: 4,
                 subgroup_max_size: 128,
-                transient_saves_memory: false,
+                transient_saves_memory: Some(false),
+                limit_bucket: None,
             }
         }
 
@@ -4291,7 +4970,5 @@ pub use web_impl::ExportedBrowserWindow as BrowserWindow;
 #[cfg(hydrolysis_winit)]
 pub(crate) use winit_impl::ExportedWinitGpuContext as WinitGpuContext;
 #[cfg(hydrolysis_winit)]
-pub(crate) use winit_impl::GpuPollDriver;
-
 #[cfg(hydrolysis_winit)]
 pub use winit_impl::ExportedWinitWindow as WinitWindow;

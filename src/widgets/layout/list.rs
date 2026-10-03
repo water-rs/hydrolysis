@@ -25,6 +25,7 @@ use waterui::component::list::{ListConfig, ListItem, ListSelection, Move};
 use waterui::gesture::{DragEvent, DragGesture, Gesture, GesturePhase};
 use waterui_core::handler::{BoxedAction, boxed_action};
 use waterui_core::id::{Id as RawId, SelfId};
+use waterui_core::interaction::Selected;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::views::{SharedAnyViews, Views};
 use waterui_core::{Environment, Native};
@@ -33,13 +34,12 @@ use waterui_text::Text;
 
 use crate::platform::Modifiers;
 use crate::renderer::lazy::VirtualExtentIndex;
-use crate::renderer::resolved_color_to_peniko;
 use crate::widgets::draw_scroll_indicators;
 use nami::watcher::BoxWatcherGuard;
 use nami::{Computed, Signal, SignalExt as _};
 use waterui::theme::color;
-use waterui_backend_core::widget::{Brush, DrawContext as _};
 use waterui_core::resolve::Resolvable as _;
+use waterui_graphics::cherenkov::Draw as _;
 
 /// The stable per-row id used to key the retained content sub-view cache, matching
 /// the id `ListConfig::contents` (a `SharedAnyViews<ListItem>`) yields per index.
@@ -1498,6 +1498,17 @@ pub(crate) fn render_list_parts(
             item.content = content;
             (item, scoped)
         };
+        // A selectable row carries its selection as `Selected`, so the row's
+        // press target reports SELECTED — claims are owner-scoped, so nested
+        // controls inside the row do not pick it up.
+        let row_env = match state.borrow().row_selection.clone() {
+            Some(selection) => {
+                let mut env = row_env;
+                env.insert(Selected(selection.is_selected(row_id)));
+                env
+            }
+            None => row_env,
+        };
         #[cfg(feature = "accessibility")]
         let subtree_env = {
             let mut subtree_env = accessibility_container_child_environment(&row_env)
@@ -1585,17 +1596,15 @@ pub(crate) fn render_list_parts(
         // `SelectionForeground` against it (see `selection_themed` in the list
         // component), so the pair has to come from the same place.
         let selection_fill = selected.then(|| {
-            resolved_color_to_peniko(
-                ctx.renderer_mut()
-                    .read_signal(&color::SelectionContainer.resolve(&row_env).computed()),
-            )
+            ctx.renderer_mut()
+                .read_signal(&color::SelectionContainer.resolve(&row_env).computed())
         });
         {
             let theme = ctx.theme();
             let mut draw = ctx.draw_context();
             theme.draw_list_row_background(&mut draw, row_rect, index % 2 == 1);
             if let Some(fill) = selection_fill {
-                draw.fill_rect(row_rect, &Brush::Solid(fill));
+                draw.fill(row_rect, fill);
             }
             if lifted_id == Some(row_id) {
                 theme.draw_list_row_lifted(&mut draw, row_rect, REORDER_LIFT_ELEVATION);

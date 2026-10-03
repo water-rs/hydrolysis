@@ -39,20 +39,22 @@ use crate::renderer::{
     HydrolysisRenderer, HydrolysisTextContextMenuMode, HydrolysisWindowOrigin,
     MenuShortcutRegistry, PopupWindowManager,
 };
+#[cfg(hydrolysis_wayland_platform)]
+use crate::runner::x11_state_watch::{self, X11StateWatch};
 use crate::runner::{
     RenderDiagnosticsConfig, RuntimeWindow, advance_runtime, handle_input_events_with,
     pump_window_semantics, render_window, runtime_window_origin,
 };
 
-enum RunnerEvent {
+pub(super) enum RunnerEvent {
     PollLocalTasks,
     MountPendingWindows,
     AccessKit(AccessKitEvent),
-    /// A deferred vello stash's GPU-completion watch resolved: sent by the
-    /// poll driver thread once the tickets' submissions have retired. Carries
-    /// the stash generation the watch was registered for, so a stale wake
-    /// landing beside a newer stash cannot resolve it early.
-    DeferredLegacyReady(WindowId, u64),
+    /// The X11 state watch saw `_NET_WM_STATE`/`WM_STATE` change or the
+    /// window (un)map — the minimize/restore transition winit drops (see
+    /// `x11_state_watch`).
+    #[cfg(hydrolysis_wayland_platform)]
+    X11VisibilitySignal,
     /// Sent by the termination handler installed in [`run`].
     ///
     /// No windowing system turns a termination signal into a winit event, on
@@ -247,8 +249,14 @@ pub fn run(
             window.activation == waterui::window::Activation::OnShow
                 && window.state.snapshot() != waterui::window::WindowState::Closed
         });
+        // `NSApp.mainMenu` belongs to hydrolysis: `NativeMenuBar::install`
+        // has already projected the declared menu bar onto it, and winit's
+        // launch-time default menu (EventLoopBuilderExtMacOS::with_default_menu,
+        // `true` by default) would replace it when the application finishes
+        // launching (water-rs/hydrolysis#321).
         event_loop_builder
             .with_activation_policy(ActivationPolicy::Regular)
+            .with_default_menu(false)
             .with_activate_ignoring_other_apps(activate_at_launch);
     }
     let event_loop = event_loop_builder
@@ -269,6 +277,7 @@ pub fn run(
         .map(waterui::inspector::InspectorRuntime::observe_signals);
 
     let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+    waterui_core::install_application_resources(&mut env);
     waterui::inspector::install(&mut env, inspector);
     let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
     let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
@@ -326,9 +335,12 @@ pub fn run(
     // seeded from this collection, and a self-drawn component that typesets
     // text itself reads it out of the environment instead of enumerating the
     // system's fonts for itself.
-    let fonts = FontCollection::new(super::native_resource_fonts());
+    let fonts = FontCollection::new(super::native_resource_fonts(
+        waterui_core::ResourceContext::from_environment(&env),
+    ));
     fonts.clone().install(&mut env);
-    let window_icon = load_staged_window_icon();
+    let window_icon =
+        load_staged_window_icon(waterui_core::ResourceContext::from_environment(&env));
     let mut runner = WinitRunner {
         env,
         theme,
@@ -354,6 +366,8 @@ pub fn run(
         outside_pointer_presses: 0,
         focused_window: None,
         last_pointer_window: None,
+        #[cfg(hydrolysis_wayland_platform)]
+        x11_state_watch: None,
     };
 
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -415,14 +429,22 @@ struct WinitRunner {
     /// pointer position, so for `MonitorSelector::Pointer` this window's
     /// monitor stands in for the pointer's home.
     last_pointer_window: Option<WindowId>,
+    /// The second-connection `_NET_WM_STATE`/unmap watch that delivers the
+    /// X11 transitions winit drops. `None` on Wayland, and stays `None` if
+    /// no connection could be opened — the coverage is then what winit
+    /// delivers, the documented gap.
+    #[cfg(hydrolysis_wayland_platform)]
+    x11_state_watch: Option<X11StateWatch>,
 }
 
 /// Loads the window icon the water CLI stages into the asset bundle root.
 ///
 /// Absence is a legitimate state (bare `cargo run`, tests, previews without
 /// staging); a present-but-undecodable icon is reported and skipped.
-fn load_staged_window_icon() -> Option<winit::window::Icon> {
-    let root = waterui_assets::bundle_root().ok()?;
+fn load_staged_window_icon(
+    resources: &waterui_core::ResourceContext,
+) -> Option<winit::window::Icon> {
+    let root = waterui_assets::bundle_root(resources);
     let path = root.join(waterui_assets::WINDOW_ICON_FILE);
     let file = std::fs::File::open(&path).ok()?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
@@ -479,16 +501,20 @@ fn native_window_attributes(
     // `apply_properties` still re-delivers it on the first mapped event:
     // a state written between creation and map, or a manager that ignored
     // the attribute, is covered by the same mapped signal.
-    let fullscreen = matches!(
-        window.state.snapshot(),
-        waterui::window::WindowState::Fullscreen
-    );
+    let state = window.state.snapshot();
+    let fullscreen = matches!(state, waterui::window::WindowState::Fullscreen);
+    let maximized = matches!(state, waterui::window::WindowState::Maximized);
     let attributes = NativeWindow::default_attributes()
         .with_window_icon(icon)
         .with_title(window.display_title().snapshot().as_str())
         .with_resizable(window.resizable)
         .with_visible(false)
         .with_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None)))
+        .with_maximized(maximized)
+        .with_window_level(match window.level.snapshot() {
+            waterui::window::WindowLevel::Normal => winit::window::WindowLevel::Normal,
+            waterui::window::WindowLevel::AlwaysOnTop => winit::window::WindowLevel::AlwaysOnTop,
+        })
         // `Activation::OnClick` and `Never` both map without activation: the
         // platform parts that `with_active` cannot express (X11 `WM_HINTS`,
         // the AppKit style mask, `WS_EX_NOACTIVATE`) are applied after
@@ -496,7 +522,7 @@ fn native_window_attributes(
         .with_active(activates && window.activation == waterui::window::Activation::OnShow)
         .with_transparent(super::window_requires_transparency(window, env))
         .with_decorations(!matches!(
-            window.style,
+            window.style.snapshot(),
             waterui::window::WindowStyle::Borderless
         ))
         .with_inner_size(winit::dpi::LogicalSize::new(
@@ -531,7 +557,19 @@ fn native_window_attributes(
             None => attributes,
         }
     };
-    attributes
+    // Resize increments write `WM_NORMAL_HINTS` — a stored property, so they
+    // can travel with the map request safely. `with_resize_increments` takes
+    // a size rather than an option, so the attribute applies conditionally.
+    match window.resize_increments.as_ref() {
+        Some(signal) => {
+            let size = signal.snapshot();
+            attributes.with_resize_increments(winit::dpi::LogicalSize::new(
+                f64::from(size.width),
+                f64::from(size.height),
+            ))
+        }
+        None => attributes,
+    }
 }
 
 /// The window's desktop identity as a `(class, instance)` pair.
@@ -615,6 +653,24 @@ impl WinitRunner {
                 .create_window(attributes)
                 .expect("hydrolysis runner: failed to create winit window"),
         );
+        #[cfg(hydrolysis_wayland_platform)]
+        if let Some(xid) = x11_state_watch::x11_window_id(&native_window) {
+            // The window is on X11, so the app's own server connection is
+            // already up — every watch step is expected to succeed, and a
+            // failure means minimize would go undetected. The window's
+            // creation fails rather than silently covering the gap.
+            if self.x11_state_watch.is_none() {
+                self.x11_state_watch = Some(
+                    X11StateWatch::connect(self.event_proxy.clone())
+                        .expect("hydrolysis runner: failed to start the X11 state watch"),
+                );
+            }
+            self.x11_state_watch
+                .as_ref()
+                .expect("hydrolysis runner: X11 state watch missing after connect")
+                .select(xid)
+                .expect("hydrolysis runner: failed to subscribe to X11 window state events");
+        }
         #[cfg(target_os = "windows")]
         if activates {
             // Windows' menu bar lives on the window: attach the app bar's
@@ -645,26 +701,6 @@ impl WinitRunner {
         runtime
             .renderer
             .set_window_id(crate::renderer::WindowId::Winit(runtime.platform.id()));
-        {
-            // The deferred-verification settle wakes through the runner's
-            // own user-event path — the same mechanism the executor and
-            // termination handler use. The shared per-device poll driver
-            // parks on GPU completion and fires this wake; the main thread
-            // never polls the device itself.
-            let event_proxy = self.event_proxy.clone();
-            let window_id = runtime.platform.id();
-            runtime.deferred_legacy_wake = Some(std::sync::Arc::new(move |stash_gen| {
-                // send_event fails only once the event loop has exited — a
-                // dead loop has no settle left to wake, so the error is
-                // ignored.
-                let _ =
-                    event_proxy.send_event(RunnerEvent::DeferredLegacyReady(window_id, stash_gen));
-            }));
-            runtime.deferred_poll_driver = self
-                .gpu_context
-                .as_ref()
-                .map(|gpu| gpu.poll_driver().clone());
-        }
         if !activates {
             self.popup_window_ids.insert(runtime.platform.id());
         }
@@ -836,8 +872,8 @@ impl WinitRunner {
         for runtime in self.windows.values_mut() {
             if runtime.renderer.take_rebuild_request() {
                 runtime.request_refresh();
-                runtime.platform.request_redraw();
-                runtime.renderer.migration_counters_mut().host_wakeups += 1;
+                runtime.request_redraw();
+                runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
             }
         }
     }
@@ -848,8 +884,12 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
         let _ = self.drain_local_executor_queue();
         self.mount_pending_windows(event_loop);
         for runtime in self.windows.values_mut() {
-            runtime.platform.request_redraw();
-            runtime.renderer.migration_counters_mut().host_wakeups += 1;
+            // A resume can carry the window across a visibility boundary
+            // (iOS foregrounding); the pump reflects what the platform
+            // reports now.
+            runtime.sync_occlusion();
+            runtime.request_redraw();
+            runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
     }
 
@@ -897,6 +937,10 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                 adapter.process_event(runtime.platform.native_window(), &event);
             }
             runtime.platform.handle_window_event(&event);
+            // The platform's occlusion report moves into the pump state
+            // here, so a `RedrawRequested` handled below and the next
+            // `about_to_wait` tick both see the window as it is now.
+            runtime.sync_occlusion();
             Self::handle_input_events(runtime, &self.env)
         };
 
@@ -1009,21 +1053,7 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
             RunnerEvent::MountPendingWindows => {
                 self.mount_pending_windows(_event_loop);
             }
-            RunnerEvent::DeferredLegacyReady(window_id, stash_gen) => {
-                let Some(runtime) = self.windows.get_mut(&window_id) else {
-                    return;
-                };
-                // The generation records unconditionally: a wake that lands
-                // while damage is pending still retired the stash's
-                // submissions — skipping it parks an armed settle forever.
-                runtime.deferred_wake_gen = runtime.deferred_wake_gen.max(stash_gen);
-                // Only a stash still awaiting its present needs the settle
-                // redraw; a wake for one the frame loop already presented
-                // resolves nothing.
-                if runtime.renderer.has_deferred_legacy_frame() {
-                    runtime.platform.request_redraw();
-                }
-            }
+
             RunnerEvent::AccessKit(event) => {
                 let Some(runtime) = self.windows.get_mut(&event.window_id) else {
                     return;
@@ -1065,8 +1095,8 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                                 "missing accessibility tree update for initial request, scheduling rebuild"
                             );
                             runtime.request_refresh();
-                            runtime.platform.request_redraw();
-                            runtime.renderer.migration_counters_mut().host_wakeups += 1;
+                            runtime.request_redraw();
+                            runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
                         }
                     }
                     AccessKitWindowEvent::ActionRequested(request) => {
@@ -1083,8 +1113,8 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
                             .handle_accessibility_action(request, &action_env)
                         {
                             runtime.request_refresh();
-                            runtime.platform.request_redraw();
-                            runtime.renderer.migration_counters_mut().host_wakeups += 1;
+                            runtime.request_redraw();
+                            runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
                         }
                         self.flush_cross_window_rebuild_requests();
                     }
@@ -1094,6 +1124,18 @@ impl ApplicationHandler<RunnerEvent> for WinitRunner {
             #[cfg(any(unix, windows))]
             RunnerEvent::Terminate => {
                 self.exit_after_runtime_cleanup(_event_loop);
+            }
+            #[cfg(hydrolysis_wayland_platform)]
+            RunnerEvent::X11VisibilitySignal => {
+                // `_NET_WM_STATE`/`WM_STATE` changed or a window
+                // (un)mapped — a minimize or restore winit emitted no
+                // `WindowEvent` for. The notification only wakes the
+                // re-query: `is_minimized` reads `_NET_WM_STATE_HIDDEN`
+                // again and the pump lands wherever the query puts it.
+                for runtime in self.windows.values_mut() {
+                    runtime.platform.refresh_visibility_signals();
+                    runtime.sync_occlusion();
+                }
             }
         }
     }
@@ -1105,7 +1147,7 @@ mod tests {
     use super::{TerminationAction, TerminationRequests};
     use super::{ends_event_loop, native_window_attributes};
     use waterui::window::{Window, WindowState};
-    use waterui_core::{Binding, Environment, binding};
+    use waterui_core::{Binding, binding};
 
     #[cfg(any(unix, windows))]
     #[test]
@@ -1138,7 +1180,7 @@ mod tests {
     #[test]
     fn popup_window_attributes_do_not_activate() {
         let window = Window::new("", binding(WindowState::Normal), || ());
-        let env = Environment::new();
+        let env = crate::renderer::tests::test_environment();
 
         assert!(native_window_attributes(&window, &env, true, None).active);
         assert!(!native_window_attributes(&window, &env, false, None).active);
@@ -1173,7 +1215,7 @@ mod tests {
         let frame = Binding::container(Rect::new(Point::new(12.0, 34.0), Size::new(800.0, 300.0)));
         let mut window = Window::new("", binding(WindowState::Normal), || ());
         window.frame = frame;
-        let env = Environment::new();
+        let env = crate::renderer::tests::test_environment();
 
         let attributes = native_window_attributes(&window, &env, false, None);
         assert_eq!(

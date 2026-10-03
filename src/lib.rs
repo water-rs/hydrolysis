@@ -1,7 +1,4 @@
 //! Hydrolysis backend.
-//!
-//! `HydrolysisExt` provides `.hydrolysis()` to wrap any cloneable view into
-//! a `GpuSurface` rendered by hydrolysis.
 
 mod engine;
 mod env;
@@ -23,7 +20,7 @@ mod widgets;
 // Interaction/runtime layer shared with other self-drawn backends.
 pub(crate) use waterui_backend_core::{animation, gesture, scroll, time};
 
-pub use engine::{Brush, DrawContext, IconOnlyButtonLabel, WidgetTheme};
+pub use engine::{IconOnlyButtonLabel, WidgetTheme};
 use std::time::Duration;
 use waterui_core::Environment;
 
@@ -53,7 +50,6 @@ pub trait Style: WidgetTheme + 'static {
     /// application's own entries still win in the assembled environment.
     fn install_tokens(&self, env: &mut Environment);
 }
-pub use gpu_view::{HydrolysisExt, HydrolysisGpuView};
 /// The W3C UI Events key vocabulary this backend speaks, re-exported so hosts
 /// that synthesize key events use the same version of it.
 pub use keyboard_types;
@@ -63,8 +59,9 @@ pub use platform::BrowserWindow;
 pub use platform::WinitWindow;
 pub use platform::{
     GpuSurfaceWindow, InputEvent, KeyCode, KeyState, Modifiers, OffscreenGpuContext,
-    OffscreenSurface, OffscreenWindow, PlatformWindow, PointerButton, PointerKind, SurfaceError,
-    SurfaceFrame, SurfaceProvider, TextInputPurpose, TextInputState, TouchPhase, WindowSafeArea,
+    OffscreenSceneSurface, OffscreenSurface, OffscreenWindow, PlatformWindow, PointerButton,
+    PointerKind, SurfaceError, SurfaceFrame, SurfaceProvider, TextInputPurpose, TextInputState,
+    TouchPhase, WindowSafeArea,
 };
 pub use platform_view::{PlatformView, PlatformViewPlacement, PlatformViewSink};
 #[cfg(feature = "accessibility")]
