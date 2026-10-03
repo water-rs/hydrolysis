@@ -1058,6 +1058,7 @@ impl RenderNode {
             accessibility_identity: Rc::new(()),
             render_id: RenderId::next(),
             content: Rc::new(RefCell::new(content)),
+            recorded_table: Rc::new(RefCell::new(Default::default())),
         }))
     }
 

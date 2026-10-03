@@ -33,7 +33,8 @@
 //! * capture determinism → `repeated_fixed_clock_captures_are_identical`
 
 use core::time::Duration;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Instant;
 
 use waterui::component::text;
@@ -275,6 +276,127 @@ fn transformed_image_brushes_count() {
         "the transformed image ops must reach the presented frame"
     );
     assert!(m.recorded_view_contents > 0);
+    assert_retained_engine_counters(&counters);
+}
+
+/// An `ImagePane` instrumented for the engine-swap case (water-rs/hydrolysis#350):
+/// it counts `rebuild_for_engine` calls and registrations, and carries one
+/// piece of ordinary semantic state — a draw counter the rebuild must NOT
+/// clear, the way a scene's reactive inputs survive an engine swap.
+struct RecoveringPane {
+    image: Option<waterui_graphics::Registered<cherenkov::Image<cherenkov::Rgba8>>>,
+    rebuilds: std::rc::Rc<std::cell::Cell<u32>>,
+    registrations: std::rc::Rc<std::cell::Cell<u32>>,
+    draws: std::rc::Rc<std::cell::Cell<u32>>,
+}
+
+impl SceneContent for RecoveringPane {
+    fn build_scene(
+        &mut self,
+        recorder: &mut Recorder,
+        resources: &mut RecordingResources<'_>,
+        _width: f32,
+        _height: f32,
+    ) -> bool {
+        use cherenkov::Sampling;
+
+        self.draws.set(self.draws.get() + 1);
+        if self.image.is_none() {
+            self.registrations.set(self.registrations.get() + 1);
+            self.image = Some(
+                resources
+                    .image(solid_image())
+                    .expect("image registration failed"),
+            );
+        }
+        // Naming a handle minted on another `SceneResources` table panics —
+        // that is the pre-#350 failure this fixture drives: without
+        // `rebuild_for_engine` clearing `self.image`, the second pump after
+        // the device loss names the dead table's handle here.
+        let image = resources.name(self.image.as_ref().expect("registered above"));
+        recorder.image(
+            image,
+            kurbo::Rect::new(0.0, 0.0, 16.0, 16.0),
+            Sampling::Linear,
+        );
+        false
+    }
+
+    fn set_invalidator(&mut self, _invalidator: Option<waterui_graphics::SceneInvalidator>) {}
+
+    /// The `SceneContent` contract: drop only what belongs to the old
+    /// engine's table — cached registrations — and keep everything semantic.
+    fn rebuild_for_engine(&mut self) {
+        self.rebuilds.set(self.rebuilds.get() + 1);
+        self.image = None;
+    }
+}
+
+/// water-rs/hydrolysis#350: a `SceneView` node's content outlives the
+/// `CherenkovWindow` it mounted on. When the window — its mounts and its
+/// `SceneResources` table — dies with a lost device and a fresh window takes
+/// the next frame, the surviving content must rebuild its registrations for
+/// the new table before `build_scene` runs; the pre-fix code named the dead
+/// table's handles into it and panicked in `RecordingResources::name`.
+///
+/// Also asserted: an ordinary second frame on the *same* table does not
+/// rebuild (the epoch association is per table instance, not per render),
+/// and the content's semantic state survives the swap — `rebuild_for_engine`
+/// clears engine caches, not the scene's own state.
+#[test]
+fn scene_content_rebuilds_its_registrations_for_a_new_engine() {
+    let rebuilds = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let registrations = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let draws = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let pane = RecoveringPane {
+        image: None,
+        rebuilds: std::rc::Rc::clone(&rebuilds),
+        registrations: std::rc::Rc::clone(&registrations),
+        draws: std::rc::Rc::clone(&draws),
+    };
+    let mut runtime = runtime_with(waterui_graphics::SceneView::new(pane));
+    let mut frames = Frames::new();
+
+    let (counters, _snapshot) = frames.render(&mut runtime);
+    assert_eq!(rebuilds.get(), 1, "first mount associates a fresh table");
+    assert_eq!(registrations.get(), 1, "the pane registered its image once");
+    assert_retained_engine_counters(&counters);
+
+    // An ordinary redraw against the same table: the content keeps its
+    // cached registration and `rebuild_for_engine` does not run again.
+    let (_counters, _snapshot) = frames.render(&mut runtime);
+    assert_eq!(
+        rebuilds.get(),
+        1,
+        "a same-table redraw must not rebuild the content"
+    );
+    assert_eq!(
+        registrations.get(),
+        1,
+        "the cached registration is reused on the same table"
+    );
+
+    // The device's `device_lost` callback fires: the next pump's sweep drops
+    // the window, its mounts and the `SceneResources` table the pane's cached
+    // `Registered` was minted on. A fresh window — a fresh table — mounts the
+    // surviving content.
+    runtime.mark_gpu_device_lost();
+    let (counters, _snapshot) = frames.render(&mut runtime);
+    assert_eq!(
+        rebuilds.get(),
+        2,
+        "the new table association must invoke rebuild_for_engine once"
+    );
+    assert_eq!(
+        registrations.get(),
+        2,
+        "the pane re-registered on the new table — its fresh handle is valid"
+    );
+    assert!(
+        draws.get() >= 3,
+        "the content's semantic state survived the engine swap ({} draws)",
+        draws.get()
+    );
     assert_retained_engine_counters(&counters);
 }
 
@@ -559,10 +681,16 @@ fn scrolling_counts() {
 /// across threads.
 struct FillProbe {
     renders: std::sync::Arc<core::sync::atomic::AtomicU32>,
+    /// How many times the engine ran the producer's setup — the install
+    /// count: one per `SceneResources` table the surface mounts on.
+    setups: std::sync::Arc<core::sync::atomic::AtomicU32>,
 }
 
 impl GpuContent for FillProbe {
-    fn setup(&mut self, _gpu: &GpuContext<'_>) {}
+    fn setup(&mut self, _gpu: &GpuContext<'_>) {
+        self.setups
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
 
     fn render(&mut self, frame: &mut GpuFrame<'_>) {
         self.renders
@@ -599,6 +727,7 @@ fn gpu_content_under_clips_and_effects() {
     let renders = std::sync::Arc::new(core::sync::atomic::AtomicU32::new(0));
     let probe = FillProbe {
         renders: std::sync::Arc::clone(&renders),
+        setups: std::sync::Arc::new(core::sync::atomic::AtomicU32::new(0)),
     };
     let view = Frame::new(GpuContentView::new(probe))
         .width(120.0)
@@ -664,4 +793,132 @@ fn repeated_fixed_clock_captures_are_identical() {
     // Per-pump counters are not asserted identical: the second pump re-runs
     // the measure/layout work its own pipeline state requires, which legit-
     // imately differs once the first pump populated caches.
+}
+
+/// The GPU-content analogue of
+/// [`scene_content_rebuilds_its_registrations_for_a_new_engine`]: the
+/// node-owned `GpuContentRuntime` survives the dead window's drop, so its
+/// `installed` flag must be re-scoped to the fresh table — `setup` runs once
+/// per table and `render` keeps counting, proving the producer re-installed
+/// and kept its state. A same-table redraw must not re-install.
+#[test]
+fn gpu_content_reinstalls_its_producer_for_a_new_table() {
+    let renders = std::sync::Arc::new(core::sync::atomic::AtomicU32::new(0));
+    let setups = std::sync::Arc::new(core::sync::atomic::AtomicU32::new(0));
+    let probe = FillProbe {
+        renders: std::sync::Arc::clone(&renders),
+        setups: std::sync::Arc::clone(&setups),
+    };
+    let view = Frame::new(GpuContentView::new(probe))
+        .width(120.0)
+        .height(120.0);
+    let mut runtime = runtime_with(view);
+    let mut frames = Frames::new();
+
+    // The surface's async setup needs a few executor drains before it draws.
+    for _ in 0..12 {
+        if renders.load(core::sync::atomic::Ordering::Relaxed) > 0 {
+            break;
+        }
+        let at = frames.at();
+        let _ = runtime.pump_at(false, at);
+    }
+    assert!(
+        renders.load(core::sync::atomic::Ordering::Relaxed) > 0,
+        "the GPU surface must have drawn"
+    );
+    assert_eq!(
+        setups.load(core::sync::atomic::Ordering::Relaxed),
+        1,
+        "one install on the first table"
+    );
+
+    // An ordinary redraw on the same table must not re-install the producer.
+    let _ = frames.render(&mut runtime);
+    assert_eq!(
+        setups.load(core::sync::atomic::Ordering::Relaxed),
+        1,
+        "a same-table redraw does not reinstall"
+    );
+
+    // A lost device drops the window — mounts and the table — and the next
+    // pump rebuilds them on a fresh `SceneResources`; the surviving runtime
+    // re-installs the producer and it keeps drawing with its state intact.
+    let drawn = renders.load(core::sync::atomic::Ordering::Relaxed);
+    runtime.mark_gpu_device_lost();
+    for _ in 0..12 {
+        if renders.load(core::sync::atomic::Ordering::Relaxed) > drawn {
+            break;
+        }
+        let at = frames.at();
+        let _ = runtime.pump_at(false, at);
+    }
+    assert_eq!(
+        setups.load(core::sync::atomic::Ordering::Relaxed),
+        2,
+        "the producer re-installs once on the fresh table"
+    );
+    assert!(
+        renders.load(core::sync::atomic::Ordering::Relaxed) > drawn,
+        "the re-installed producer keeps drawing"
+    );
+}
+
+/// An external-frame source whose `start` records each `FrameOutput` the
+/// host hands it — one per stream the mount starts.
+struct RestartingSource {
+    starts: Rc<Cell<u32>>,
+    outputs: Rc<RefCell<Vec<waterui_graphics::gpu::FrameOutput>>>,
+}
+
+impl waterui_graphics::gpu::ExternalFrameSource for RestartingSource {
+    fn start(&mut self, output: waterui_graphics::gpu::FrameOutput) {
+        self.starts.set(self.starts.get() + 1);
+        self.outputs.borrow_mut().push(output);
+    }
+}
+
+/// The external-frame path: `ExternalFrameRuntime.receiver` is node-owned
+/// and survives a dead window's drop, so the stream must restart on the
+/// fresh table — `start` runs again, the retired output refuses frames, and
+/// the new output stays live. A same-table redraw must not restart.
+#[test]
+fn external_frame_restarts_its_stream_for_a_new_table() {
+    let starts = Rc::new(Cell::new(0));
+    let outputs = Rc::new(RefCell::new(Vec::new()));
+    let source = RestartingSource {
+        starts: Rc::clone(&starts),
+        outputs: Rc::clone(&outputs),
+    };
+    let view = Frame::new(waterui_graphics::gpu::ExternalFrameView::new(source))
+        .width(120.0)
+        .height(120.0);
+    let mut runtime = runtime_with(view);
+    let mut frames = Frames::new();
+
+    let _ = frames.render(&mut runtime);
+    assert_eq!(starts.get(), 1, "the stream starts on the first table");
+    assert!(
+        !outputs.borrow()[0].is_retired(),
+        "the live output accepts frames"
+    );
+
+    // An ordinary redraw on the same table must not restart the stream.
+    let _ = frames.render(&mut runtime);
+    assert_eq!(starts.get(), 1, "a same-table redraw does not restart");
+
+    // A lost device drops the window — mounts and the table — and dropping
+    // the receiver retires the old output; the fresh table's install starts
+    // the stream again on the live device.
+    runtime.mark_gpu_device_lost();
+    let _ = frames.render(&mut runtime);
+    assert_eq!(starts.get(), 2, "the stream restarts on the fresh table");
+    assert!(
+        outputs.borrow()[0].is_retired(),
+        "the dead window's output is retired — stale frames are refused"
+    );
+    assert!(
+        !outputs.borrow()[1].is_retired(),
+        "the fresh table's output accepts frames"
+    );
 }

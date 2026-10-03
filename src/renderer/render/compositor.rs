@@ -63,6 +63,9 @@ pub(crate) struct SceneContentLayer {
     /// The node-owned content — shared so the compositor can borrow it while
     /// the render tree still owns it.
     pub(crate) content: Rc<RefCell<Box<dyn waterui_graphics::SceneContent>>>,
+    /// The `SceneResources` table `content` records through; see
+    /// [`crate::renderer::recording::TableAssociation`].
+    pub(crate) recorded_table: Rc<RefCell<crate::renderer::recording::TableAssociation>>,
     /// Placement transform mapping `bounds` into scene space.
     pub(crate) transform: kurbo::Affine,
     /// The content's rect in scene space; `build_scene` draws inside it.
@@ -377,16 +380,26 @@ impl FrameInstall<'_> {
                         .set_ancestry(self.surface, tx, layer.key, &scopes);
                     let target = slot_layer(self.mounts, self.surface, scope, slot);
                     let content = Rc::clone(&layer.content);
+                    let recorded_table = Rc::clone(&layer.recorded_table);
+                    let resources = &self.resources;
                     let mut names = self.resources.waterui().recording();
                     let needs_redraw = &mut self.needs_redraw;
                     #[allow(clippy::cast_possible_truncation)]
                     let (width, height) =
                         (layer.bounds.width() as f32, layer.bounds.height() as f32);
                     tx[target].record(|recorder| {
-                        if content
-                            .borrow_mut()
-                            .build_scene(recorder, &mut names, width, height)
-                        {
+                        let mut content = content.borrow_mut();
+                        // The handles a `SceneContent` caches belong to one
+                        // `SceneResources` table instance: a fresh table (a
+                        // new window after device loss, a reparented mount)
+                        // makes them foreign, and `RecordingResources::name`
+                        // rejects them — the content rebuilds its
+                        // registrations for this table once, before it
+                        // records (water-rs/hydrolysis#350).
+                        if recorded_table.borrow_mut().associate_if_changed(resources) {
+                            content.rebuild_for_engine();
+                        }
+                        if content.build_scene(recorder, &mut names, width, height) {
                             *needs_redraw = true;
                         }
                     });
@@ -417,6 +430,15 @@ impl FrameInstall<'_> {
                     let visible = scopes.iter().all(|scope| scope.opacity != 0.0);
                     if visible {
                         let mut runtime = layer.runtime.borrow_mut();
+                        // A producer installed on a dead window's table is
+                        // stale: `engine_content` answers a fresh handle over
+                        // the same content, so clearing `installed` re-runs
+                        // the one install on this table's device, keeping the
+                        // state the content accumulated (water-rs/
+                        // hydrolysis#350).
+                        if runtime.recorded_table.associate_if_changed(self.resources) {
+                            runtime.installed = false;
+                        }
                         if !runtime.installed {
                             let wake = self.wake.clone();
                             let content = runtime.view.take_engine_content(move || {
@@ -452,6 +474,14 @@ impl FrameInstall<'_> {
                     let visible = scopes.iter().all(|scope| scope.opacity != 0.0);
                     if visible {
                         let mut runtime = layer.runtime.borrow_mut();
+                        // The receiver drains frames minted on a dead
+                        // window's device: a fresh table restarts the
+                        // stream on the live device and drops the stale
+                        // plane size (water-rs/hydrolysis#350).
+                        if runtime.recorded_table.associate_if_changed(self.resources) {
+                            runtime.receiver = None;
+                            runtime.frame_pixels = None;
+                        }
                         if runtime.receiver.is_none() {
                             let redraw = self
                                 .wake

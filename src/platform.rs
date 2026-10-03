@@ -194,6 +194,19 @@ impl DeviceLoss {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// Writes the reason cell the driver's `set_device_lost_callback` write
+    /// would set: every surface observing this handle reports `is_lost` on
+    /// its next poll, so the renderer drops the dead context's windows.
+    /// Test-only — a real loss always comes through the callback.
+    #[cfg(test)]
+    pub(crate) fn mark_lost_for_testing(&self, message: &str) {
+        *self
+            .reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(format!("test device loss: {message}"));
+    }
 }
 
 /// Input button mapped from a platform pointer event.
@@ -849,6 +862,14 @@ impl OffscreenGpuContext {
     /// until the device itself is torn down.
     pub fn reclaim(&self) {
         reclaim_device(&self.inner.device);
+    }
+
+    /// The device-loss handle every surface on this context reports through;
+    /// test-only seam for marking the shared device lost without a real GPU
+    /// fault.
+    #[cfg(test)]
+    pub(crate) fn device_loss(&self) -> &DeviceLoss {
+        &self.inner.device_loss
     }
 
     /// Requests a context on the adapter WaterUI would render an application on.

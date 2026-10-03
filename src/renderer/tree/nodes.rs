@@ -933,6 +933,11 @@ pub(crate) struct SceneViewNode {
     /// inputs in `build_scene`). `RefCell` because `build_scene` needs `&mut` but
     /// `flush` takes `&self`.
     pub(super) content: Rc<RefCell<Box<dyn waterui_graphics::SceneContent>>>,
+    /// The `SceneResources` table this content records through; see
+    /// [`TableAssociation`](crate::renderer::recording::TableAssociation).
+    /// Travels with the content `Rc` so the association survives the window
+    /// whose mounts and table the dead engine owned.
+    pub(super) recorded_table: Rc<RefCell<crate::renderer::recording::TableAssociation>>,
 }
 
 /// A `GpuContentView` leaf that OWNS its [`GpuContentRuntime`] — the node

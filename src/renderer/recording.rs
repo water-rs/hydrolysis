@@ -15,6 +15,7 @@ use core::fmt;
 use kurbo::{Affine, Rect, Shape, Vec2};
 use peniko::{BlendMode, Fill, FontData};
 use rustc_hash::FxHashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use cherenkov::{
@@ -170,6 +171,14 @@ pub(crate) struct SceneResources {
     /// The `SceneContent::build_scene` resource table, shared with every scene
     /// view this engine draws.
     inner: waterui_graphics::SceneResources,
+    /// Identity of this table instance, owned by the table itself. A
+    /// `SceneContent`'s cached registrations belong to the one table they
+    /// were recorded through — `RecordingResources::name`/`hold` reject
+    /// another table's handles even over the same engine — so a fresh table
+    /// (a new `CherenkovWindow` after device loss or a reparented mount) is
+    /// a different identity the compositor rebuilds scene content for
+    /// (water-rs/hydrolysis#350).
+    identity: Rc<()>,
     fonts: std::cell::RefCell<FxHashMap<FontKey, waterui_graphics::Registered<cherenkov::Font>>>,
     images: std::cell::RefCell<
         FxHashMap<ImageKey, waterui_graphics::Registered<cherenkov::Image<cherenkov::Rgba8>>>,
@@ -205,16 +214,62 @@ impl fmt::Debug for SceneResources {
     }
 }
 
+/// The node-owned association of one consumer to one [`SceneResources`]
+/// table instance.
+///
+/// A consumer's cached registrations belong to the table it recorded
+/// through — `RecordingResources::name`/`hold` reject another table's
+/// handles even over the same engine — so it keeps its `TableAssociation`
+/// beside the content it owns (the tree owns both, so the association
+/// survives the window whose mounts and table died). `None` until the first
+/// record, then a `Weak` of the table's identity: a dead table stops
+/// upgrading, a live foreign table fails the identity check — either is a
+/// change the consumer rebuilds its registrations for
+/// (water-rs/hydrolysis#350).
+#[derive(Default)]
+pub(crate) struct TableAssociation {
+    recorded: Option<std::rc::Weak<()>>,
+}
+
+impl TableAssociation {
+    /// `true` on the first call and whenever `resources` is not the table
+    /// this association last recorded against; the consumer then rebuilds
+    /// its registrations for `resources` before it records. The association
+    /// itself is the record — there is no global identity and no per-frame
+    /// reset.
+    pub(crate) fn associate_if_changed(&mut self, resources: &SceneResources) -> bool {
+        let same_table = self.recorded.as_ref().is_some_and(|table| {
+            table
+                .upgrade()
+                .is_some_and(|t| Rc::ptr_eq(&t, resources.identity()))
+        });
+        if same_table {
+            false
+        } else {
+            self.recorded = Some(Rc::downgrade(resources.identity()));
+            true
+        }
+    }
+}
+
 impl SceneResources {
     /// Creates caches served by `engine`.
     pub(crate) fn new(engine: std::rc::Rc<crate::engine::GpuEngine>) -> Self {
         Self {
             inner: waterui_graphics::SceneResources::new(engine),
+            identity: Rc::new(()),
             fonts: std::cell::RefCell::new(FxHashMap::default()),
             images: std::cell::RefCell::new(FxHashMap::default()),
             font_registrations: std::cell::Cell::new(0),
             image_registrations: std::cell::Cell::new(0),
         }
+    }
+
+    /// The identity a consumer records as "the table I belong to":
+    /// downgrade it, and an upgrade-then-`Rc::ptr_eq` is the table-instance
+    /// check. A dead table's `Weak` no longer upgrades.
+    pub(crate) fn identity(&self) -> &Rc<()> {
+        &self.identity
     }
 
     /// (fonts, images) registered since the last call, drained per frame

@@ -795,6 +795,17 @@ impl HeadlessRuntime {
         self.pump_at(true, Instant::now())
     }
 
+    /// Marks the runtime's shared GPU device lost, writing the same reason
+    /// cell a real `set_device_lost_callback` report sets: the next pump's
+    /// window sweep drops every window — its mounts and `SceneResources`
+    /// table — the dead context owned.
+    #[cfg(test)]
+    pub(crate) fn mark_gpu_device_lost(&mut self) {
+        self.gpu
+            .device_loss()
+            .mark_lost_for_testing("headless loss");
+    }
+
     /// The main window's renderer, for tests that assert on frame internals.
     #[cfg(test)]
     pub(crate) fn renderer(&self) -> &HydrolysisRenderer {

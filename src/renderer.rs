@@ -32,7 +32,7 @@ mod lifecycle;
 mod metadata;
 mod native_measure;
 mod navigation;
-mod recording;
+pub(crate) mod recording;
 mod render;
 mod retained;
 

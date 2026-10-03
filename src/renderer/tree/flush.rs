@@ -392,6 +392,7 @@ impl RenderNode {
                             presentation: crate::renderer::retained::PresentationId::ORDINARY,
                         },
                         content: Rc::clone(&node.content),
+                        recorded_table: Rc::clone(&node.recorded_table),
                         transform: ctx.transform,
                         bounds: ctx.bounds,
                         active_layers: renderer.compositor.active_scene_layers.clone(),

@@ -7,12 +7,15 @@
 //! [`waterui_graphics::gpu::GpuContentView::frame`] pump keep working after
 //! the producer moves to the engine.
 //!
-//! The producer installs exactly once: [`GpuContentView::take_engine_content`]
-//! moves it into an engine `GpuContentHandle`, which one layer consumes at
-//! install. A mount that drops its layer cannot be repopulated — the content
-//! is gone — so a keyed mount presenting `GpuContent` is allowed to live for
-//! the frame's whole key set, and transient (capture) windows never install
-//! it at all: a capture cannot consume the one install the producer gets.
+//! The producer installs once per `SceneResources` table:
+//! [`GpuContentView::take_engine_content`] hands the engine a `GpuContentBox`
+//! over a shareable `GpuContentHandle`, so a fresh table — a new window after
+//! device loss — re-installs a fresh handle over the same content and keeps
+//! the state it accumulated, which is exactly what `engine_content` is for. A
+//! keyed mount presenting `GpuContent` lives for the frame's whole key set,
+//! and transient (capture) windows never install it: a capture renders
+//! through its window's own table and must not consume the live mount's
+//! install.
 
 use waterui_graphics::gpu::{ExternalFrameView, FrameReceiver, GpuContentView};
 
@@ -25,9 +28,17 @@ use waterui_graphics::gpu::{ExternalFrameView, FrameReceiver, GpuContentView};
 /// the call.
 pub(crate) struct GpuContentRuntime {
     pub(crate) view: GpuContentView,
-    /// `true` once `take_engine_content` has run; the producer is on the
-    /// engine from then on and only `gpu_content_size`/transform edits apply.
+    /// `true` once `take_engine_content` has run on the current table; the
+    /// producer is on the engine from then on and only `gpu_content_size`/
+    /// transform edits apply until the table changes.
     pub(crate) installed: bool,
+    /// The `SceneResources` table this runtime installed against; see
+    /// [`TableAssociation`](crate::renderer::recording::TableAssociation).
+    /// A fresh table — a new `CherenkovWindow` after device loss — makes the
+    /// install stale, so the compositor clears `installed` on the change and
+    /// `engine_content` answers a fresh handle over the same content on the
+    /// new device (water-rs/hydrolysis#350).
+    pub(crate) recorded_table: crate::renderer::recording::TableAssociation,
 }
 
 impl GpuContentRuntime {
@@ -35,6 +46,7 @@ impl GpuContentRuntime {
         Self {
             view,
             installed: false,
+            recorded_table: Default::default(),
         }
     }
 }
@@ -53,6 +65,13 @@ pub(crate) struct ExternalFrameRuntime {
     pub(crate) receiver: Option<FrameReceiver>,
     /// The plane size of the last presented frame, for the stretch transform.
     pub(crate) frame_pixels: Option<(u32, u32)>,
+    /// The `SceneResources` table this runtime started the stream against;
+    /// see [`TableAssociation`](crate::renderer::recording::TableAssociation).
+    /// The receiver and the frames it drains were minted on that table's
+    /// device — a fresh table after device loss makes them stale, so the
+    /// compositor drops them on the change and the stream restarts on the
+    /// live device (water-rs/hydrolysis#350).
+    pub(crate) recorded_table: crate::renderer::recording::TableAssociation,
 }
 
 impl ExternalFrameRuntime {
@@ -61,6 +80,7 @@ impl ExternalFrameRuntime {
             view,
             receiver: None,
             frame_pixels: None,
+            recorded_table: Default::default(),
         }
     }
 }
