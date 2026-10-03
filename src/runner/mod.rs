@@ -44,6 +44,10 @@ use waterui_text::FontCollection;
 #[cfg(target_os = "android")]
 pub mod android;
 mod diagnostics;
+/// The `InputConnection` protocol state machine — compiled on Android for the
+/// JNI bridge and on host for its tests; dead elsewhere.
+#[cfg(any(target_os = "android", all(test, not(target_arch = "wasm32"))))]
+pub(crate) mod editing;
 mod executor;
 mod fonts;
 #[cfg(not(target_arch = "wasm32"))]
