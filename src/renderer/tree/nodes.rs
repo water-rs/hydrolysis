@@ -1080,10 +1080,10 @@ impl TextNode {
         if label.is_none() && value.is_none() {
             return;
         }
-        if let Some(label) = &label {
-            if renderer.consume_accessibility_descendant_text(env, label) {
-                return;
-            }
+        if let Some(label) = &label
+            && renderer.consume_accessibility_descendant_text(env, label)
+        {
+            return;
         }
         let mut node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),
