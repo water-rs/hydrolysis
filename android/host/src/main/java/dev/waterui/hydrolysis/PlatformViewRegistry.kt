@@ -46,6 +46,7 @@ class PlatformViewRegistry internal constructor(
     private val factories = HashMap<String, (Context) -> View>()
     private val slots = LinkedHashMap<Long, Slot>()
     private var pendingJson: String? = null
+    private var appliedJson: String? = null
 
     /** Registers the view factory for platform views of `kind`. */
     fun registerFactory(kind: String, factory: (Context) -> View) {
@@ -62,6 +63,11 @@ class PlatformViewRegistry internal constructor(
     internal fun publishIfPending() {
         val sessionPtr = session?.nativePtr ?: return
         val json = NativeBridge.nativePlatformViewFrames(sessionPtr) ?: return
+        // The JNI side always serializes the current set, and onLayout pulls
+        // it once per layout pass — re-applying an unchanged frame would
+        // re-request layout inside the very pass that read it, forever.
+        if (json == appliedJson) return
+        appliedJson = json
         applyJson(json)
     }
 
