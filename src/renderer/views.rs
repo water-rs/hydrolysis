@@ -325,9 +325,9 @@ pub(crate) fn str_accessibility(
         let label = renderer.resolve_accessibility_label(env, default_label);
         let value = renderer.resolve_accessibility_value(env, None);
         if (label.is_some() || value.is_some())
-            && !label.as_deref().is_some_and(|label| {
-                renderer.consume_accessibility_descendant_text(env, label)
-            })
+            && !label
+                .as_deref()
+                .is_some_and(|label| renderer.consume_accessibility_descendant_text(env, label))
         {
             let mut node = AccessibilityNode::new(
                 renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Label),

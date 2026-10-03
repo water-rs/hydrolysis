@@ -1807,11 +1807,7 @@ fn a11y_value_lands_beside_the_label_on_the_same_node() {
         .iter()
         .filter(|(_, node)| node.value() == Some("e to the i pi plus 1 equals 0"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        carrying.len(),
-        1,
-        "the value must land on exactly one node"
-    );
+    assert_eq!(carrying.len(), 1, "the value must land on exactly one node");
     assert_eq!(carrying[0].1.label(), Some("Euler's identity"));
 }
 
