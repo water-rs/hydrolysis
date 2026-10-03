@@ -244,7 +244,6 @@ impl SceneContent for ImagePane {
     fn rebuild_for_engine(&mut self) {
         self.image = None;
     }
-
 }
 
 /// An opaque red image — semitransparent fixtures read back white over the

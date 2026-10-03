@@ -1672,7 +1672,6 @@ impl SceneContent for Chart {
         Some("weekly chart".to_string())
     }
     fn rebuild_for_engine(&mut self) {}
-
 }
 
 #[test]

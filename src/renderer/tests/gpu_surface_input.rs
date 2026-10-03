@@ -603,7 +603,6 @@ impl SceneContent for SceneProbe {
         Some(kurbo::Rect::new(10.0, 20.0, 12.0, 38.0))
     }
     fn rebuild_for_engine(&mut self) {}
-
 }
 
 #[test]

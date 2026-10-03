@@ -580,7 +580,6 @@ impl SceneContent for SceneProbe {
         probe_caret()
     }
     fn rebuild_for_engine(&mut self) {}
-
 }
 
 fn surface_view(scene: bool, log: ProbeLog) -> AnyView {
