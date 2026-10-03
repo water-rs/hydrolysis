@@ -885,11 +885,23 @@ impl RenderNode {
         let signals = renderer.signals.clone();
         let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
         let replaced_for_watch = Rc::clone(&replaced_ids);
+        // The node retains one immutable row set per applied event: the
+        // watcher swaps in the snapshot each notification carried — captured
+        // from the exact data that emitted it — so reconcile never re-reads
+        // the live source while applying an older change.
+        let applied = Rc::new(RefCell::new(views.snapshot()));
+        let applied_for_watch = Rc::clone(&applied);
         let guard = views.watch(.., {
             let dirty = Rc::clone(&dirty);
             move |ctx, change| {
                 dirty.set(true);
-                collect_replaced_ids(ctx.value(), &change, &mut replaced_for_watch.borrow_mut());
+                let event_snapshot = ctx.into_value();
+                collect_replaced_ids(
+                    &event_snapshot,
+                    &change,
+                    &mut replaced_for_watch.borrow_mut(),
+                );
+                *applied_for_watch.borrow_mut() = event_snapshot;
                 signals.mark_collection_dirty(key, 0);
             }
         });
@@ -903,15 +915,18 @@ impl RenderNode {
         let accessibility_container_env = item_env.as_ref().map(|_| env.clone());
         #[cfg(feature = "accessibility")]
         let env = item_env.as_ref().unwrap_or(env);
-        let len = views.len().snapshot();
         // The initial membership renders at rest — only items added or removed
-        // by a *later* change animate (`reconcile` marks phases).
-        let entries = (0..len)
+        // by a *later* change animate (`reconcile` marks phases). Every entry
+        // is built from the one snapshot, so ids and views stay coherent even
+        // if a nested build mutates the source mid-materialization.
+        let snapshot = applied.borrow().clone();
+        let entries = snapshot
+            .range()
             .map(|index| {
-                let id = views
+                let id = snapshot
                     .get_id(index)
                     .unwrap_or_else(|| panic!("hydrolysis collection: item {index} has no id"));
-                let view = views
+                let view = snapshot
                     .get_view(index)
                     .unwrap_or_else(|| panic!("hydrolysis collection: item {index} missing"));
                 CollectionEntry::stable(
@@ -926,7 +941,7 @@ impl RenderNode {
             memo_slots: RefCell::default(),
             render_id: RenderId::next(),
             layout,
-            views,
+            snapshot: applied,
             env: env.clone(),
             accessibility_identity: Rc::new(()),
             #[cfg(feature = "accessibility")]
@@ -961,13 +976,25 @@ impl RenderNode {
         let dirty_for_watch = Rc::clone(&dirty);
         let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
         let replaced_for_watch = Rc::clone(&replaced_ids);
+        // The node retains one immutable row set per applied event: the
+        // watcher swaps in the snapshot each notification carried, so the
+        // window re-resolution, extent index, and materialization all read
+        // the same coherent membership rather than the live source.
+        let snapshot = Rc::new(RefCell::new(views.snapshot()));
+        let snapshot_for_watch = Rc::clone(&snapshot);
         let guard = views.watch(.., move |ctx, change| {
-            // Membership changed: request a fine-grained refresh; the flush re-reads
-            // the collection length/items and re-resolves the visible window.
+            // Membership changed: request a fine-grained refresh; the flush
+            // re-resolves the visible window over the event's own snapshot.
             // The reported replaced positions accumulate their ids so the
             // patch invalidates exactly those rows.
             dirty_for_watch.set(true);
-            collect_replaced_ids(ctx.value(), &change, &mut replaced_for_watch.borrow_mut());
+            let event_snapshot = ctx.into_value();
+            collect_replaced_ids(
+                &event_snapshot,
+                &change,
+                &mut replaced_for_watch.borrow_mut(),
+            );
+            *snapshot_for_watch.borrow_mut() = event_snapshot;
             signals.mark_collection_dirty(key, 0);
         });
         let signals = renderer.signals.clone();
@@ -984,7 +1011,7 @@ impl RenderNode {
             memo_gate: Cell::default(),
             memo_slots: RefCell::default(),
             axis,
-            views,
+            snapshot,
             env: env.clone(),
             accessibility_identity: Rc::new(()),
             render_id: RenderId::next(),

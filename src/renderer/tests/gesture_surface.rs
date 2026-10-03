@@ -55,6 +55,7 @@ impl SceneContent for RecorderPane {
     fn input(&mut self, event: &SurfaceInputEvent) {
         self.events.borrow_mut().push(format!("{event:?}"));
     }
+    fn rebuild_for_engine(&mut self) {}
 }
 
 fn runtime_with(view: AnyView) -> HeadlessRuntime {
