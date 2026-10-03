@@ -17,7 +17,7 @@ use waterui_controls::text_field::ResolvedTextFieldConfig;
 use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native, Str};
 use waterui_form::secure::SecureFieldConfig;
-use waterui_text::styled::StyledStr;
+use waterui_text::styled::{Style, StyledStr};
 
 /// The retained render state of a text field: the cloneable [`ResolvedTextFieldConfig`]
 /// drives the input model + accessibility, and its floating label is held as a
@@ -394,8 +394,17 @@ pub(crate) fn render_text_field_parts(
     };
     let display_styled = if use_placeholder && !prompt_as_label {
         StyledStr::plain(display).foreground(theme.input_placeholder_color())
-    } else {
+    } else if preedit.is_empty() {
         StyledStr::plain(display)
+    } else {
+        // The pre-edit run carries the composing underline a native text
+        // field draws under the IME's composing span; the committed text
+        // either side of the splice stays plain.
+        let mut styled = StyledStr::empty();
+        styled.push_str(value[..selection_start].to_string());
+        styled.push(preedit.clone(), Style::new().underline());
+        styled.push_str(value[selection_end..].to_string());
+        styled
     };
     let effective_label_height = if prompt_as_label {
         input_metrics.label_height
