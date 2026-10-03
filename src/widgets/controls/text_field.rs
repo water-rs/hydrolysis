@@ -532,6 +532,8 @@ pub(crate) fn render_text_field_parts(
                 text_clip_bounds: transformed_rect(hit_transform, text_clip_bounds),
                 content_alpha,
                 layout: committed_layout,
+                display_text: committed_with_preedit.clone(),
+                display_layout,
                 purpose: TextInputPurpose::Normal,
                 model: input_model,
                 selection: selection_slot,
@@ -712,7 +714,7 @@ pub(crate) fn render_secure_field_parts(
     let masked_display = StyledStr::plain(masked.clone());
     let committed_layout = HydrolysisRenderer::build_text_layout(
         ctx.state_mut(),
-        StyledStr::plain(masked),
+        StyledStr::plain(masked.clone()),
         HorizontalAlignment::Leading,
         env,
         Some(text_bounds.width() as f32),
@@ -810,7 +812,9 @@ pub(crate) fn render_secure_field_parts(
                 text_bounds: transformed_rect(hit_transform, text_bounds),
                 text_clip_bounds: transformed_rect(hit_transform, text_clip_bounds),
                 content_alpha,
-                layout: committed_layout,
+                layout: committed_layout.clone(),
+                display_text: masked.into(),
+                display_layout: committed_layout,
                 purpose: TextInputPurpose::Password,
                 model: input_model,
                 selection: selection_slot,
@@ -1124,7 +1128,7 @@ pub(crate) fn emit_text_field_accessibility(
         if !disabled {
             let layout = HydrolysisRenderer::build_text_layout(
                 renderer.state_mut(),
-                StyledStr::plain(value),
+                StyledStr::plain(value.clone()),
                 HorizontalAlignment::Leading,
                 env,
                 None,
@@ -1139,7 +1143,9 @@ pub(crate) fn emit_text_field_accessibility(
                 text_bounds: kurbo::Rect::ZERO,
                 text_clip_bounds: kurbo::Rect::ZERO,
                 content_alpha: 1.0,
-                layout,
+                layout: layout.clone(),
+                display_text: value.into(),
+                display_layout: layout,
                 purpose: TextInputPurpose::Normal,
                 model: TextInputModel::TextField {
                     value: value_binding.clone(),
@@ -1214,9 +1220,10 @@ pub(crate) fn emit_secure_field_accessibility(
             renderer.push_pending_text_input_accessibility_node(node_id);
         }
         if !disabled {
+            let masked = "*".repeat(secure_len);
             let layout = HydrolysisRenderer::build_text_layout(
                 renderer.state_mut(),
-                StyledStr::plain("*".repeat(secure_len)),
+                StyledStr::plain(masked.clone()),
                 HorizontalAlignment::Leading,
                 env,
                 None,
@@ -1231,7 +1238,9 @@ pub(crate) fn emit_secure_field_accessibility(
                 text_bounds: kurbo::Rect::ZERO,
                 text_clip_bounds: kurbo::Rect::ZERO,
                 content_alpha: 1.0,
-                layout,
+                layout: layout.clone(),
+                display_text: masked.into(),
+                display_layout: layout,
                 purpose: TextInputPurpose::Password,
                 model: TextInputModel::SecureField {
                     value: value_binding.clone(),

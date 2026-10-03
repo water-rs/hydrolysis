@@ -330,6 +330,8 @@ impl SemanticCore {
             text_clip_bounds: data.target.text_clip_bounds,
             content_alpha: data.target.content_alpha,
             layout: data.target.layout,
+            display_text: data.target.display_text,
+            display_layout: data.target.display_layout,
             purpose: data.target.purpose,
             depth: data.depth,
             order,
