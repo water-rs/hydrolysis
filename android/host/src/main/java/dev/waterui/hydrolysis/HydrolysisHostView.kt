@@ -73,6 +73,16 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
      */
     internal var inputConnection: HydrolysisInputConnection? = null
 
+    /**
+     * The [EditorInfo] contract the live connection was built with. The view
+     * is one editor for every field, so a focus move has to [InputMethodManager.restartInput]
+     * before the IME will read a new input type — a password field reached
+     * through a connection opened while nothing was focused otherwise keeps
+     * the plain multiline type and shows suggestions.
+     */
+    private var inputContract: InputContract? = null
+    private var inputRestartPosted = false
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -303,13 +313,24 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
             session
                 ?.let { NativeBridge.nativeEditingState(it.nativePtr) }
                 ?.let(::EditingStatePayload)
+        inputContract = InputContract.from(state)
+        val password = state?.password == true
         outAttrs.inputType =
             EditorInfo.TYPE_CLASS_TEXT or
-                (if (state?.password == true) EditorInfo.TYPE_TEXT_VARIATION_PASSWORD else 0) or
-                (if (state == null || !state.singleLine) EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE else 0)
+                (if (password) {
+                    EditorInfo.TYPE_TEXT_VARIATION_PASSWORD or EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                } else {
+                    0
+                }) or
+                (if (!password && (state == null || !state.singleLine)) {
+                    EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
+                } else {
+                    0
+                })
         outAttrs.imeOptions =
             (if (state?.hasSubmit == true) EditorInfo.IME_ACTION_DONE else EditorInfo.IME_ACTION_NONE) or
-                EditorInfo.IME_FLAG_NO_FULLSCREEN
+                EditorInfo.IME_FLAG_NO_FULLSCREEN or
+                (if (password) EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING else 0)
         outAttrs.initialSelStart = state?.selStart ?: 0
         outAttrs.initialSelEnd = state?.selEnd ?: 0
         outAttrs.initialCapsMode = 0
@@ -330,15 +351,31 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
     /** The session's authoritative editing push — the connection adopts it. */
     internal fun applyEditingState(json: String) {
         val state = EditingStatePayload(json)
-        val connection = inputConnection ?: return
-        connection.applyNativeState(state)
-        if (!state.focused) {
-            // The focused editor went away: the IMM must rebind so the next
-            // connection sees the cleared target rather than stale text.
-            val imm =
-                context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.restartInput(this)
+        val contract = InputContract.from(state)
+        if (contract != inputContract) {
+            // Posted, not called here. This push runs inside the session
+            // borrow; restartInput re-enters nativeEditingState on this
+            // thread, which would alias that borrow.
+            if (!inputRestartPosted) {
+                inputRestartPosted = true
+                post {
+                    inputRestartPosted = false
+                    // A connection created in the meantime already recorded
+                    // the contract it was built with. Restarting again would
+                    // only drop the IME's first keystrokes.
+                    val latest =
+                        session
+                            ?.let { NativeBridge.nativeEditingState(it.nativePtr) }
+                            ?.let(::EditingStatePayload)
+                    if (InputContract.from(latest) == inputContract) return@post
+                    val imm =
+                        context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.restartInput(this)
+                }
+            }
+            return
         }
+        inputConnection?.applyNativeState(state)
     }
 
     /** The session's subscribed cursor-anchor push. */
@@ -420,5 +457,39 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
     override fun autofill(values: SparseArray<AutofillValue>) {
         autofillBridge.autofill(values)
         super.autofill(values)
+    }
+}
+
+/**
+ * The slice of an editing-state push that [EditorInfo] is built from.
+ * Text and selection stay on the live connection; the IME reads these
+ * only when the connection is created.
+ */
+private data class InputContract(
+    val focused: Boolean,
+    val editorId: Long,
+    val password: Boolean,
+    val singleLine: Boolean,
+    val hasSubmit: Boolean,
+) {
+    companion object {
+        fun from(state: EditingStatePayload?): InputContract =
+            if (state == null) {
+                InputContract(
+                    focused = false,
+                    editorId = 0L,
+                    password = false,
+                    singleLine = false,
+                    hasSubmit = false,
+                )
+            } else {
+                InputContract(
+                    focused = state.focused,
+                    editorId = state.editorId,
+                    password = state.password,
+                    singleLine = state.singleLine,
+                    hasSubmit = state.hasSubmit,
+                )
+            }
     }
 }
