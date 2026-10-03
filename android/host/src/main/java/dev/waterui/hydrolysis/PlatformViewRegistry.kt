@@ -111,7 +111,11 @@ class PlatformViewRegistry internal constructor(
             val slot =
                 slots.getOrPut(placement.id) {
                     changed = true
-                    Slot(createSlot(placement))
+                    val view = createSlot(placement)
+                    // Attach before applySlot configures the generated
+                    // FrameLayout.LayoutParams; orderSlots only reorders.
+                    container.addView(view)
+                    Slot(view)
                 }
             slot.placement = placement
             applySlot(slot)
