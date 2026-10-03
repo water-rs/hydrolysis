@@ -3,6 +3,7 @@
 //! env scope, collection, lazy stack, scene/GPU/effect, `Dynamic` host).
 
 use super::*;
+use crate::platform_view::PlatformView;
 
 impl RenderNode {
     /// Build a node from a view, capturing live reactive inputs. Native leaves
@@ -599,6 +600,16 @@ impl RenderNode {
         let view = match view.downcast::<Native<GpuSurface>>() {
             Ok(surface) => {
                 return RenderNode::build_gpu_surface((*surface).into_inner(), env, renderer);
+            }
+            Err(view) => view,
+        };
+        // A platform-view embedding leaf: it records its frame onto the host's
+        // `PlatformViewSink` each flush; mounting the real native child is the
+        // host's work. No sink means this runner cannot embed — the leaf
+        // panics at build naming the missing piece.
+        let view = match view.downcast::<Native<PlatformView>>() {
+            Ok(platform_view) => {
+                return RenderNode::build_platform_view((*platform_view).into_inner(), env);
             }
             Err(view) => view,
         };

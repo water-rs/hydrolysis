@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::engine::WidgetTheme;
+use crate::platform_view::PlatformView;
 use std::rc::Rc;
 
 /// The measure half of a native leaf view. Rendering is owned by the retained
@@ -79,6 +80,16 @@ pub(crate) fn unsupported_webview() -> ! {
     )
 }
 
+/// Reaching a `PlatformView` leaf without a `PlatformViewSink` in the window
+/// environment means the runner cannot mount native children at all.
+pub(crate) fn unsupported_platform_view() -> ! {
+    panic!(
+        "PlatformView is unsupported on this runner because no PlatformViewSink is installed; \
+         a host that embeds native views (the Android runner) inserts one into the window \
+         environment at session create"
+    )
+}
+
 pub(crate) fn dimensions_for_native<V: HydroNativeView>(
     view: &AnyView,
     proposal: ProposalSize,
@@ -119,6 +130,7 @@ macro_rules! hydro_native_view_types {
         $macro!(Native<Dynamic>);
         $macro!(Native<SystemIcon>);
         $macro!(Native<GpuSurface>);
+        $macro!(Native<PlatformView>);
         $macro!(Native<SceneView>);
         $macro!(Native<ViewEffectErased>);
         $macro!(Native<Color>);
