@@ -1,5 +1,5 @@
-mod cherenkov_migration;
 mod collection_update;
+mod frame_work;
 mod slider_size_indicator;
 use super::*;
 use std::borrow::Cow;
@@ -480,6 +480,8 @@ fn text_input_target(
         text_clip_bounds: Rect::ZERO,
         content_alpha: 1.0,
         layout: std::sync::Arc::new(parley::Layout::default()),
+        display_text: waterui_core::Str::default(),
+        display_layout: std::sync::Arc::new(parley::Layout::default()),
         purpose: TextInputPurpose::Normal,
         depth: 0,
         order: 0,

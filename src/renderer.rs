@@ -22,6 +22,7 @@ pub mod accessibility;
 mod bindings;
 mod effects;
 mod frame;
+mod frame_work;
 #[cfg(feature = "frame-profile")]
 mod gpu_profile;
 mod identity;
@@ -29,7 +30,6 @@ mod input;
 mod interaction_layers;
 mod lifecycle;
 mod metadata;
-mod migration_counters;
 mod native_measure;
 mod navigation;
 mod recording;
@@ -44,12 +44,12 @@ mod views;
 
 pub(crate) use effects::*;
 pub(crate) use frame::*;
+pub use frame_work::FrameWorkCounters;
 #[cfg(feature = "frame-profile")]
 pub(crate) use gpu_profile::GpuFrameProfiler;
 #[cfg(feature = "frame-profile")]
 pub use gpu_profile::{FrameStageTimes, GpuIdentity};
 pub(crate) use identity::*;
-pub use migration_counters::MigrationCounters;
 pub(crate) use native_measure::*;
 #[cfg(test)]
 pub(crate) use recording::assert_well_formed_image;
@@ -148,7 +148,7 @@ use waterui_core::layout::{
 #[cfg(feature = "accessibility")]
 use waterui_core::metadata::MetadataKey;
 use waterui_core::view::Hook;
-use waterui_core::views::Views;
+use waterui_core::views::{ViewSnapshot, Views};
 use waterui_core::{
     AnyView, Environment, IgnorableMetadata, Metadata, Native, Retain, Str, View, impl_extractor,
 };
@@ -225,7 +225,10 @@ pub struct SemanticCore {
     gesture_engine: GestureEngine,
     gesture_group_ids: BTreeMap<usize, usize>,
     next_gesture_group_id: usize,
-    text_editing: TextEditingState,
+    /// Input targets, selection slots and pre-edit live here — `pub(crate)`
+    /// because the runner's editing session and headless tests read them
+    /// from outside the renderer module tree.
+    pub(crate) text_editing: TextEditingState,
     popup_menu: PopupMenuState,
     /// The identity the runner gave the window this core renders — menu-chord
     /// dispatch scopes mounted `Menu` sources by it (water-rs/hydrolysis#247).
@@ -489,7 +492,7 @@ impl HydrolysisRenderer {
             #[cfg(feature = "frame-profile")]
             frame_stage_times: FrameStageTimes::default(),
             #[cfg(feature = "frame-profile")]
-            gpu_profiler: GpuFrameProfiler::new(device),
+            gpu_profiler: GpuFrameProfiler::new(_device),
             #[cfg(feature = "frame-profile")]
             last_layout_signature: None,
         }

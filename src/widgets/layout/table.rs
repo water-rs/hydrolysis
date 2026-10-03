@@ -25,7 +25,7 @@ use accesskit::{
 use nami::Signal;
 use waterui::component::table::{TableColumn, TableConfig};
 use waterui_core::layout::{ProposalSize, Size as LayoutSize, ViewDimensions};
-use waterui_core::views::Views;
+use waterui_core::views::{ViewSnapshot, Views};
 use waterui_core::{AnyView, Environment, Native};
 use waterui_layout::scroll::Axis as ScrollAxis;
 
@@ -314,7 +314,10 @@ pub(crate) fn table_accessibility(
             if let Some(header_node_id) = header_node_id {
                 table_node.push_child(header_node_id);
             }
-            let rows = column.rows();
+            // One immutable row set per column for the whole window: the
+            // cells this emit reads stay coherent with each other even if a
+            // cell's own content mutates the source mid-pass.
+            let rows = column.rows().snapshot();
             for row_index in row_window.start..row_window.end {
                 let cell_rect = layout_metrics.map_or(kurbo::Rect::ZERO, |m| {
                     table_data_cell_rect(origin_x, origin_y, x_offset, width, row_index, m)
@@ -569,7 +572,7 @@ pub(crate) fn render_table_parts(
             header_rect,
         );
 
-        let rows = column.rows();
+        let rows = column.rows().snapshot();
         for row_index in row_window.start..row_window.end {
             let cell_rect = table_data_cell_rect(
                 origin_x,

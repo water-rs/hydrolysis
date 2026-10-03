@@ -500,7 +500,7 @@ impl HydrolysisRenderer {
     /// what makes the encoded fragment reusable across frames.
     fn encode_text_layout(
         service: &TextMeasureService,
-        counters: &mut MigrationCounters,
+        counters: &mut FrameWorkCounters,
         scene: &mut Recording,
         layout: &Arc<parley::Layout<[u8; 4]>>,
         input: &ResolvedTextLayoutInput,
@@ -944,13 +944,15 @@ pub(crate) fn measure_list_intrinsic(
     env: &Environment,
     theme: &Rc<dyn WidgetTheme>,
 ) -> LayoutSize {
-    let row_count = list.contents.len().snapshot();
+    // One immutable row set for the measure: the count, the sampled item, and
+    // the section-marker walk all read the same membership.
+    let contents = list.contents.snapshot();
+    let row_count = contents.len();
     if row_count == 0 {
         return LayoutSize::zero();
     }
     let editing = list.editing.snapshot();
-    let mut first_item = list
-        .contents
+    let mut first_item = contents
         .get_view(0)
         .unwrap_or_else(|| panic!("ListConfig failed to materialize item at index 0"));
     first_item.content = normalize_layout_view(first_item.content, env);
@@ -971,9 +973,8 @@ pub(crate) fn measure_list_intrinsic(
     // virtualized `List::for_each` never does.
     let mut section_height = 0.0;
     if list.uses_sections {
-        for index in 0..row_count {
-            let Some(section) = list
-                .contents
+        for index in contents.range() {
+            let Some(section) = contents
                 .get_view(index)
                 .and_then(|item| item.section.clone())
             else {
@@ -994,8 +995,11 @@ pub(crate) fn measure_list_intrinsic(
     LayoutSize::new(max_width as f32, total_height as f32)
 }
 
+/// Materializes the `ListItem` at `index` from `contents` — an immutable
+/// snapshot of the row collection, so the caller's whole pass (section walk,
+/// accessibility emit, or draw loop) reads one coherent membership.
 pub(crate) fn materialize_list_item(
-    contents: &impl Views<View = ListItem>,
+    contents: &impl ViewSnapshot<View = ListItem>,
     index: usize,
     env: &Environment,
 ) -> ListItem {
@@ -1298,7 +1302,7 @@ pub(crate) fn update_table_slot_visible_cell_widths(
         .take(col_window.end)
         .skip(col_window.start)
     {
-        let rows = column.rows();
+        let rows = column.rows().snapshot();
         for row_index in row_window.start..row_window.end {
             if let Some(cell) = rows.get_view(row_index) {
                 let cell_view = normalize_layout_view(AnyView::new(cell), env);

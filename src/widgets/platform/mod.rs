@@ -1,3 +1,4 @@
+pub(crate) mod platform_view;
 pub(crate) mod webview;
 
 #[cfg(hydrolysis_macos_system_webview)]

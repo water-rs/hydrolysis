@@ -36,7 +36,6 @@ use super::fonts::android_fonts;
 use super::gpu::{AndroidGpuContext, AndroidSurface};
 use super::ime::ImeBridge;
 use super::jni::JniError;
-use super::platform_views::PlatformViewTable;
 use crate::engine::WidgetTheme;
 use crate::platform::{
     GpuSurfaceWindow, InputEvent, PlatformWindow, SurfaceProvider, TextInputState,
@@ -110,9 +109,13 @@ impl HostBridge {
     ) {
         if let Err(error) = env.call_method(&self.host_view, name, sig, args) {
             // A pending Java exception (the host's deliberate throw for a
-            // fatal GPU error) surfaces to the Kotlin caller as-is; other
-            // JNI failures are logged, never silently dropped.
+            // fatal GPU error) surfaces to the Kotlin caller as-is — but
+            // describe it first, or the next JNI call aborts the process on
+            // "called with pending exception" and the real trace never
+            // reaches logcat. Other JNI failures are logged, never silently
+            // dropped.
             if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
                 return;
             }
             tracing::error!(
@@ -127,6 +130,41 @@ impl HostBridge {
     /// Posts a Choreographer frame request on the host view's scheduler.
     pub(crate) fn request_frame(&self) {
         self.call("onNativeRequestRedraw", "()V", &[]);
+    }
+
+    /// `call` for a single `String` argument — the JSON pushes serialize
+    /// into a `jstring` inside the env first.
+    fn call_str(&self, name: &'static str, json: &str) {
+        let Ok(mut env) = self.vm.get_env() else {
+            return;
+        };
+        let Ok(value) = env.new_string(json) else {
+            return;
+        };
+        if env
+            .call_method(
+                &self.host_view,
+                name,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&value)],
+            )
+            .is_err()
+            && env.exception_check().unwrap_or(false)
+        {
+            let _ = env.exception_describe();
+        }
+    }
+
+    /// `session.onNativeEditingState(json)` — the authoritative editing
+    /// state for the connection's `Editable` mirror.
+    pub(crate) fn editing_state_changed(&self, json: &str) {
+        self.call_str("onNativeEditingState", json);
+    }
+
+    /// `session.onNativeCursorAnchorInfo(json)` — the subscribed cursor
+    /// anchor info, in logical units.
+    pub(crate) fn cursor_anchor_changed(&self, json: &str) {
+        self.call_str("onNativeCursorAnchorInfo", json);
     }
 
     /// Pushes the focused text-input rect (physical px) and purpose to the
@@ -154,10 +192,19 @@ impl HostBridge {
         self.call("onNativeTextInputState", "(FFFFI)V", args);
     }
 
-    /// Marks the published accessibility snapshot dirty on the host side.
+    /// `session.onNativeAccessibilityTreeChanged(json)` — the JSON event
+    /// list the semantic diff produced for this publish; the host replays
+    /// each entry as the scoped accessibility event it describes.
     #[cfg(feature = "accessibility")]
-    pub(crate) fn accessibility_tree_changed(&self) {
-        self.call("onNativeAccessibilityTreeChanged", "()V", &[]);
+    pub(crate) fn accessibility_tree_changed(&self, events_json: &str) {
+        self.call_str("onNativeAccessibilityTreeChanged", events_json);
+    }
+
+    /// Marks the published platform-view placement set dirty on the host
+    /// side — the registry re-reads `nativePlatformViewFrames` and re-lays
+    /// out its slots.
+    pub(crate) fn platform_views_changed(&self) {
+        self.call("onNativePlatformViewsChanged", "()V", &[]);
     }
 
     /// Delivers a fatal error (GPU loss, unrecoverable renderer failure) —
@@ -514,7 +561,9 @@ pub(crate) struct AndroidSession {
         expect(dead_code, reason = "read only under the accessibility feature")
     )]
     pub(crate) a11y: AccessibilitySnapshot,
-    pub(crate) platform_views: PlatformViewTable,
+    /// The platform-view sink the window's `PlatformView` leaves record into;
+    /// the published table is serialized for the Kotlin registry.
+    pub(crate) platform_views: crate::platform_view::PlatformViewSink,
     pub(crate) ime: ImeBridge,
     /// The live surface generation, as last reported by the host.
     surface_generation: u64,
@@ -605,6 +654,10 @@ impl AndroidSession {
             .clone();
         let safe_area = nami::binding(waterui_layout::padding::EdgeInsets::default());
         env.insert(crate::platform::WindowSafeArea(safe_area.clone()));
+        // The platform-view sink `PlatformView` leaves record their frames
+        // into; the published table is what `nativePlatformViewFrames` serves.
+        let platform_views = crate::platform_view::PlatformViewSink::new();
+        env.insert(platform_views.clone());
 
         let mut windows = VecDeque::from(windows);
         let window = windows
@@ -650,7 +703,7 @@ impl AndroidSession {
             gpu,
             pending_window_queue,
             a11y: AccessibilitySnapshot::default(),
-            platform_views: PlatformViewTable::default(),
+            platform_views,
             ime: ImeBridge::default(),
             surface_generation: 0,
             frame_deadline_in_nanos: None,
@@ -736,12 +789,14 @@ impl AndroidSession {
         let should_close = handle_input_events(&mut self.runtime, &self.env) || self.should_close();
         let now = Instant::now();
         let deadline = advance_runtime(&mut self.runtime, &self.env, now);
+        let mut flushed = false;
         if self.runtime.mode.is_pending()
             && self.runtime.platform.surface.is_attached()
             && !self.runtime.is_hidden()
         {
             let executor = self.executor.clone();
             let presented = render_window(&mut self.runtime, &self.env, &mut || executor.drain());
+            flushed = true;
             if presented {
                 self.presented_once.set(true);
             }
@@ -758,7 +813,8 @@ impl AndroidSession {
             self.runtime.platform.bridge.close_requested();
         }
         super::accessibility::publish_if_pending(self);
-        super::platform_views::publish_if_pending(self);
+        super::platform_views::publish_if_pending(self, flushed);
+        self.editing_sync();
 
         // Popup windows mounting mid-frame land on the pending queue: the
         // host has no second band to put one on, so this is the explicit
