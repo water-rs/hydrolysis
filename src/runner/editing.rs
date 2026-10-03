@@ -350,16 +350,21 @@ impl EditingSession {
             || single_line != self.single_line
             || snap.password != self.password
             || snap.has_submit != self.has_submit;
-        self.text = text;
-        self.composing = composing;
-        self.sel_start = sel.0;
-        self.sel_end = sel.1;
-        self.single_line = single_line;
-        self.password = snap.password;
-        self.has_submit = snap.has_submit;
-        if changed {
-            self.revision += 1;
-            self.dirty = true;
+        // While mirror mutations await their deferred batch flush the
+        // renderer's snapshot is stale — adopting it would destroy the
+        // ops' edits. The mirror stays authoritative until the flush runs.
+        if !self.pending_apply {
+            self.text = text;
+            self.composing = composing;
+            self.sel_start = sel.0;
+            self.sel_end = sel.1;
+            self.single_line = single_line;
+            self.password = snap.password;
+            self.has_submit = snap.has_submit;
+            if changed {
+                self.revision += 1;
+                self.dirty = true;
+            }
         }
         changed || editor_changed
     }
@@ -1162,6 +1167,28 @@ mod tests {
         assert!(session.end_batch_edit(id));
         session.flush(runtime.renderer_mut());
         assert_eq!(value.snapshot().to_string(), "xab");
+    }
+
+    #[test]
+    fn batched_commit_survives_a_mid_batch_sync() {
+        // An IME batches the selection-replacement dance: the batch's
+        // deferred flush means the renderer's snapshot is stale until
+        // endBatchEdit. Adopting it mid-batch would clobber the op's edit.
+        let (mut runtime, value, mut session, id) = focused_field("select me");
+        assert!(session.set_selection(id, 0, 9));
+        session.flush(runtime.renderer_mut());
+        sync(&mut session, &runtime);
+        assert!(session.begin_batch_edit(id));
+        assert!(session.commit_text(id, "d", 1));
+        assert_eq!(session.text(), "d");
+        // The sync the host runs after every op must not roll the mirror
+        // back to the stale committed text.
+        sync(&mut session, &runtime);
+        assert_eq!(session.text(), "d");
+        assert_eq!(session.selection(), (1, 1));
+        assert!(session.end_batch_edit(id));
+        session.flush(runtime.renderer_mut());
+        assert_eq!(value.snapshot().to_string(), "d");
     }
 
     #[test]
