@@ -217,7 +217,7 @@ impl AndroidSession {
     /// renderer-side result (normalized text, clamped selection) is synced
     /// back and pushed. The frame the edit produced must be scheduled —
     /// editing ops arrive between vsyncs, so this requests one.
-    fn editing_flush_and_sync(&mut self) {
+    pub(crate) fn editing_flush_and_sync(&mut self) {
         self.ime.session.flush(&mut self.runtime.renderer);
         self.runtime.request_refresh();
         self.runtime.platform.request_redraw();

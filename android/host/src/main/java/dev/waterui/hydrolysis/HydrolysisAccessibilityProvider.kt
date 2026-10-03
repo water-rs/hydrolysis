@@ -336,10 +336,13 @@ internal class HydrolysisAccessibilityProvider(
         if (hasAction(node, AK_SCROLL_INTO_VIEW)) {
             info.addAction(AccessibilityAction.ACTION_SHOW_ON_SCREEN)
         }
-        if (hasAction(node, AK_SHOW_TOOLTIP)) {
+        // ACTION_SHOW/HIDE_TOOLTIP exist from API 28 — below that their
+        // fields aren't on the class, so these are guarded rather than
+        // loaded unconditionally on the API-26 floor.
+        if (Build.VERSION.SDK_INT >= 28 && hasAction(node, AK_SHOW_TOOLTIP)) {
             info.addAction(AccessibilityAction.ACTION_SHOW_TOOLTIP)
         }
-        if (hasAction(node, AK_HIDE_TOOLTIP)) {
+        if (Build.VERSION.SDK_INT >= 28 && hasAction(node, AK_HIDE_TOOLTIP)) {
             info.addAction(AccessibilityAction.ACTION_HIDE_TOOLTIP)
         }
         if (hasAction(node, AK_SHOW_CONTEXT_MENU)) {
@@ -349,6 +352,12 @@ internal class HydrolysisAccessibilityProvider(
             info.addAction(ACTION_SET_TEXT)
             info.addAction(ACTION_NEXT_AT_MOVEMENT_GRANULARITY)
             info.addAction(ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY)
+            // Selection is intrinsic to the editing session the text actions
+            // run over — it needs no separate accesskit bit.
+            info.addAction(ACTION_SET_SELECTION)
+            if (Build.VERSION.SDK_INT >= 30) {
+                info.addAction(AccessibilityAction.ACTION_IME_ENTER)
+            }
         }
         // Named custom actions ride in as `customActions` entries; the id
         // they advertise encodes their position so `performAction` can echo
@@ -425,6 +434,8 @@ internal class HydrolysisAccessibilityProvider(
                 sessionPtr,
                 id,
                 mapped.index,
+                mapped.arg1,
+                mapped.arg2,
                 mapped.text.orEmpty(),
                 mapped.numeric ?: Double.NaN,
             )
@@ -434,8 +445,17 @@ internal class HydrolysisAccessibilityProvider(
         return handled
     }
 
-    /** (accesskit action index, text payload, numeric payload). */
-    private data class MappedAction(val index: Int, val text: String?, val numeric: Double?)
+    /**
+     * (accesskit action index, text payload, numeric payload, selection
+     * bounds as UTF-16 units — -1 when the action carries none).
+     */
+    private data class MappedAction(
+        val index: Int,
+        val text: String?,
+        val numeric: Double?,
+        val arg1: Int = -1,
+        val arg2: Int = -1,
+    )
 
     private fun mapAction(
         node: JSONObject,
@@ -491,11 +511,11 @@ internal class HydrolysisAccessibilityProvider(
                 if (hasAction(node, AK_SCROLL_INTO_VIEW)) {
                     return MappedAction(AK_SCROLL_INTO_VIEW, null, null)
                 }
-            AccessibilityAction.ACTION_SHOW_TOOLTIP.id ->
+            ACTION_SHOW_TOOLTIP_ID ->
                 if (hasAction(node, AK_SHOW_TOOLTIP)) {
                     return MappedAction(AK_SHOW_TOOLTIP, null, null)
                 }
-            AccessibilityAction.ACTION_HIDE_TOOLTIP.id ->
+            ACTION_HIDE_TOOLTIP_ID ->
                 if (hasAction(node, AK_HIDE_TOOLTIP)) {
                     return MappedAction(AK_HIDE_TOOLTIP, null, null)
                 }
@@ -526,6 +546,33 @@ internal class HydrolysisAccessibilityProvider(
                     }
                 }
             }
+            AccessibilityNodeInfo.ACTION_SET_SELECTION -> {
+                if (isEditable(node)) {
+                    val start =
+                        arguments?.getInt(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
+                            -1,
+                        ) ?: -1
+                    val end =
+                        arguments?.getInt(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
+                            -1,
+                        ) ?: -1
+                    if (start >= 0 && end >= 0) {
+                        return MappedAction(
+                            AK_SET_TEXT_SELECTION,
+                            null,
+                            null,
+                            arg1 = start,
+                            arg2 = end,
+                        )
+                    }
+                }
+            }
+            ACTION_IME_ENTER_ID ->
+                if (isEditable(node) && hasAction(node, AK_FOCUS)) {
+                    return MappedAction(AK_FOCUS, null, null)
+                }
             else -> {
                 if (action >= CUSTOM_ACTION_BASE && hasAction(node, AK_CUSTOM_ACTION)) {
                     val index = action - CUSTOM_ACTION_BASE
@@ -626,6 +673,8 @@ internal class HydrolysisAccessibilityProvider(
             sessionPtr,
             id,
             AK_SET_VALUE,
+            -1,
+            -1,
             text,
             Double.NaN,
         )
@@ -698,6 +747,7 @@ internal class HydrolysisAccessibilityProvider(
         const val AK_SCROLL_RIGHT = 13
         const val AK_SCROLL_UP = 14
         const val AK_SCROLL_INTO_VIEW = 15
+        const val AK_SET_TEXT_SELECTION = 18
         const val AK_SET_VALUE = 20
         const val AK_SHOW_CONTEXT_MENU = 21
 
@@ -714,6 +764,16 @@ internal class HydrolysisAccessibilityProvider(
         const val ACTION_SCROLL_FORWARD = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         const val ACTION_SCROLL_BACKWARD = AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         const val ACTION_SET_TEXT = AccessibilityNodeInfo.ACTION_SET_TEXT
+        const val ACTION_SET_SELECTION = AccessibilityNodeInfo.ACTION_SET_SELECTION
+
+        /**
+         * Action ids added after the API-26 floor; matched by value so the
+         * `when` never loads an `AccessibilityAction` field that doesn't
+         * exist on the running device.
+         */
+        const val ACTION_SHOW_TOOLTIP_ID = 16908356
+        const val ACTION_HIDE_TOOLTIP_ID = 16908357
+        const val ACTION_IME_ENTER_ID = 16908372
         const val ACTION_NEXT_AT_MOVEMENT_GRANULARITY =
             AccessibilityNodeInfo.ACTION_NEXT_AT_MOVEMENT_GRANULARITY
         const val ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY =

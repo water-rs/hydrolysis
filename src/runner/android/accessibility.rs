@@ -116,34 +116,42 @@ fn map_action(action: i32) -> Result<accesskit::Action, JniError> {
 /// accesskit `NodeId` value) back into the renderer — inside the frame
 /// boundary like any other input.
 ///
-/// The provider sends the data kind the target's role expects: `text` for
-/// `SetValue` on an editable node (the whole replacement text — Android's
-/// `ACTION_SET_TEXT` replaces the full contents) and `numeric` for `SetValue`
-/// on a range node. A request carrying both is a provider bug, so it errors
-/// rather than guessing.
+/// The provider sends the data kind the target's role expects: `arg1`/`arg2`
+/// carry the `SetTextSelection` UTF-16 bounds, `text` the `SetValue`/
+/// `ReplaceSelectedText` string (Android's `ACTION_SET_TEXT` replaces the
+/// full contents), and `numeric` the `SetValue`/`CustomAction` payload on a
+/// range or custom action. A request mixing channels is a provider bug, so
+/// it errors rather than guessing.
+///
+/// Actions on a node a text input claims do not take the generic
+/// `ActionRequest` path: TalkBack editing runs over the session's
+/// [`EditingSession`](crate::runner::editing::EditingSession), the same
+/// writer the `InputConnection` mirror uses, so the IME-visible state never
+/// diverges from the semantic tree's value.
 #[cfg(feature = "accessibility")]
 pub(crate) fn perform_action(
     session: &mut super::host::AndroidSession,
     virtual_view_id: i64,
     action: i32,
+    arg1: i32,
+    arg2: i32,
     text: Option<String>,
     numeric: Option<f64>,
 ) -> Result<bool, JniError> {
-    use accesskit::{ActionData, ActionRequest, NodeId, TreeId};
+    use accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
+
+    let action = map_action(action)?;
+    let node = NodeId(virtual_view_id.max(0) as u64);
+    if let Some(handled) = text_input_action(session, node, action, arg1, arg2, &text, numeric)? {
+        return Ok(handled);
+    }
 
     // The action decides which payload channel is meaningful, so a provider
     // that sends both (or the wrong one) errors instead of being guessed at.
-    let action = map_action(action)?;
     let data = match (action, text, numeric) {
-        (accesskit::Action::CustomAction, None, Some(index)) => {
-            Some(ActionData::CustomAction(index as i32))
-        }
-        (accesskit::Action::SetValue, Some(text), None) => {
-            Some(ActionData::Value(text.into_boxed_str()))
-        }
-        (accesskit::Action::SetValue, None, Some(numeric)) => {
-            Some(ActionData::NumericValue(numeric))
-        }
+        (Action::CustomAction, None, Some(index)) => Some(ActionData::CustomAction(index as i32)),
+        (Action::SetValue, Some(text), None) => Some(ActionData::Value(text.into_boxed_str())),
+        (Action::SetValue, None, Some(numeric)) => Some(ActionData::NumericValue(numeric)),
         (_, None, None) => None,
         _ => {
             return Err(JniError(format!(
@@ -151,16 +159,120 @@ pub(crate) fn perform_action(
             )));
         }
     };
+    if action != Action::SetTextSelection && (arg1 >= 0 || arg2 >= 0) {
+        return Err(JniError(format!(
+            "hydrolysis android: accessibility action {action:?} carries unexpected selection bounds"
+        )));
+    }
     let request = ActionRequest {
         action,
         target_tree: TreeId::ROOT,
-        target_node: NodeId(virtual_view_id.max(0) as u64),
+        target_node: node,
         data,
     };
-    Ok(session
+    let handled = session
         .runtime
         .renderer
-        .handle_accessibility_action(request, &session.env))
+        .handle_accessibility_action(request, &session.env);
+    if handled {
+        // A focus the action moved lands in the mirror now — the connection
+        // rebinds while the screen reader's announcement is still live,
+        // not at the next vsync.
+        session.editing_sync();
+    }
+    Ok(handled)
+}
+
+/// The editing-session path for nodes a text input claims. Returns `None`
+/// when the action is not an editing action or the target has no text
+/// input, leaving it to the generic `ActionRequest` dispatch.
+#[cfg(feature = "accessibility")]
+fn text_input_action(
+    session: &mut super::host::AndroidSession,
+    node: accesskit::NodeId,
+    action: accesskit::Action,
+    arg1: i32,
+    arg2: i32,
+    text: &Option<String>,
+    numeric: Option<f64>,
+) -> Result<Option<bool>, JniError> {
+    use accesskit::Action;
+
+    let is_editing_action = matches!(
+        action,
+        Action::Click
+            | Action::Focus
+            | Action::SetValue
+            | Action::ReplaceSelectedText
+            | Action::SetTextSelection
+    );
+    if !is_editing_action
+        || !session
+            .runtime
+            .renderer
+            .accessibility_node_is_text_input(node)
+    {
+        return Ok(None);
+    }
+
+    // An action on an unfocused editable activates it first — the same
+    // transition a tap performs: focus moves, the mirror adopts the new
+    // editor with a fresh generation, and the frame transaction publishes
+    // the text-input target the IME shows against.
+    if session
+        .runtime
+        .renderer
+        .focused_text_input_accessibility_node()
+        != Some(node)
+    {
+        session
+            .runtime
+            .renderer
+            .focus_text_input_for_accessibility_node(node);
+        session.editing_sync();
+    }
+    let editor_id = session.ime.session.editor_id();
+    let editing = &mut session.ime.session;
+    let handled = match action {
+        Action::Click | Action::Focus => true,
+        // ACTION_SET_TEXT replaces the field's whole contents: select
+        // everything (the op clamps to the text length) and commit.
+        Action::SetValue => {
+            let Some(text) = text else {
+                return Err(JniError(
+                    "hydrolysis android: editable SetValue requires a text payload".into(),
+                ));
+            };
+            if numeric.is_some() {
+                return Err(JniError(
+                    "hydrolysis android: editable SetValue carries a numeric payload".into(),
+                ));
+            }
+            editing.set_selection(editor_id, 0, i32::MAX) && editing.commit_text(editor_id, text, 1)
+        }
+        Action::ReplaceSelectedText => {
+            let Some(text) = text else {
+                return Err(JniError(
+                    "hydrolysis android: editable ReplaceSelectedText requires a text payload"
+                        .into(),
+                ));
+            };
+            editing.commit_text(editor_id, text, 1)
+        }
+        Action::SetTextSelection => {
+            if arg1 < 0 || arg2 < 0 {
+                return Err(JniError(
+                    "hydrolysis android: SetTextSelection requires start and end bounds".into(),
+                ));
+            }
+            editing.set_selection(editor_id, arg1, arg2)
+        }
+        _ => unreachable!("filtered above"),
+    };
+    if handled {
+        session.editing_flush_and_sync();
+    }
+    Ok(Some(handled))
 }
 
 /// Without the feature there is no tree to act on.
@@ -169,6 +281,8 @@ pub(crate) fn perform_action(
     _session: &mut super::host::AndroidSession,
     _virtual_view_id: i64,
     _action: i32,
+    _arg1: i32,
+    _arg2: i32,
     _text: Option<String>,
     _numeric: Option<f64>,
 ) -> Result<bool, JniError> {

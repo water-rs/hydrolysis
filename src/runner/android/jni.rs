@@ -25,7 +25,8 @@ use super::host::{AndroidSession, MetricsSnapshot};
 /// `InputConnection` range protocol (`nativeEditOp`/`nativeEditingState`,
 /// `onNativeEditingState`/`onNativeCursorAnchorInfo` pushes) and the
 /// `Context` passed to `nativeCreateSession`; 3 = `nativeAccessibilityAction`
-/// takes the accesskit action index plus separate text/numeric payloads.
+/// takes the accesskit action index plus selection-bounds, text and numeric
+/// payload channels.
 pub(crate) const JNI_SCHEMA: jint = 3;
 
 /// A failure crossing the JNI boundary as an exception.
@@ -511,9 +512,10 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
 }
 
 /// `action` is the accesskit action index the provider decoded from the
-/// node's `actions` bitmask; `text` carries a string payload (empty string
-/// means none) and `numeric` a numeric one (NaN means none) — exactly one is
-/// ever set, matching the data kind the target's role expects.
+/// node's `actions` bitmask; `arg1`/`arg2` carry the `SetTextSelection`
+/// UTF-16 bounds (-1 means none), `text` a string payload (empty string
+/// means none) and `numeric` a numeric one (NaN means none) — only the
+/// channels the action's data kind uses are ever set.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibilityAction(
     mut env: JNIEnv,
@@ -521,6 +523,8 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
     session_ptr: jlong,
     virtual_view_id: jlong,
     action: jint,
+    arg1: jint,
+    arg2: jint,
     text: JString,
     numeric: jdouble,
 ) -> jboolean {
@@ -530,6 +534,8 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
             session(session_ptr),
             virtual_view_id,
             action,
+            arg1,
+            arg2,
             (!text.is_empty()).then_some(text),
             (!numeric.is_nan()).then_some(numeric),
         )? as jboolean)

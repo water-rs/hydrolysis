@@ -16,7 +16,7 @@ object NativeBridge {
      * protocol (`nativeEditOp`/`nativeEditingState`, the `onNative*` editing
      * pushes) and the `Context` handed to [nativeCreateSession]; 3 =
      * `nativeAccessibilityAction` takes the accesskit action index plus
-     * separate text and numeric payloads.
+     * selection-bounds, text and numeric payload channels.
      */
     private const val SCHEMA: Int = 3
 
@@ -151,15 +151,20 @@ object NativeBridge {
 
     /**
      * An accessibility action on a virtual node. `action` is the *accesskit*
-     * action index (not an Android constant); `text` carries the `SetValue`
-     * string payload (empty = none) and `numeric` the `NumericValue`/
-     * `CustomAction` payload (NaN = none).
+     * action index (not an Android constant); `arg1`/`arg2` carry the
+     * `SetTextSelection` UTF-16 bounds (-1 = none), `text` the `SetValue`/
+     * `ReplaceSelectedText` string (empty = none), and `numeric` the
+     * `NumericValue`/`CustomAction` payload (NaN = none). Text actions on an
+     * editable node run over the session's editing protocol — the same
+     * writer the `InputConnection` mirror uses.
      */
     @JvmStatic
     external fun nativeAccessibilityAction(
         sessionPtr: Long,
         virtualViewId: Long,
         action: Int,
+        arg1: Int,
+        arg2: Int,
         text: String,
         numeric: Double,
     ): Boolean
