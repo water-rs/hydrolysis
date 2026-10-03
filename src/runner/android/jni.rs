@@ -27,8 +27,10 @@ use super::host::{AndroidSession, MetricsSnapshot};
 /// `onNativeEditingState`/`onNativeCursorAnchorInfo` pushes) and the
 /// `Context` passed to `nativeCreateSession`; 4 = `nativeAccessibilityAction`
 /// takes the accesskit action index plus selection-bounds, text and numeric
-/// payload channels.
-pub(crate) const JNI_SCHEMA: jint = 4;
+/// payload channels; 5 = `onNativeAccessibilityTreeChanged` carries the
+/// diffed event-list JSON and `nativeAccessibilityHitTest` maps a point to
+/// the served virtual node for explore-by-touch.
+pub(crate) const JNI_SCHEMA: jint = 5;
 
 /// A failure crossing the JNI boundary as an exception.
 #[derive(Debug)]
@@ -523,6 +525,37 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
         {
             let _ = session_ptr;
             Ok(None)
+        }
+    })
+}
+
+/// The served virtual node under `(x, y)` in logical units, or -1 — the
+/// hover hit test the host's `dispatchHoverEvent` consults for
+/// explore-by-touch.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibilityHitTest(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_ptr: jlong,
+    x: jfloat,
+    y: jfloat,
+) -> jlong {
+    guard_val(&mut env, -1, |_env| {
+        #[cfg(feature = "accessibility")]
+        {
+            Ok(session(session_ptr)
+                .a11y
+                .published()
+                .and_then(|update| {
+                    crate::runner::android_accessibility::hit_test(update, x as f64, y as f64)
+                })
+                .map(|id| id.0 as jlong)
+                .unwrap_or(-1))
+        }
+        #[cfg(not(feature = "accessibility"))]
+        {
+            let _ = (session_ptr, x, y);
+            Ok(-1)
         }
     })
 }

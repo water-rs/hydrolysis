@@ -18,9 +18,11 @@ object NativeBridge {
      * the `onNative*` editing pushes) and the `Context` handed to
      * [nativeCreateSession]; 4 = `nativeAccessibilityAction` takes the
      * accesskit action index plus selection-bounds, text and numeric
-     * payload channels.
+     * payload channels; 5 = `onNativeAccessibilityTreeChanged` carries the
+     * diffed event-list JSON and [nativeAccessibilityHitTest] maps a point
+     * to the served virtual node for explore-by-touch.
      */
-    private const val SCHEMA: Int = 4
+    private const val SCHEMA: Int = 5
 
     private var initialized = false
 
@@ -156,6 +158,18 @@ object NativeBridge {
 
     /** Serialized accesskit TreeUpdate, or null when nothing changed. */
     @JvmStatic external fun nativeAccessibilityTree(sessionPtr: Long): String?
+
+    /**
+     * The served virtual node under (`x`, `y`) in logical units, or -1 —
+     * the hit test the host's `dispatchHoverEvent` consults for
+     * explore-by-touch.
+     */
+    @JvmStatic
+    external fun nativeAccessibilityHitTest(
+        sessionPtr: Long,
+        x: Float,
+        y: Float,
+    ): Long
 
     /**
      * An accessibility action on a virtual node. `action` is the *accesskit*

@@ -77,6 +77,23 @@ class PlatformViewRegistry internal constructor(
     internal fun accessibilityChildren(): List<View> =
         slots.values.filter { it.view.visibility == View.VISIBLE }.map { it.view }
 
+    /**
+     * Whether a point in the container's coordinate space (== host view
+     * pixels, the container fills the host at 0,0) falls on a mounted slot.
+     * Hover dispatch uses this to keep real children on the normal dispatch
+     * path and let the a11y provider own everything else.
+     */
+    internal fun coversPixel(x: Float, y: Float): Boolean {
+        val rect = Rect()
+        for (slot in slots.values) {
+            val view = slot.view
+            if (view.visibility != View.VISIBLE) continue
+            view.getHitRect(rect)
+            if (rect.contains(x.toInt(), y.toInt())) return true
+        }
+        return false
+    }
+
     private fun applyJson(json: String) {
         pendingJson = json
         val array = JSONArray(json)

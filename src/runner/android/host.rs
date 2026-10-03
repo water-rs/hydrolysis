@@ -192,10 +192,12 @@ impl HostBridge {
         self.call("onNativeTextInputState", "(FFFFI)V", args);
     }
 
-    /// Marks the published accessibility snapshot dirty on the host side.
+    /// `session.onNativeAccessibilityTreeChanged(json)` — the JSON event
+    /// list the semantic diff produced for this publish; the host replays
+    /// each entry as the scoped accessibility event it describes.
     #[cfg(feature = "accessibility")]
-    pub(crate) fn accessibility_tree_changed(&self) {
-        self.call("onNativeAccessibilityTreeChanged", "()V", &[]);
+    pub(crate) fn accessibility_tree_changed(&self, events_json: &str) {
+        self.call_str("onNativeAccessibilityTreeChanged", events_json);
     }
 
     /// Marks the published platform-view placement set dirty on the host

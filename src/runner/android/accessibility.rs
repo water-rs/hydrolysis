@@ -1,9 +1,12 @@
 //! The accessibility snapshot published to the Kotlin host.
 //!
-//! The renderer's merged `accesskit::TreeUpdate` is serialized once per
-//! change and pushed to `HydrolysisAccessibilityProvider`, which serves
+//! The renderer's merged `accesskit::TreeUpdate` is diffed against the last
+//! one published — [`crate::runner::android_accessibility::diff_events`]
+//! decides which Android events the change owes services — serialized, and
+//! pushed to `HydrolysisAccessibilityProvider`, which serves
 //! `AccessibilityNodeInfo` for explore-by-touch without an invisible view
-//! tree. Actions the provider dispatches come back through
+//! tree. A publish whose semantics did not change produces no events and is
+//! never serialized. Actions the provider dispatches come back through
 //! `nativeAccessibilityAction` and run through
 //! `handle_accessibility_action` — the same code path desktop uses.
 
@@ -18,6 +21,11 @@ pub(crate) struct AccessibilitySnapshot {
     tree_json: Option<String>,
     #[cfg(feature = "accessibility")]
     dirty: bool,
+    /// The update the last publish offered the host — kept in `accesskit`
+    /// form so `nativeAccessibilityHitTest` answers over exactly the tree
+    /// the provider serves.
+    #[cfg(feature = "accessibility")]
+    published: Option<accesskit::TreeUpdate>,
 }
 
 impl AccessibilitySnapshot {
@@ -31,10 +39,21 @@ impl AccessibilitySnapshot {
             None
         }
     }
+
+    /// The last update offered to the host — what
+    /// `nativeAccessibilityHitTest` maps pointer coordinates onto.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn published(&self) -> Option<&accesskit::TreeUpdate> {
+        self.published.as_ref()
+    }
 }
 
-/// Publishes a changed accessibility tree to the host. Called at the end of
-/// the frame transaction so one frame produces at most one snapshot.
+/// Publishes a semantically changed accessibility tree to the host, plus
+/// the per-node events the change owes services. Called at the end of the
+/// frame transaction so one frame produces at most one publish; a frame
+/// whose tree is unchanged publishes nothing — an animating indeterminate
+/// indicator must not cost services a content-changed event per frame
+/// (#246).
 #[cfg(feature = "accessibility")]
 pub(crate) fn publish_if_pending(session: &mut super::host::AndroidSession) {
     // Popups have no second band on Android — the merged iterator is empty.
@@ -47,11 +66,28 @@ pub(crate) fn publish_if_pending(session: &mut super::host::AndroidSession) {
     else {
         return;
     };
-    match serde_json::to_string(&update) {
+    // Publish whenever the update differs from what was last served —
+    // including changes no event is emitted for (bounds drift, scroll
+    // metrics). The empty event list below then just marks the provider
+    // dirty so the next query pulls a fresh tree. An identical update
+    // skips the serialize and the JNI crossing entirely.
+    let changed = session.a11y.published.as_ref() != Some(&update);
+    let events =
+        crate::runner::android_accessibility::diff_events(session.a11y.published.as_ref(), &update);
+    session.a11y.published = Some(update);
+    if !changed {
+        return;
+    }
+    let Some(published) = session.a11y.published.as_ref() else {
+        return;
+    };
+    match serde_json::to_string(published) {
         Ok(json) => {
             session.a11y.tree_json = Some(json);
             session.a11y.dirty = true;
-            session.runtime.platform.bridge.accessibility_tree_changed();
+            session.runtime.platform.bridge.accessibility_tree_changed(
+                &crate::runner::android_accessibility::events_json(&events),
+            );
         }
         Err(error) => {
             tracing::error!(

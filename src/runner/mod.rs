@@ -41,6 +41,14 @@ use waterui_text::FontCollection;
 
 #[cfg(target_os = "android")]
 pub mod android;
+/// The Android accessibility publish protocol — consecutive-tree event
+/// diffing and explore-by-touch hit testing — compiled on Android for the
+/// JNI bridge and on host for its tests; dead elsewhere.
+#[cfg(all(
+    feature = "accessibility",
+    any(target_os = "android", all(test, not(target_arch = "wasm32")))
+))]
+pub(crate) mod android_accessibility;
 mod diagnostics;
 /// The `InputConnection` protocol state machine — compiled on Android for the
 /// JNI bridge and on host for its tests; dead elsewhere.

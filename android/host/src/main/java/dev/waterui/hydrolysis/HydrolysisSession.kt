@@ -74,8 +74,8 @@ class HydrolysisSession internal constructor(context: Context) {
     }
 
     @Suppress("unused") // called from native
-    fun onNativeAccessibilityTreeChanged() {
-        hostView?.notifyAccessibilityTreeChanged()
+    fun onNativeAccessibilityTreeChanged(diffJson: String) {
+        hostView?.notifyAccessibilityTreeChanged(diffJson)
     }
 
     @Suppress("unused") // called from native

@@ -3,8 +3,10 @@ package dev.waterui.hydrolysis
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.view.MotionEvent
 import android.view.View
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction
 import android.view.accessibility.AccessibilityNodeInfo.CollectionInfo
@@ -17,10 +19,11 @@ import org.json.JSONObject
  * Serves `AccessibilityNodeInfo` for the self-drawn UI from the session's
  * serialized accesskit tree — there is no invisible shadow view tree.
  *
- * The native side publishes one merged `TreeUpdate` JSON per change and marks
- * it dirty through `onNativeAccessibilityTreeChanged`; this provider pulls it
- * lazily the next time a service asks for a node, so a frame costs a single
- * JNI read only when the tree actually changed.
+ * The native side publishes one merged `TreeUpdate` JSON per semantic change
+ * and marks it dirty through `onNativeAccessibilityTreeChanged`, whose
+ * payload is the diffed event list this provider replays verbatim; the tree
+ * itself is pulled lazily the next time a service asks for a node, so a
+ * publish costs a JNI read only when a service is actually watching.
  *
  * The JSON shape is accesskit's serde: `nodes` is `[id, node]` pairs, `tree`
  * names the root id, `focus` the keyboard-focused node. Each node carries
@@ -50,20 +53,56 @@ internal class HydrolysisAccessibilityProvider(
     private var dirty = true
     private var nodes = HashMap<Long, JSONObject>()
     private var childrenOf = HashMap<Long, List<Long>>()
+    private var parentOf = HashMap<Long, Long>()
     private var rootId = INVALID_ID
     /** Keyboard focus — the tree update's `focus` field. */
     private var keyboardFocusId = INVALID_ID
     /** Accessibility focus — owned by this provider, never sent to the session. */
     private var a11yFocusId = INVALID_ID
-    /** Last published editable values, for TYPE_VIEW_TEXT_CHANGED diffs. */
-    private var lastTextValues = HashMap<Long, String>()
+    /** The virtual node hover currently rests on, for explore-by-touch. */
+    private var hoveredId = INVALID_ID
 
-    fun notifyTreeChanged() {
+    /**
+     * A publish landed: the native diff already decided which events the
+     * change owes services — this replays them verbatim, so an unchanged
+     * tree produces no event traffic at all (#246). `id` -1 addresses the
+     * host view itself.
+     */
+    fun notifyTreeChanged(diffJson: String) {
         dirty = true
-        host.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
+        // Building a virtual-source event queries this provider, which the
+        // framework forbids while accessibility is off (uiautomator suppresses
+        // services too) — replaying then would throw across the JNI boundary.
+        if (!accessibilityEnabled()) return
+        val events =
+            runCatching { JSONObject(diffJson).optJSONArray("events") }.getOrNull() ?: return
+        for (i in 0 until events.length()) {
+            val entry = events.optJSONObject(i) ?: continue
+            val type = entry.optInt("type")
+            val mask = entry.optInt("mask")
+            val id = entry.optLong("id", INVALID_ID)
+            if (id == INVALID_ID || id > Int.MAX_VALUE) {
+                val event = AccessibilityEvent.obtain(type)
+                event.packageName = host.context.packageName
+                event.contentChangeTypes = mask
+                val parent = host.parent
+                if (parent != null) {
+                    parent.requestSendAccessibilityEvent(host, event)
+                } else {
+                    host.sendAccessibilityEventUnchecked(event)
+                }
+            } else {
+                sendNodeEvent(id, type, mask)
+            }
+        }
     }
 
-    /** Pulls the session's snapshot once per publish and diffs focus/text. */
+    private fun accessibilityEnabled(): Boolean {
+        val manager = host.context.getSystemService(AccessibilityManager::class.java)
+        return manager?.isEnabled == true
+    }
+
+    /** Pulls the session's snapshot once per publish. */
     private fun ensureTree() {
         if (!dirty) return
         dirty = false
@@ -84,47 +123,71 @@ internal class HydrolysisAccessibilityProvider(
             newNodes[id] = node
             newChildren[id] = childIds(node)
         }
-        val oldFocus = keyboardFocusId
-        val oldText = lastTextValues
+        val newParents = HashMap<Long, Long>()
+        for ((id, _) in newNodes) {
+            for (childId in newChildren[id].orEmpty()) {
+                if (newNodes.containsKey(childId)) newParents[childId] = id
+            }
+        }
         nodes = newNodes
         childrenOf = newChildren
+        parentOf = newParents
         rootId = update.optJSONObject("tree")?.optLong("root", INVALID_ID) ?: INVALID_ID
         keyboardFocusId = update.optLong("focus", INVALID_ID)
         // A focus that pointed at a removed node drops cleanly.
         if (!nodes.containsKey(a11yFocusId)) a11yFocusId = INVALID_ID
-
-        lastTextValues = HashMap()
-        for ((id, node) in nodes) {
-            if (isEditable(node)) {
-                lastTextValues[id] = props(node)?.optString("value").orEmpty()
-            }
-        }
-
-        // State changes ride the same publish: a focus move and an edit are
-        // events layered onto the WINDOW_CONTENT_CHANGED posted above, so
-        // TalkBack announces them instead of re-reading the whole subtree.
-        if (keyboardFocusId != oldFocus && nodes.containsKey(keyboardFocusId)) {
-            sendNodeEvent(keyboardFocusId, AccessibilityEvent.TYPE_VIEW_FOCUSED)
-        }
-        for ((id, value) in lastTextValues) {
-            if (oldText.containsKey(id) && oldText[id] != value) {
-                sendNodeEvent(id, AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED)
-            }
-        }
+        if (!nodes.containsKey(hoveredId)) hoveredId = INVALID_ID
         host.autofillSnapshotChanged()
     }
 
-    private fun sendNodeEvent(nodeId: Long, type: Int) {
+    private fun sendNodeEvent(nodeId: Long, type: Int, contentChangeTypes: Int = 0) {
         if (nodeId == INVALID_ID || nodeId > Int.MAX_VALUE) return
+        if (!accessibilityEnabled()) return
         val event = AccessibilityEvent.obtain(type)
         event.setSource(host, nodeId.toInt())
         event.packageName = host.context.packageName
+        event.contentChangeTypes = contentChangeTypes
         val parent = host.parent
         if (parent != null) {
             parent.requestSendAccessibilityEvent(host, event)
         } else {
             host.sendAccessibilityEventUnchecked(event)
         }
+    }
+
+    /**
+     * Explore-by-touch dispatch from the host view. The native hit test
+     * answers over the same tree this provider serves; the transitions it
+     * reports become the HOVER_ENTER/EXIT pair TalkBack turns into
+     * accessibility focus and an announcement.
+     */
+    internal fun dispatchHoverEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                val id = hitTest(event.x, event.y)
+                if (id != hoveredId) {
+                    sendNodeEvent(hoveredId, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
+                    hoveredId = id
+                    sendNodeEvent(hoveredId, AccessibilityEvent.TYPE_VIEW_HOVER_ENTER)
+                }
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> clearHovered()
+        }
+        return true
+    }
+
+    /** Pointer moved onto real content or left — drop the virtual hover. */
+    internal fun clearHovered() {
+        sendNodeEvent(hoveredId, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT)
+        hoveredId = INVALID_ID
+    }
+
+    /** The served node under the view-space point, resolved on the native side. */
+    private fun hitTest(x: Float, y: Float): Long {
+        val sessionPtr = session?.nativePtr ?: return INVALID_ID
+        if (sessionPtr == 0L) return INVALID_ID
+        val density = host.resources.displayMetrics.density
+        return NativeBridge.nativeAccessibilityHitTest(sessionPtr, x / density, y / density)
     }
 
     private fun childIds(node: JSONObject): List<Long> {
@@ -149,7 +212,7 @@ internal class HydrolysisAccessibilityProvider(
 
     private fun isEditable(node: JSONObject): Boolean =
         when (node.optString("role")) {
-            "textInput", "multilineTextInput", "passwordInput" -> true
+            "textInput", "multilineTextInput", "passwordInput", "searchInput" -> true
             else -> false
         }
 
@@ -164,7 +227,8 @@ internal class HydrolysisAccessibilityProvider(
         ensureTree()
         if (virtualViewId == HOST_ID) return hostNodeInfo()
         val id = virtualViewId.toLong()
-        val node = nodes[id] ?: return null
+        val node = nodes[id]
+        if (node == null) return null
         return nodeInfo(id, node)
     }
 
@@ -174,11 +238,15 @@ internal class HydrolysisAccessibilityProvider(
      * accessibility tree is reached by traversal without a duplicate node.
      */
     private fun hostNodeInfo(): AccessibilityNodeInfo {
-        val info = AccessibilityNodeInfo.obtain(host)
-        info.packageName = host.context.packageName
-        info.className = "android.view.View"
-        info.isEnabled = true
-        info.isImportantForAccessibility = true
+        val info = AccessibilityNodeInfo.obtain()
+        // The framework uses this node as the host's own node, so it has to
+        // carry the real view's bounds/flags — an empty bounds rect marks it
+        // invisible and prunes the whole virtual subtree.
+        host.onInitializeAccessibilityNodeInfo(info)
+        // onInitialize fills bounds/flags but does NOT set the source node
+        // id; a client-side getChild() refuses to query children of a node
+        // whose source is UNDEFINED, so every virtual child resolved to null.
+        info.setSource(host, AccessibilityNodeProvider.HOST_VIEW_ID)
         if (nodes.containsKey(rootId)) {
             info.addChild(host, rootId.toInt())
         }
@@ -190,11 +258,19 @@ internal class HydrolysisAccessibilityProvider(
 
     private fun nodeInfo(id: Long, node: JSONObject): AccessibilityNodeInfo {
         val info = AccessibilityNodeInfo.obtain(host, id.toInt())
-        info.setSource(host, id.toInt())
         info.packageName = host.context.packageName
 
         val properties = props(node)
         val role = node.optString("role")
+        // The parent link is what lets a service walk up from a virtual node
+        // — linear traversal and ancestor queries need it, and without it
+        // TalkBack cannot rank the node against its siblings.
+        val parent = parentOf[id]
+        if (parent != null && parent <= Int.MAX_VALUE) {
+            info.setParent(host, parent.toInt())
+        } else {
+            info.setParent(host)
+        }
         info.className = androidClassName(role)
 
         val label = properties?.optString("label").orEmpty()

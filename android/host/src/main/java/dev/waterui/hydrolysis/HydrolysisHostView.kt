@@ -426,8 +426,27 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
     override fun getAccessibilityNodeProvider(): AccessibilityNodeProvider =
         accessibilityProvider
 
-    internal fun notifyAccessibilityTreeChanged() {
-        accessibilityProvider.notifyTreeChanged()
+    /**
+     * Explore-by-touch: TalkBack injects hover events to find the node under
+     * the pointer; without a dispatch here they die in the ViewGroup and a
+     * tap activates instead of focusing (#246). The platform overlay fills
+     * the host, so super would claim every point — a mounted platform view
+     * keeps the hover traffic only inside its own slot bounds, and
+     * everywhere else the provider maps the point onto the served virtual
+     * tree.
+     */
+    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
+        if (!platformViewRegistry.coversPixel(event.x, event.y)) {
+            accessibilityProvider.dispatchHoverEvent(event)
+            return true
+        }
+        val handled = super.dispatchHoverEvent(event)
+        if (handled) accessibilityProvider.clearHovered()
+        return handled
+    }
+
+    internal fun notifyAccessibilityTreeChanged(diffJson: String) {
+        accessibilityProvider.notifyTreeChanged(diffJson)
     }
 
     /** The session pushed a new placement set — pull and apply it. */
