@@ -66,6 +66,12 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
     private var imeRect = Rect()
     private var imePurpose = -1
 
+    /**
+     * The live [HydrolysisInputConnection], if the IMM has bound one — the
+     * target for the session's editing-state and cursor-anchor pushes.
+     */
+    internal var inputConnection: HydrolysisInputConnection? = null
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -288,16 +294,54 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
     override fun onCheckIsTextEditor(): Boolean = true
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        // Bind to the authoritative session state — the pulled `editorId`
+        // becomes this connection's generation token, and the state seeds
+        // the mirror so the IMM's first queries agree with the editor.
+        val state =
+            session
+                ?.let { NativeBridge.nativeEditingState(it.nativePtr) }
+                ?.let(::EditingStatePayload)
         outAttrs.inputType =
-            if (imePurpose == 1) {
-                EditorInfo.TYPE_CLASS_TEXT or EditorInfo.TYPE_TEXT_VARIATION_PASSWORD
-            } else {
-                EditorInfo.TYPE_CLASS_TEXT or EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
-            }
-        outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_FULLSCREEN
-        outAttrs.initialSelStart = 0
-        outAttrs.initialSelEnd = 0
-        return HydrolysisInputConnection(this, session, outAttrs)
+            EditorInfo.TYPE_CLASS_TEXT or
+                (if (state?.password == true) EditorInfo.TYPE_TEXT_VARIATION_PASSWORD else 0) or
+                (if (state == null || !state.singleLine) EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE else 0)
+        outAttrs.imeOptions =
+            (if (state?.hasSubmit == true) EditorInfo.IME_ACTION_DONE else EditorInfo.IME_ACTION_NONE) or
+                EditorInfo.IME_FLAG_NO_FULLSCREEN
+        outAttrs.initialSelStart = state?.selStart ?: 0
+        outAttrs.initialSelEnd = state?.selEnd ?: 0
+        outAttrs.initialCapsMode = 0
+        val connection =
+            HydrolysisInputConnection(
+                this,
+                session,
+                editorId = state?.editorId ?: 0L,
+                live = state?.focused ?: false,
+            )
+        if (state != null && state.focused) {
+            connection.applyNativeState(state)
+        }
+        inputConnection = connection
+        return connection
+    }
+
+    /** The session's authoritative editing push — the connection adopts it. */
+    internal fun applyEditingState(json: String) {
+        val state = EditingStatePayload(json)
+        val connection = inputConnection ?: return
+        connection.applyNativeState(state)
+        if (!state.focused) {
+            // The focused editor went away: the IMM must rebind so the next
+            // connection sees the cleared target rather than stale text.
+            val imm =
+                context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.restartInput(this)
+        }
+    }
+
+    /** The session's subscribed cursor-anchor push. */
+    internal fun applyCursorAnchorInfo(json: String) {
+        inputConnection?.applyCursorAnchorInfo(AnchorInfoPayload(json))
     }
 
     /**

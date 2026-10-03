@@ -1,5 +1,6 @@
 package dev.waterui.hydrolysis
 
+import android.content.Context
 import android.os.Build
 
 /**
@@ -12,13 +13,13 @@ import android.os.Build
  * activity that owns the session retains it across recreation and calls
  * [destroy] exactly once, when the process-side lifecycle truly ends.
  */
-class HydrolysisSession internal constructor() {
+class HydrolysisSession internal constructor(context: Context) {
     /**
      * Opaque native pointer, owned on the UI thread only. Exposed to the
      * host-family modules (the GPU band, painters) that hand it back over JNI.
      */
     val nativePtr: Long =
-        NativeBridge.nativeCreateSession(this, Build.VERSION.SDK_INT)
+        NativeBridge.nativeCreateSession(this, Build.VERSION.SDK_INT, context.applicationContext)
 
     /** The view currently presenting this session, or none between bindings. */
     internal var hostView: HydrolysisHostView? = null
@@ -71,5 +72,17 @@ class HydrolysisSession internal constructor() {
     @Suppress("unused") // called from native
     fun onNativeCloseRequested() {
         hostView?.closeRequested()
+    }
+
+    /** Native pushes the authoritative editing state for the IME mirror. */
+    @Suppress("unused") // called from native
+    fun onNativeEditingState(json: String) {
+        hostView?.applyEditingState(json)
+    }
+
+    /** Native pushes a subscribed cursor-anchor update for the IME. */
+    @Suppress("unused") // called from native
+    fun onNativeCursorAnchorInfo(json: String) {
+        hostView?.applyCursorAnchorInfo(json)
     }
 }

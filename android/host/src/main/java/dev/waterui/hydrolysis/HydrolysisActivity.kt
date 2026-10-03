@@ -31,7 +31,7 @@ abstract class HydrolysisActivity : ComponentActivity() {
         NativeBridge.load(nativeLibraryName)
         @Suppress("DEPRECATION")
         val retained = lastCustomNonConfigurationInstance as? HydrolysisSession
-        val session = retained ?: HydrolysisSession()
+        val session = retained ?: HydrolysisSession(this)
         this.session = session
         setContentView(createContentView(session))
     }

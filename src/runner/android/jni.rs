@@ -21,7 +21,11 @@ use super::host::{AndroidSession, MetricsSnapshot};
 /// The JNI schema this build of the runner speaks — `nativeInit` returns it
 /// and the Kotlin `NativeBridge` refuses a mismatch, so a stale native
 /// library cannot load against a newer host.
-pub(crate) const JNI_SCHEMA: jint = 1;
+/// Schema history: 1 = initial surface/input/IME events; 2 = the
+/// `InputConnection` range protocol (`nativeEditOp`/`nativeEditingState`,
+/// `onNativeEditingState`/`onNativeCursorAnchorInfo` pushes) and the
+/// `Context` passed to `nativeCreateSession`.
+pub(crate) const JNI_SCHEMA: jint = 2;
 
 /// A failure crossing the JNI boundary as an exception.
 #[derive(Debug)]
@@ -135,10 +139,23 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeCreateSess
     _class: JClass,
     host_view: JObject,
     sdk_int: jint,
+    context: JObject,
 ) -> jlong {
     guard_val(&mut env, 0, |env| {
         let vm = env.get_java_vm()?;
         let _ = JAVA_VM.set(env.get_java_vm()?);
+        // Publish the application context for the service crates that resolve
+        // it at use time (waterkit-clipboard's Android backend reads it
+        // through `ndk_context::android_context`). Idempotent — the retained
+        // session only ever initializes it once.
+        // SAFETY: `vm` is this thread's live JavaVM and `context` a live
+        // jobject for the duration of the call.
+        unsafe {
+            ndk_context::initialize_android_context(
+                vm.get_java_vm_pointer().cast(),
+                context.as_raw().cast(),
+            );
+        }
         let host_view = env.new_global_ref(&host_view)?;
         // Metrics arrive through `nativeSetMetrics` on the first layout —
         // the session starts zero-sized and the Resize event moves it.
@@ -431,53 +448,41 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeKeyEvent(
 }
 
 // ---------------------------------------------------------------------------
-// IME
+// IME — the InputConnection range protocol. One multiplexed entry point
+// carries every mutator (the opcodes live in `android/ime.rs` and
+// `HydrolysisInputConnection.kt`); the state push/pull travels as JSON.
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeSetComposingText(
+pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeEditOp(
     mut env: JNIEnv,
     _class: JClass,
     session_ptr: jlong,
+    editor_id: jlong,
+    op: jint,
+    arg1: jint,
+    arg2: jint,
     text: JString,
-    caret: jint,
-) {
-    guard(&mut env, |env| {
+) -> jboolean {
+    guard_val(&mut env, 0, |env| {
         let text = get_string(env, &text)?;
-        let caret = usize::try_from(caret).unwrap_or(0);
-        let session = session(session_ptr);
-        session
-            .ime
-            .set_composing_text(&mut session.runtime.platform, text, caret);
-        Ok(())
-    });
+        Ok(session(session_ptr).edit_op(editor_id as u64, op, arg1, arg2, &text) as jboolean)
+    })
 }
 
+/// The connection's synchronous pull at bind time: the authoritative
+/// `EditingState` JSON — its `editorId` becomes the connection's generation
+/// token, and `focused=false` marks the connection dead on arrival.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeCommitText(
+pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeEditingState(
     mut env: JNIEnv,
     _class: JClass,
     session_ptr: jlong,
-    text: JString,
-) {
-    guard(&mut env, |env| {
-        let text = get_string(env, &text)?;
-        let session = session(session_ptr);
-        session.ime.commit_text(&mut session.runtime.platform, text);
-        Ok(())
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeFinishComposingText(
-    mut env: JNIEnv,
-    _class: JClass,
-    session_ptr: jlong,
-) {
-    guard(&mut env, |_env| {
-        let session = session(session_ptr);
-        session.ime.finish_composing(&mut session.runtime.platform);
-        Ok(())
-    });
+) -> jstring {
+    guard_string(&mut env, |_env| {
+        Ok(Some(super::ime::editing_state_json(
+            &session(session_ptr).ime.session.state(),
+        )))
+    })
 }
 
 // ---------------------------------------------------------------------------

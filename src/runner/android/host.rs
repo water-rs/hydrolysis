@@ -127,6 +127,35 @@ impl HostBridge {
         self.call("onNativeRequestRedraw", "()V", &[]);
     }
 
+    /// `call` for a single `String` argument — the JSON pushes serialize
+    /// into a `jstring` inside the env first.
+    fn call_str(&self, name: &'static str, json: &str) {
+        let Ok(mut env) = self.vm.get_env() else {
+            return;
+        };
+        let Ok(value) = env.new_string(json) else {
+            return;
+        };
+        let _ = env.call_method(
+            &self.host_view,
+            name,
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&value)],
+        );
+    }
+
+    /// `session.onNativeEditingState(json)` — the authoritative editing
+    /// state for the connection's `Editable` mirror.
+    pub(crate) fn editing_state_changed(&self, json: &str) {
+        self.call_str("onNativeEditingState", json);
+    }
+
+    /// `session.onNativeCursorAnchorInfo(json)` — the subscribed cursor
+    /// anchor info, in logical units.
+    pub(crate) fn cursor_anchor_changed(&self, json: &str) {
+        self.call_str("onNativeCursorAnchorInfo", json);
+    }
+
     /// Pushes the focused text-input rect (physical px) and purpose to the
     /// host's IME controller; a negative purpose clears it (keyboard hides).
     fn sync_text_input_state(&self, state: Option<TextInputState>, density: f64) {
@@ -726,6 +755,7 @@ impl AndroidSession {
         }
         super::accessibility::publish_if_pending(self);
         super::platform_views::publish_if_pending(self);
+        self.editing_sync();
 
         // Popup windows mounting mid-frame land on the pending queue: the
         // host has no second band to put one on, so this is the explicit
