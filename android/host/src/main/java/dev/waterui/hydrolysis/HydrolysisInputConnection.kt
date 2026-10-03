@@ -45,8 +45,16 @@ internal class HydrolysisInputConnection(
     /** The request token the IMM monitors extracted text under, or none. */
     private var extractedTextMonitorToken = -1
 
+    /** True while [applyNativeState] replays the session's state onto the mirror. */
+    private var adopting = false
+
     /** One `nativeEditOp` dispatch; `false` on a dead session or stale id. */
     private fun op(code: Int, arg1: Int = 0, arg2: Int = 0, text: String = ""): Boolean {
+        // Adopting replays the session's own edits back onto the mirror —
+        // forwarding them would echo them into the session, whose push
+        // re-enters this very method: an infinite Kotlin->native->Kotlin
+        // cycle. The op is accepted so the super.* mirror update still runs.
+        if (adopting) return true
         if (!live) return false
         val ptr = session?.nativePtr ?: return false
         return NativeBridge.nativeEditOp(ptr, editorId, code, arg1, arg2, text)
@@ -213,12 +221,17 @@ internal class HydrolysisInputConnection(
             state.selStart.coerceIn(0, editable.length),
             state.selEnd.coerceIn(0, editable.length),
         )
-        if (state.compStart >= 0) {
-            // setComposingRegion marks the range without rewriting it —
-            // the span itself is what the inherited queries read.
-            super.setComposingRegion(state.compStart, state.compEnd)
-        } else {
-            super.finishComposingText()
+        adopting = true
+        try {
+            if (state.compStart >= 0) {
+                // setComposingRegion marks the range without rewriting it —
+                // the span itself is what the inherited queries read.
+                super.setComposingRegion(state.compStart, state.compEnd)
+            } else {
+                super.finishComposingText()
+            }
+        } finally {
+            adopting = false
         }
         imm.updateSelection(target, state.selStart, state.selEnd, state.compStart, state.compEnd)
         if (extractedTextMonitorToken >= 0) {
