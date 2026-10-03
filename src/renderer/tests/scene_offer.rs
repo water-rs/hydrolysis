@@ -72,6 +72,8 @@ impl SceneContent for ScenePane {
     }
 
     fn input(&mut self, _event: &SurfaceInputEvent) {}
+    fn rebuild_for_engine(&mut self) {}
+
 }
 
 /// The same pane but content-sized: an input-receiving scene that reports a
@@ -98,6 +100,8 @@ impl SceneContent for IntrinsicScenePane {
     }
 
     fn input(&mut self, _event: &SurfaceInputEvent) {}
+    fn rebuild_for_engine(&mut self) {}
+
 }
 
 /// Which kind of input-receiving leaf the panes are built from.

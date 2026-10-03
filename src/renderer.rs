@@ -148,7 +148,7 @@ use waterui_core::layout::{
 #[cfg(feature = "accessibility")]
 use waterui_core::metadata::MetadataKey;
 use waterui_core::view::Hook;
-use waterui_core::views::Views;
+use waterui_core::views::{ViewSnapshot, Views};
 use waterui_core::{
     AnyView, Environment, IgnorableMetadata, Metadata, Native, Retain, Str, View, impl_extractor,
 };

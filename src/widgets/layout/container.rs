@@ -7,18 +7,19 @@ use nami::Signal;
 use std::rc::Rc;
 use waterui::views::Views;
 use waterui_core::layout::{ProposalSize, Size as LayoutSize};
-use waterui_core::views::AnyViews;
+use waterui_core::views::{AnyViewsSnapshot, ViewSnapshot};
 use waterui_core::{AnyView, Environment, Native};
 use waterui_layout::container::{FixedContainer, LazyContainer};
 
 /// Materializes every child view of a non-virtualized lazy collection in order.
 /// Used for measurement of `AbsoluteLayout`/`ZStackLayout` collections, which
 /// (unlike scroll-virtualized stacks) lay out their whole membership.
-fn materialize_all(children: &AnyViews<AnyView>, env: &Environment) -> Vec<AnyView> {
-    let count = children.len().snapshot();
-    let mut views = Vec::with_capacity(count);
-    for index in 0..count {
-        let view = children.get_view(index).unwrap_or_else(|| {
+fn materialize_all(snapshot: &AnyViewsSnapshot<AnyView>, env: &Environment) -> Vec<AnyView> {
+    // The snapshot is immutable: a `get_view` generator that mutates the
+    // source mid-pass cannot shift the membership the remaining indices read.
+    let mut views = Vec::with_capacity(snapshot.len());
+    for index in snapshot.range() {
+        let view = snapshot.get_view(index).unwrap_or_else(|| {
             panic!("LazyContainer failed to materialize child at index {index}")
         });
         views.push(normalize_layout_view(view, env));
@@ -67,14 +68,15 @@ fn lazy_stack_sample_size(
     cross: Option<f32>,
 ) -> LayoutSize {
     let (layout, children) = view.as_inner().as_parts();
-    let child_count = children.len().snapshot();
+    let children = children.snapshot();
+    let child_count = children.len();
     if child_count == 0 {
         return LayoutSize::zero();
     }
     let Some(axis) = lazy_stack_axis_config(layout, view.as_inner().direction()) else {
         // Non-virtualized collection (AbsoluteLayout/ZStackLayout overlay):
         // measure like a FixedContainer over its whole materialized membership.
-        let views = materialize_all(children, env);
+        let views = materialize_all(&children, env);
         return estimate_layout_intrinsic(layout, views.iter(), state, env, theme);
     };
     let item_proposal = match &axis {
@@ -175,7 +177,7 @@ impl HydroNativeView for Native<LazyContainer> {
             // so a stretch-both overlay (AbsoluteLayout) reports the offered
             // window size.
             None => {
-                let views = materialize_all(children, env);
+                let views = materialize_all(&children.snapshot(), env);
                 measure_layout_dimensions(layout, views.iter(), proposal, state, env, theme)
             }
         }

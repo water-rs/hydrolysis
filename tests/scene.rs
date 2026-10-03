@@ -42,6 +42,8 @@ impl SceneContent for TestSceneContent {
         );
         false
     }
+
+    fn rebuild_for_engine(&mut self) {}
 }
 
 /// Scene content that *is* a size: 100 x 200 logical points, twice as tall as
@@ -73,6 +75,8 @@ impl SceneContent for NaturallySizedContent {
         );
         false
     }
+
+    fn rebuild_for_engine(&mut self) {}
 
     fn intrinsic_size(&self) -> Option<Size> {
         Some(Self::NATURAL)
