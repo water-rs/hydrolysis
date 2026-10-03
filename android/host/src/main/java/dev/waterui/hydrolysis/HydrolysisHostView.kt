@@ -373,6 +373,7 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
 
     private fun cursorAnchorInfo(rect: Rect): android.view.inputmethod.CursorAnchorInfo =
         android.view.inputmethod.CursorAnchorInfo.Builder()
+            .setMatrix(matrix)
             .setInsertionMarkerLocation(
                 rect.left.toFloat(),
                 rect.top.toFloat(),

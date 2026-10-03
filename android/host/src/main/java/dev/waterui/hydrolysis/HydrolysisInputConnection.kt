@@ -228,7 +228,10 @@ internal class HydrolysisInputConnection(
 
     /** A pushed cursor anchor update — the subscribed candidate geometry. */
     internal fun applyCursorAnchorInfo(info: AnchorInfoPayload) {
-        imm.updateCursorAnchorInfo(target, info.build(target.resources.displayMetrics.density))
+        imm.updateCursorAnchorInfo(
+            target,
+            info.build(target.resources.displayMetrics.density, target.matrix),
+        )
     }
 
     override fun closeConnection() {
@@ -295,9 +298,10 @@ internal class AnchorInfoPayload(json: String) {
         }
 
     /** Logical-unit geometry scaled into view pixels. */
-    fun build(density: Float): CursorAnchorInfo {
+    fun build(density: Float, matrix: android.graphics.Matrix): CursorAnchorInfo {
         val builder =
             CursorAnchorInfo.Builder()
+                .setMatrix(matrix)
                 .setSelectionRange(selStart, selEnd)
                 .setInsertionMarkerLocation(
                     insertion[0] * density,

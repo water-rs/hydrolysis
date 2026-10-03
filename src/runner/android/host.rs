@@ -109,9 +109,13 @@ impl HostBridge {
     ) {
         if let Err(error) = env.call_method(&self.host_view, name, sig, args) {
             // A pending Java exception (the host's deliberate throw for a
-            // fatal GPU error) surfaces to the Kotlin caller as-is; other
-            // JNI failures are logged, never silently dropped.
+            // fatal GPU error) surfaces to the Kotlin caller as-is — but
+            // describe it first, or the next JNI call aborts the process on
+            // "called with pending exception" and the real trace never
+            // reaches logcat. Other JNI failures are logged, never silently
+            // dropped.
             if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
                 return;
             }
             tracing::error!(
@@ -137,12 +141,18 @@ impl HostBridge {
         let Ok(value) = env.new_string(json) else {
             return;
         };
-        let _ = env.call_method(
-            &self.host_view,
-            name,
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(&value)],
-        );
+        if env
+            .call_method(
+                &self.host_view,
+                name,
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&value)],
+            )
+            .is_err()
+            && env.exception_check().unwrap_or(false)
+        {
+            let _ = env.exception_describe();
+        }
     }
 
     /// `session.onNativeEditingState(json)` — the authoritative editing
