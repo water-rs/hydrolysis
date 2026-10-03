@@ -1,5 +1,6 @@
 use super::*;
 use waterui_core::Computed;
+use waterui_core::interaction::Selected;
 use waterui_core::layout::LayoutPriority;
 use waterui_core::metadata::MetadataKey;
 
@@ -69,6 +70,16 @@ pub(crate) fn a11y_naming_scoped_env<T: MetadataKey + Clone + 'static>(
     scoped
 }
 
+/// Without an accessibility tree there is no naming scope to grow, so naming
+/// metadata scopes the environment like every other value.
+#[cfg(not(feature = "accessibility"))]
+pub(crate) fn a11y_naming_scoped_env<T: MetadataKey + Clone + 'static>(
+    env: &Environment,
+    value: &T,
+) -> Environment {
+    a11y_scoped_env(env, value)
+}
+
 /// Carries the accessibility naming scope across a `Metadata<Environment>`
 /// override.
 ///
@@ -117,6 +128,10 @@ pub(crate) fn restore_a11y_naming_scope(
         // it would let the leaf render the name that a container above still
         // believes nobody spoke for, and both would emit it.
         ScopedAccessibilitySemantics,
+        // The same goes for text the claim consumes as its name: a snapshot
+        // that drops the marker would let the leaf emit a `Label` the
+        // container's name already repeats.
+        AccessibilityNameFromContents,
     );
     snapshot
 }
@@ -146,6 +161,107 @@ pub(crate) fn a11y_scoped_env_for_state(
         value.clone(),
     )));
     scoped
+}
+
+/// The `Env` scoping for an [`AccessibilityIdentifier`]: the value wraps in a
+/// [`ScopedAccessibilityIdentifier`] so the node that registers under it can
+/// claim that identity rather than any other scoped identifier above it.
+/// Without an accessibility tree there is nothing to name, so the value drops
+/// and the environment passes through.
+#[cfg(feature = "accessibility")]
+fn a11y_scoped_identifier_env(env: &Environment, value: &AccessibilityIdentifier) -> Environment {
+    a11y_scoped_env(env, &ScopedAccessibilityIdentifier::new(value.clone()))
+}
+
+#[cfg(not(feature = "accessibility"))]
+fn a11y_scoped_identifier_env(env: &Environment, _value: &AccessibilityIdentifier) -> Environment {
+    env.clone()
+}
+
+/// If `view`'s outermost wrapper is an accessibility `IgnorableMetadata`
+/// scope, peel it and return its content with `env` extended for it — the
+/// single definition of the metadata-type → scoping table. The retained
+/// build's `Env` arms and the List-row hoist both peel through this, so
+/// registering a new accessibility scope touches one place. `Err` hands the
+/// view back untouched when the outer wrapper is not one of these scopes.
+pub(crate) fn a11y_scoped_env_for_view(
+    view: AnyView,
+    env: &Environment,
+) -> Result<(AnyView, Environment), AnyView> {
+    macro_rules! try_scope {
+        ($view:expr, $( $ty:ty => $install:expr ),+ $(,)?) => {{
+            let mut view = $view;
+            $(
+                match view.downcast::<IgnorableMetadata<$ty>>() {
+                    Ok(metadata) => {
+                        let IgnorableMetadata { content, value } = *metadata;
+                        let install: fn(&Environment, &$ty) -> Environment = $install;
+                        return Ok((content, install(env, &value)));
+                    }
+                    Err(back) => view = back,
+                }
+            )+
+            Err(view)
+        }};
+    }
+    try_scope!(
+        view,
+        AccessibilityLabel => a11y_naming_scoped_env::<AccessibilityLabel>,
+        // `.a11y_value(..)` is naming metadata like the label: the node that
+        // represents the wrapped view owns the semantic payload — once — and a
+        // container that no control spoke for synthesizes the node carrying it.
+        AccessibilityValue => a11y_naming_scoped_env::<AccessibilityValue>,
+        AccessibilityIdentifier => a11y_scoped_identifier_env,
+        AccessibilityRole => a11y_naming_scoped_env::<AccessibilityRole>,
+        AccessibilityHidden => a11y_scoped_env::<AccessibilityHidden>,
+        AccessibilityChildren => a11y_scoped_env::<AccessibilityChildren>,
+        AccessibilityState => a11y_scoped_env_for_state,
+        AccessibilityStateSignal => a11y_scoped_env::<AccessibilityStateSignal>,
+    )
+}
+
+/// Peels the accessibility metadata wrappers off `view`, installing each into a
+/// scoped copy of `env` the way the retained build's `Env`-scoping arms do —
+/// naming metadata grows a fresh [`ScopedAccessibilitySemantics`] so the first
+/// node registered under the result claims it.
+///
+/// A `List` row uses this so the row's own `ListItem` node — rather than a
+/// leaf inside its content — claims the content's explicit label, role, or
+/// identifier; the subtree then emits under the container-child environment
+/// that strips that naming ([`accessibility_container_child_environment`]).
+/// `Metadata<Environment>` snapshots are transparent to hoisting: every row's
+/// content arrives wrapped in the selection theme's `use_env` snapshot, which
+/// is not a view the user named — it stays on the returned view while the
+/// metadata inside it lifts. Any other `Metadata<T>` (a `.padding()` between
+/// the modifier and the named view) still belongs to the subtree's own build,
+/// so hoisting stops at one.
+#[cfg(feature = "accessibility")]
+pub(crate) fn hoist_accessibility_metadata(
+    view: AnyView,
+    env: &Environment,
+) -> (AnyView, Environment) {
+    let mut scoped = env.clone();
+    let view = hoist_accessibility_metadata_inner(view, &mut scoped);
+    (view, scoped)
+}
+
+#[cfg(feature = "accessibility")]
+fn hoist_accessibility_metadata_inner(mut view: AnyView, scoped: &mut Environment) -> AnyView {
+    view = match view.downcast::<Metadata<Environment>>() {
+        Ok(metadata) => {
+            let Metadata { content, value } = *metadata;
+            let content = hoist_accessibility_metadata_inner(content, scoped);
+            return AnyView::new(Metadata { content, value });
+        }
+        Err(view) => view,
+    };
+    match a11y_scoped_env_for_view(view, scoped) {
+        Ok((content, next)) => {
+            *scoped = next;
+            hoist_accessibility_metadata_inner(content, scoped)
+        }
+        Err(view) => view,
+    }
 }
 
 fn gesture_group_identity_with_budget(view: &AnyView, remaining: usize) -> usize {
@@ -188,7 +304,6 @@ pub(crate) fn passthrough_content(view: &AnyView) -> Option<&AnyView> {
         Environment,
         Retain,
         Opacity,
-        AppliedFilter,
         Scale,
         Rotation,
         Offset,
@@ -200,6 +315,7 @@ pub(crate) fn passthrough_content(view: &AnyView) -> Option<&AnyView> {
         GestureObserver,
         LifeCycleHook,
         OnEvent,
+        OnKeyPress,
         Secure,
         StandardDynamicRange,
         HighDynamicRange,
@@ -207,9 +323,12 @@ pub(crate) fn passthrough_content(view: &AnyView) -> Option<&AnyView> {
         IgnoreSafeArea,
         ContextMenu,
         ResolvedContextMenu,
+        AnchoredOverlay,
+        PopupMenuSurface,
         Draggable,
         DropDestination,
         Background,
+        Selected,
         NavigationTransitionSource,
         NavigationTransitionDestination
     );
@@ -236,6 +355,38 @@ pub(crate) fn effective_stretch_axis(view: &AnyView) -> StretchAxis {
         return StretchAxis::CrossAxis;
     }
     view.stretch_axis()
+}
+
+/// Whether a view is the empty view `()`, possibly under layout-transparent
+/// wrappers or hosted by a `Dynamic`.
+///
+/// Layout-transparent wrappers forward the content's answer — the same
+/// delegation [`effective_stretch_axis`] walks. A `Dynamic` answers for its
+/// current snapshot, so a conditional flipping between `()` and content is a
+/// membership change the next layout pass sees. This is a semantic answer,
+/// not a measured size: a zero-size `Color` or a collapsed `Spacer` still
+/// renders and still answers `false`, and so does a structured container
+/// like `().size(w, h)` — it explicitly claims a slot. A stack treats a
+/// child answering `true` as a non-member (§4.4: no slot, no spacing).
+pub(crate) fn view_renders_nothing(view: &AnyView) -> bool {
+    if let Some(content) = passthrough_content(view) {
+        return view_renders_nothing(content);
+    }
+    if view.downcast_ref::<()>().is_some() || view.downcast_ref::<Native<()>>().is_some() {
+        return true;
+    }
+    if let Some(dynamic) = view.downcast_ref::<Dynamic>() {
+        return dynamic
+            .with_unconnected_view(|view| view.is_some_and(view_renders_nothing))
+            .unwrap_or(false);
+    }
+    if let Some(dynamic) = view.downcast_ref::<Native<Dynamic>>() {
+        return dynamic
+            .as_inner()
+            .with_unconnected_view(|view| view.is_some_and(view_renders_nothing))
+            .unwrap_or(false);
+    }
+    false
 }
 
 fn is_layout_terminal(view: &AnyView) -> bool {
@@ -315,7 +466,6 @@ fn normalize_layout_view_with_budget(
         LayoutPriority,
         Retain,
         Opacity,
-        AppliedFilter,
         Scale,
         Rotation,
         Offset,
@@ -324,9 +474,11 @@ fn normalize_layout_view_with_budget(
         Shadow,
         Focused,
         Hittable,
+        Selected,
         GestureObserver,
         LifeCycleHook,
         OnEvent,
+        OnKeyPress,
         Secure,
         StandardDynamicRange,
         HighDynamicRange,
@@ -334,6 +486,8 @@ fn normalize_layout_view_with_budget(
         IgnoreSafeArea,
         ContextMenu,
         ResolvedContextMenu,
+        AnchoredOverlay,
+        PopupMenuSurface,
         Draggable,
         DropDestination,
         Background,
@@ -408,11 +562,21 @@ fn normalize_layout_view_with_budget(
         let native = *view
             .downcast::<Native<ScrollView>>()
             .expect("layout normalization failed to downcast Native<ScrollView>");
-        let (axis, content, controller) = native.into_inner().into_inner();
+        let waterui_layout::scroll::ScrollViewParts {
+            axis,
+            content,
+            controller,
+            offset,
+            ..
+        } = native.into_inner().into_inner();
         let normalized_content = normalize_layout_view_with_budget(content, env, remaining);
         let scroll = ScrollView::new(axis, normalized_content);
         let scroll = match controller {
             Some(controller) => scroll.scroll_controller(&controller),
+            None => scroll,
+        };
+        let scroll = match offset {
+            Some(offset) => scroll.report_offset(&offset),
             None => scroll,
         };
         return AnyView::new(Native::new(scroll));
@@ -451,87 +615,51 @@ pub(crate) fn estimate_layout_intrinsic<'a>(
     children: impl IntoIterator<Item = &'a AnyView>,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
     let state = RefCell::new(state);
     let children: Vec<&AnyView> = children.into_iter().collect();
     let mut subviews = Vec::new();
     for child in children {
-        subviews.push(HydroSubview::from_view(child, &state, env));
+        subviews.push(HydroSubview::from_view(child, &state, env, theme));
     }
     let refs: Vec<&dyn SubView> = subviews.iter().map(|view| view as &dyn SubView).collect();
     layout.size_that_fits(ProposalSize::UNSPECIFIED, &refs)
 }
 
-pub(crate) fn resolved_color_to_peniko(color: ResolvedColor) -> vello::peniko::Color {
-    let srgb = color.to_srgb_with_headroom();
-    vello::peniko::Color::new([srgb.red, srgb.green, srgb.blue, color.opacity])
-}
-
-pub(crate) fn resolved_gradient_to_brush(
-    gradient: &ResolvedGradient,
-    bounds: vello::kurbo::Rect,
-) -> vello::peniko::Brush {
-    let mut stops: Vec<vello::peniko::ColorStop> =
-        gradient.stops.iter().map(to_peniko_stop).collect();
-
-    let brush = match gradient.gradient_type {
-        GradientType::Linear => {
-            let start = resolved_point_to_kurbo(gradient.start_point, bounds);
-            let end = resolved_point_to_kurbo(gradient.end_point, bounds);
-            vello::peniko::Gradient::new_linear(start, end).with_stops(&*stops)
-        }
-        GradientType::Radial => {
-            let center = resolved_point_to_kurbo(gradient.start_point, bounds);
-            let radius_scale = bounds.width().min(bounds.height()) as f32;
-            let start_radius = gradient.start_value * radius_scale;
-            let end_radius = gradient.end_value * radius_scale;
-            vello::peniko::Gradient::new_two_point_radial(center, start_radius, center, end_radius)
-                .with_stops(&*stops)
-        }
-        GradientType::Angular => {
-            let sweep = gradient.end_value - gradient.start_value;
-            let sweep_fraction = f64::from(sweep) / TAU;
-            if sweep_fraction < 1.0 {
-                let last_color = stops
-                    .last()
-                    .expect("resolved gradient must contain at least one stop")
-                    .color;
-                for stop in &mut stops {
-                    stop.offset = (f64::from(stop.offset) * sweep_fraction) as f32;
-                }
-                stops.push(vello::peniko::ColorStop {
-                    offset: sweep_fraction as f32,
-                    color: last_color,
-                });
-                stops.push(vello::peniko::ColorStop {
-                    offset: 1.0,
-                    color: last_color,
-                });
-            }
-            let center = resolved_point_to_kurbo(gradient.start_point, bounds);
-            vello::peniko::Gradient::new_sweep(center, gradient.start_value, 0.0)
-                .with_stops(&*stops)
-        }
-        GradientType::Mesh => {
-            panic!("resolved mesh gradient must not be dispatched through ResolvedGradient")
-        }
-    };
-
-    vello::peniko::Brush::Gradient(brush)
-}
-
-fn resolved_point_to_kurbo(point: [f32; 2], bounds: vello::kurbo::Rect) -> vello::kurbo::Point {
-    vello::kurbo::Point::new(
-        f64::from(point[0]) * bounds.width(),
-        f64::from(point[1]) * bounds.height(),
-    )
-}
-
-fn to_peniko_stop(stop: &ResolvedGradientStop) -> vello::peniko::ColorStop {
-    vello::peniko::ColorStop {
-        offset: stop.position,
-        color: resolved_color_to_peniko(stop.color).into(),
+/// The stroke parameters of `style.focus_ring` while `state` is FOCUSED
+/// (keyboard focus): the ring strokes the layer bounds grown by `offset`, so
+/// its inner edge sits `offset` points out — the stroked box and the resolved
+/// radii both grow by `offset + width / 2` — in the ring's color. The caller
+/// strokes it on the draw context it opens after resolving.
+pub(crate) fn interaction_focus_ring(
+    renderer: &mut HydrolysisRenderer,
+    env: &Environment,
+    layer_bounds: kurbo::Rect,
+    layer_radii: kurbo::RoundedRectRadii,
+    style: &waterui_backend_core::widget::InteractionStyle,
+    state: waterui_core::interaction::InteractionState,
+) -> Option<(
+    kurbo::Rect,
+    kurbo::RoundedRectRadii,
+    cherenkov::WorkingColor,
+    f64,
+)> {
+    let ring = style.focus_ring.as_ref()?;
+    if !state.contains(waterui_core::interaction::InteractionState::FOCUSED) {
+        return None;
     }
+    let grow = ring.offset + ring.width / 2.0;
+    let bounds = layer_bounds.inflate(grow, grow);
+    let radii = kurbo::RoundedRectRadii::new(
+        layer_radii.top_left + grow,
+        layer_radii.top_right + grow,
+        layer_radii.bottom_right + grow,
+        layer_radii.bottom_left + grow,
+    );
+    let color_signal = ring.color.resolve(env);
+    let color = renderer.read_signal(&color_signal);
+    Some((bounds, radii, color, ring.width))
 }
 
 /// Resolves a shape into a concrete path for `bounds`.
@@ -542,34 +670,29 @@ fn to_peniko_stop(stop: &ResolvedGradientStop) -> vello::peniko::ColorStop {
 /// non-uniformly instead (the `CustomPath` fallback) stretches corner arcs
 /// into ellipse segments on wide containers, which violates the Material
 /// corner shape (e.g. a 4dp snackbar radius smeared across a 1500px bar).
-pub(crate) fn resolved_shape_to_path(
-    shape: &ResolvedShape,
-    bounds: vello::kurbo::Rect,
-) -> vello::kurbo::BezPath {
+pub(crate) fn resolved_shape_to_path(shape: &ResolvedShape, bounds: kurbo::Rect) -> kurbo::BezPath {
     shape_kind_path(shape.kind, bounds)
         .unwrap_or_else(|| path_commands_to_path(&shape.commands, bounds))
 }
 
 /// Bounds-aware path for the structured shape kinds; `None` for custom paths,
 /// which only exist as unit-space commands.
-pub(crate) fn shape_kind_path(
-    kind: ShapeKind,
-    bounds: vello::kurbo::Rect,
-) -> Option<vello::kurbo::BezPath> {
-    use vello::kurbo::Shape as _;
+pub(crate) fn shape_kind_path(kind: ShapeKind, bounds: kurbo::Rect) -> Option<kurbo::BezPath> {
+    use kurbo::Shape as _;
     const PATH_TOLERANCE: f64 = 0.05;
+    let min_side = bounds.width().min(bounds.height()).max(0.0) as f32;
     match kind {
         ShapeKind::Rect
         | ShapeKind::RoundedRect { .. }
         | ShapeKind::UnevenRoundedRect { .. }
-        | ShapeKind::Capsule => Some(rounded_rect_path(bounds, shape_kind_radii(kind))),
+        | ShapeKind::FixedRoundedRect { .. }
+        | ShapeKind::FixedUnevenRoundedRect { .. }
+        | ShapeKind::Capsule => Some(rounded_rect_path(bounds, shape_kind_radii(kind, min_side))),
         ShapeKind::Circle => {
             let radius = bounds.width().min(bounds.height()).max(0.0) / 2.0;
-            Some(vello::kurbo::Circle::new(bounds.center(), radius).into_path(PATH_TOLERANCE))
+            Some(kurbo::Circle::new(bounds.center(), radius).into_path(PATH_TOLERANCE))
         }
-        ShapeKind::Ellipse => {
-            Some(vello::kurbo::Ellipse::from_rect(bounds).into_path(PATH_TOLERANCE))
-        }
+        ShapeKind::Ellipse => Some(kurbo::Ellipse::from_rect(bounds).into_path(PATH_TOLERANCE)),
         ShapeKind::CustomPath => None,
     }
 }
@@ -577,10 +700,11 @@ pub(crate) fn shape_kind_path(
 pub(crate) fn resolved_morph_shape_to_path(
     shape: &ResolvedMorphShape,
     progress: f32,
-    bounds: vello::kurbo::Rect,
-) -> vello::kurbo::BezPath {
-    let from = shape_kind_radii(shape.from);
-    let to = shape_kind_radii(shape.to);
+    bounds: kurbo::Rect,
+) -> kurbo::BezPath {
+    let min_side = bounds.width().min(bounds.height()).max(0.0) as f32;
+    let from = shape_kind_radii(shape.from, min_side);
+    let to = shape_kind_radii(shape.to, min_side);
     let progress = progress.clamp(0.0, 1.0);
     let radii = [
         lerp(from[0], to[0], progress),
@@ -591,21 +715,40 @@ pub(crate) fn resolved_morph_shape_to_path(
     rounded_rect_path(bounds, radii)
 }
 
-fn shape_kind_radii(kind: ShapeKind) -> [f32; 4] {
+/// Per-corner radii in points, in top-left/top-right/bottom-right/bottom-left
+/// order. A normalized kind resolves its fraction of the shorter side; a fixed
+/// kind carries its own length. Both clamp to half the shorter side, the
+/// ceiling a normalized `0.5` lands on, so radii stay absolute under `lerp`.
+fn shape_kind_radii(kind: ShapeKind, min_side: f32) -> [f32; 4] {
+    let limit = min_side / 2.0;
+    let normalized = |radius: f32| radius.clamp(0.0, 0.5) * min_side;
+    let fixed = |radius: f32| radius.max(0.0).min(limit);
     match kind {
         ShapeKind::Rect => [0.0; 4],
-        ShapeKind::Circle | ShapeKind::Ellipse | ShapeKind::Capsule => [0.5; 4],
-        ShapeKind::RoundedRect { corner_radius } => [corner_radius.clamp(0.0, 0.5); 4],
+        ShapeKind::Circle | ShapeKind::Ellipse | ShapeKind::Capsule => [limit; 4],
+        ShapeKind::RoundedRect { corner_radius } => [normalized(corner_radius); 4],
         ShapeKind::UnevenRoundedRect {
             top_left,
             top_right,
             bottom_left,
             bottom_right,
         } => [
-            top_left.clamp(0.0, 0.5),
-            top_right.clamp(0.0, 0.5),
-            bottom_right.clamp(0.0, 0.5),
-            bottom_left.clamp(0.0, 0.5),
+            normalized(top_left),
+            normalized(top_right),
+            normalized(bottom_right),
+            normalized(bottom_left),
+        ],
+        ShapeKind::FixedRoundedRect { corner_radius } => [fixed(corner_radius); 4],
+        ShapeKind::FixedUnevenRoundedRect {
+            top_left,
+            top_right,
+            bottom_left,
+            bottom_right,
+        } => [
+            fixed(top_left),
+            fixed(top_right),
+            fixed(bottom_right),
+            fixed(bottom_left),
         ],
         ShapeKind::CustomPath => {
             panic!("hydrolysis morph shape rendering requires built-in shape kinds")
@@ -613,17 +756,17 @@ fn shape_kind_radii(kind: ShapeKind) -> [f32; 4] {
     }
 }
 
-fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurbo::BezPath {
+fn rounded_rect_path(bounds: kurbo::Rect, radii: [f32; 4]) -> kurbo::BezPath {
     const KAPPA: f64 = 0.552_284_749_830_793_6;
-    let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let [tl, tr, br, bl] = radii.map(|radius| f64::from(radius.clamp(0.0, 0.5)) * min_side);
-    let mut path = vello::kurbo::BezPath::new();
+    let limit = bounds.width().min(bounds.height()).max(0.0) / 2.0;
+    let [tl, tr, br, bl] = radii.map(|radius| f64::from(radius.max(0.0)).min(limit));
+    let mut path = kurbo::BezPath::new();
 
     path.move_to((bounds.x0 + tl, bounds.y0));
     path.line_to((bounds.x1 - tr, bounds.y0));
     append_corner(
         &mut path,
-        vello::kurbo::Point::new(bounds.x1 - tr, bounds.y0 + tr),
+        kurbo::Point::new(bounds.x1 - tr, bounds.y0 + tr),
         tr,
         -core::f64::consts::FRAC_PI_2,
         0.0,
@@ -632,7 +775,7 @@ fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurb
     path.line_to((bounds.x1, bounds.y1 - br));
     append_corner(
         &mut path,
-        vello::kurbo::Point::new(bounds.x1 - br, bounds.y1 - br),
+        kurbo::Point::new(bounds.x1 - br, bounds.y1 - br),
         br,
         0.0,
         core::f64::consts::FRAC_PI_2,
@@ -641,7 +784,7 @@ fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurb
     path.line_to((bounds.x0 + bl, bounds.y1));
     append_corner(
         &mut path,
-        vello::kurbo::Point::new(bounds.x0 + bl, bounds.y1 - bl),
+        kurbo::Point::new(bounds.x0 + bl, bounds.y1 - bl),
         bl,
         core::f64::consts::FRAC_PI_2,
         core::f64::consts::PI,
@@ -650,7 +793,7 @@ fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurb
     path.line_to((bounds.x0, bounds.y0 + tl));
     append_corner(
         &mut path,
-        vello::kurbo::Point::new(bounds.x0 + tl, bounds.y0 + tl),
+        kurbo::Point::new(bounds.x0 + tl, bounds.y0 + tl),
         tl,
         core::f64::consts::PI,
         core::f64::consts::PI + core::f64::consts::FRAC_PI_2,
@@ -661,8 +804,8 @@ fn rounded_rect_path(bounds: vello::kurbo::Rect, radii: [f32; 4]) -> vello::kurb
 }
 
 fn append_corner(
-    path: &mut vello::kurbo::BezPath,
-    center: vello::kurbo::Point,
+    path: &mut kurbo::BezPath,
+    center: kurbo::Point,
     radius: f64,
     start: f64,
     end: f64,
@@ -671,17 +814,16 @@ fn append_corner(
     if radius <= 0.0 {
         return;
     }
-    let start_point = vello::kurbo::Point::new(
+    let start_point = kurbo::Point::new(
         center.x + radius * start.cos(),
         center.y + radius * start.sin(),
     );
-    let end_point =
-        vello::kurbo::Point::new(center.x + radius * end.cos(), center.y + radius * end.sin());
-    let c1 = vello::kurbo::Point::new(
+    let end_point = kurbo::Point::new(center.x + radius * end.cos(), center.y + radius * end.sin());
+    let c1 = kurbo::Point::new(
         start_point.x - radius * kappa * start.sin(),
         start_point.y + radius * kappa * start.cos(),
     );
-    let c2 = vello::kurbo::Point::new(
+    let c2 = kurbo::Point::new(
         end_point.x + radius * kappa * end.sin(),
         end_point.y - radius * kappa * end.cos(),
     );
@@ -694,17 +836,17 @@ fn lerp(from: f32, to: f32, progress: f32) -> f32 {
 
 pub(crate) fn path_commands_to_path(
     commands: &[PathCommand],
-    bounds: vello::kurbo::Rect,
-) -> vello::kurbo::BezPath {
+    bounds: kurbo::Rect,
+) -> kurbo::BezPath {
     let width = bounds.width();
     let height = bounds.height();
-    let mut path = vello::kurbo::BezPath::new();
+    let mut path = kurbo::BezPath::new();
     let mut has_current = false;
 
     for command in commands {
         match command {
             PathCommand::MoveTo { x, y } => {
-                path.move_to(vello::kurbo::Point::new(
+                path.move_to(kurbo::Point::new(
                     f64::from(*x) * width,
                     f64::from(*y) * height,
                 ));
@@ -715,7 +857,7 @@ pub(crate) fn path_commands_to_path(
                     has_current,
                     "PathCommand::LineTo requires an active current point"
                 );
-                path.line_to(vello::kurbo::Point::new(
+                path.line_to(kurbo::Point::new(
                     f64::from(*x) * width,
                     f64::from(*y) * height,
                 ));
@@ -726,8 +868,8 @@ pub(crate) fn path_commands_to_path(
                     "PathCommand::QuadTo requires an active current point"
                 );
                 path.quad_to(
-                    vello::kurbo::Point::new(f64::from(*cx) * width, f64::from(*cy) * height),
-                    vello::kurbo::Point::new(f64::from(*x) * width, f64::from(*y) * height),
+                    kurbo::Point::new(f64::from(*cx) * width, f64::from(*cy) * height),
+                    kurbo::Point::new(f64::from(*x) * width, f64::from(*y) * height),
                 );
             }
             PathCommand::CubicTo {
@@ -743,9 +885,9 @@ pub(crate) fn path_commands_to_path(
                     "PathCommand::CubicTo requires an active current point"
                 );
                 path.curve_to(
-                    vello::kurbo::Point::new(f64::from(*c1x) * width, f64::from(*c1y) * height),
-                    vello::kurbo::Point::new(f64::from(*c2x) * width, f64::from(*c2y) * height),
-                    vello::kurbo::Point::new(f64::from(*x) * width, f64::from(*y) * height),
+                    kurbo::Point::new(f64::from(*c1x) * width, f64::from(*c1y) * height),
+                    kurbo::Point::new(f64::from(*c2x) * width, f64::from(*c2y) * height),
+                    kurbo::Point::new(f64::from(*x) * width, f64::from(*y) * height),
                 );
             }
             PathCommand::Arc {
@@ -763,7 +905,7 @@ pub(crate) fn path_commands_to_path(
                 let start = f64::from(*start);
                 let step = f64::from(*sweep) / 32.0;
 
-                let start_point = vello::kurbo::Point::new(
+                let start_point = kurbo::Point::new(
                     center_x + radius_x * start.cos(),
                     center_y + radius_y * start.sin(),
                 );
@@ -777,7 +919,7 @@ pub(crate) fn path_commands_to_path(
                 let mut angle = start;
                 for _ in 0..32 {
                     angle += step;
-                    path.line_to(vello::kurbo::Point::new(
+                    path.line_to(kurbo::Point::new(
                         center_x + radius_x * angle.cos(),
                         center_y + radius_y * angle.sin(),
                     ));
@@ -793,28 +935,27 @@ pub(crate) fn path_commands_to_path(
     path
 }
 
-pub(crate) fn anchor_point(
-    bounds: vello::kurbo::Rect,
-    anchor: waterui::style::Anchor,
-) -> vello::kurbo::Point {
-    vello::kurbo::Point::new(
+pub(crate) fn anchor_point(bounds: kurbo::Rect, anchor: waterui::style::Anchor) -> kurbo::Point {
+    kurbo::Point::new(
         bounds.x0 + bounds.width() * f64::from(anchor.x),
         bounds.y0 + bounds.height() * f64::from(anchor.y),
     )
 }
 
-pub(crate) fn resolved_color_to_rgba8(color: ResolvedColor) -> [u8; 4] {
-    let srgb = color.to_srgb_with_headroom();
+/// The sRGB8 encoding of a resolved working colour — the form parley's text
+/// layout takes for its brush.
+pub(crate) fn working_color_to_rgba8(color: cherenkov::WorkingColor) -> [u8; 4] {
+    let srgb = waterui_graphics::color::working::to_srgb(color);
     [
         (srgb.red.clamp(0.0, 1.0) * 255.0).round() as u8,
         (srgb.green.clamp(0.0, 1.0) * 255.0).round() as u8,
         (srgb.blue.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (color.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (color.components[3].clamp(0.0, 1.0) * 255.0).round() as u8,
     ]
 }
 
-pub(crate) fn rgba8_to_peniko(color: [u8; 4]) -> vello::peniko::Color {
-    vello::peniko::Color::new([
+pub(crate) fn rgba8_to_peniko(color: [u8; 4]) -> peniko::Color {
+    peniko::Color::new([
         f32::from(color[0]) / 255.0,
         f32::from(color[1]) / 255.0,
         f32::from(color[2]) / 255.0,
@@ -854,15 +995,12 @@ pub(crate) fn parley_alignment(
     }
 }
 
-pub(crate) fn transformed_rect(
-    transform: vello::kurbo::Affine,
-    rect: vello::kurbo::Rect,
-) -> vello::kurbo::Rect {
+pub(crate) fn transformed_rect(transform: kurbo::Affine, rect: kurbo::Rect) -> kurbo::Rect {
     let points = [
-        transform * vello::kurbo::Point::new(rect.x0, rect.y0),
-        transform * vello::kurbo::Point::new(rect.x1, rect.y0),
-        transform * vello::kurbo::Point::new(rect.x0, rect.y1),
-        transform * vello::kurbo::Point::new(rect.x1, rect.y1),
+        transform * kurbo::Point::new(rect.x0, rect.y0),
+        transform * kurbo::Point::new(rect.x1, rect.y0),
+        transform * kurbo::Point::new(rect.x0, rect.y1),
+        transform * kurbo::Point::new(rect.x1, rect.y1),
     ];
     let min_x = points
         .iter()
@@ -876,29 +1014,29 @@ pub(crate) fn transformed_rect(
     let max_y = points
         .iter()
         .fold(f64::NEG_INFINITY, |acc, point| acc.max(point.y));
-    vello::kurbo::Rect::new(min_x, min_y, max_x, max_y)
+    kurbo::Rect::new(min_x, min_y, max_x, max_y)
 }
 
 pub(crate) fn circle_arc_path(
-    center: vello::kurbo::Point,
+    center: kurbo::Point,
     radius: f64,
     start_angle: f64,
     sweep: f64,
-) -> vello::kurbo::BezPath {
-    let mut path = vello::kurbo::BezPath::new();
+) -> kurbo::BezPath {
+    let mut path = kurbo::BezPath::new();
     if sweep == 0.0 {
         return path;
     }
     let segments = 64usize;
     let step = sweep / segments as f64;
     let mut angle = start_angle;
-    path.move_to(vello::kurbo::Point::new(
+    path.move_to(kurbo::Point::new(
         center.x + radius * angle.cos(),
         center.y + radius * angle.sin(),
     ));
     for _ in 0..segments {
         angle += step;
-        path.line_to(vello::kurbo::Point::new(
+        path.line_to(kurbo::Point::new(
             center.x + radius * angle.cos(),
             center.y + radius * angle.sin(),
         ));

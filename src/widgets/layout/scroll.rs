@@ -1,5 +1,5 @@
 #[cfg(feature = "accessibility")]
-use crate::renderer::{AccessibilityActionTarget, HydrolysisRenderer};
+use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
     HydroNativeView, HydroState, WidgetRenderContext, measure_view_intrinsic, transformed_rect,
 };
@@ -8,12 +8,11 @@ use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, NodeId as AccessibilityNodeId,
     Role as AccessibilityNodeRole,
 };
+use std::rc::Rc;
 use waterui_core::Environment;
 use waterui_core::Native;
-use waterui_core::layout::Size as LayoutSize;
+use waterui_core::layout::{ProposalSize, Size as LayoutSize};
 use waterui_layout::scroll::{Axis as ScrollAxis, ScrollView};
-
-use crate::widgets::widget_theme;
 
 /// Width of the grabbable scrollbar gutter along the viewport edge, in logical
 /// pixels. Wider than the drawn thumb so the bar is comfortable to pick up.
@@ -26,17 +25,39 @@ const SCROLL_INDICATOR_DRAG_THICKNESS: f64 = 6.5;
 const SCROLL_INDICATOR_EDGE_INSET: f64 = 1.5;
 
 impl HydroNativeView for Native<ScrollView> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        let (_axis, content, _controller) = view.as_inner().as_parts();
-        measure_view_intrinsic(content, state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_view_intrinsic(view.as_inner().content(), state, env, theme)
+    }
+
+    fn dimensions(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+        proposal: ProposalSize,
+    ) -> waterui_core::layout::ViewDimensions {
+        // A scroll fills the offered extent on bounded axes — answering the
+        // content's intrinsic would report through the view path a width the
+        // viewport clips anyway (and can exceed the proposal when the content
+        // is wider, as in water-rs/waterui#1232).
+        let intrinsic = Self::intrinsic(state, view, env, theme);
+        waterui_core::layout::ViewDimensions::new(LayoutSize::new(
+            proposal.width.unwrap_or(intrinsic.width),
+            proposal.height.unwrap_or(intrinsic.height),
+        ))
     }
 }
 
 #[cfg(feature = "accessibility")]
 pub(crate) fn register_scroll_accessibility_node(
-    renderer: &mut HydrolysisRenderer,
+    renderer: &mut crate::renderer::SemanticCore,
     env: &Environment,
-    bounds: vello::kurbo::Rect,
+    bounds: Option<kurbo::Rect>,
     handle: &crate::scroll::ScrollHandle,
     metrics: crate::scroll::ScrollMetrics,
     axis: ScrollAxis,
@@ -74,15 +95,48 @@ pub(crate) fn register_scroll_accessibility_node(
         }
         _ => panic!("scroll axis variant is not supported by hydrolysis"),
     }
-    renderer.register_accessibility_node(
-        node,
-        bounds,
-        env,
-        Some(AccessibilityActionTarget::Scroll {
-            handle: handle.clone(),
-            axis,
-        }),
-    )
+    match bounds {
+        Some(bounds) => renderer.register_accessibility_node(
+            node,
+            bounds,
+            env,
+            Some(AccessibilityActionTarget::Scroll {
+                handle: handle.clone(),
+                axis,
+            }),
+        ),
+        None => renderer.register_accessibility_node_semantic(
+            node,
+            env,
+            Some(AccessibilityActionTarget::Scroll {
+                handle: handle.clone(),
+                axis,
+            }),
+        ),
+    }
+}
+
+/// Registers `handle`'s scroll view as the wheel/trackpad target covering
+/// `viewport` — the one registration every scrolling container performs, in
+/// window hit-test space through `hit_transform`.
+///
+/// A container must call this *before* flushing its scrollable children:
+/// `handle_scroll` walks the frame's targets newest-first, so a scroll region
+/// nested inside this one — registered by the children below — hit-tests
+/// ahead of it and consumes the delta until it hits its own edge, where the
+/// delta falls through to the next enclosing region.
+pub(crate) fn register_scroll_wheel_target(
+    renderer: &mut crate::renderer::SemanticCore,
+    hit_transform: kurbo::Affine,
+    viewport: kurbo::Rect,
+    handle: &crate::scroll::ScrollHandle,
+) {
+    let target_handle = handle.clone();
+    renderer.register_scroll_target(
+        transformed_rect(hit_transform, viewport),
+        handle.clone(),
+        move |dx, dy, is_line_delta| target_handle.apply_scroll_delta(dx, dy, is_line_delta),
+    );
 }
 
 /// Geometry of one scroll indicator along its track: where the thumb starts,
@@ -121,8 +175,8 @@ fn indicator_geometry(
 /// while it owns a drag; a drag schedules re-encode frames only, never layout.
 pub(crate) fn draw_scroll_indicators(
     ctx: &mut WidgetRenderContext<'_>,
-    env: &Environment,
-    viewport: vello::kurbo::Rect,
+    _env: &Environment,
+    viewport: kurbo::Rect,
     metrics: crate::scroll::ScrollMetrics,
     axis: ScrollAxis,
     handle: &crate::scroll::ScrollHandle,
@@ -134,7 +188,7 @@ pub(crate) fn draw_scroll_indicators(
     } else {
         SCROLL_INDICATOR_THICKNESS
     };
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let vertical = matches!(axis, ScrollAxis::Vertical | ScrollAxis::All)
         .then(|| {
             indicator_geometry(
@@ -164,7 +218,7 @@ pub(crate) fn draw_scroll_indicators(
             let thumb_y = viewport.y0 + geometry.thumb_offset;
             theme.draw_scroll_indicator(
                 &mut draw,
-                vello::kurbo::Rect::new(
+                kurbo::Rect::new(
                     viewport.x1 - SCROLL_INDICATOR_EDGE_INSET - thickness,
                     thumb_y,
                     viewport.x1 - SCROLL_INDICATOR_EDGE_INSET,
@@ -176,7 +230,7 @@ pub(crate) fn draw_scroll_indicators(
             let thumb_x = viewport.x0 + geometry.thumb_offset;
             theme.draw_scroll_indicator(
                 &mut draw,
-                vello::kurbo::Rect::new(
+                kurbo::Rect::new(
                     thumb_x,
                     viewport.y1 - SCROLL_INDICATOR_EDGE_INSET - thickness,
                     thumb_x + geometry.thumb_extent,
@@ -190,7 +244,7 @@ pub(crate) fn draw_scroll_indicators(
     if vertical.is_some_and(|geometry| geometry.travel > 0.0) {
         let gutter = transformed_rect(
             hit_transform,
-            vello::kurbo::Rect::new(
+            kurbo::Rect::new(
                 viewport.x1 - SCROLL_INDICATOR_GUTTER,
                 viewport.y0,
                 viewport.x1,
@@ -232,7 +286,7 @@ pub(crate) fn draw_scroll_indicators(
     if horizontal.is_some_and(|geometry| geometry.travel > 0.0) {
         let gutter = transformed_rect(
             hit_transform,
-            vello::kurbo::Rect::new(
+            kurbo::Rect::new(
                 viewport.x0,
                 viewport.y1 - SCROLL_INDICATOR_GUTTER,
                 viewport.x1,

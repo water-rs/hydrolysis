@@ -1,7 +1,9 @@
 use super::*;
 use crate::animation::AnimationKey;
-use std::collections::{BTreeMap, BTreeSet};
+use nami::Signal as _;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use waterui_backend_core::widget::{InteractionMotion, MAX_PRESS_WAVES, WidgetInteractionState};
+use waterui_core::interaction::{InteractionReport, InteractionState, Selected};
 
 const INTERACTION_FOCUS_KEY: usize = 0;
 const INTERACTION_STATE_LAYER_KEY: usize = 1;
@@ -15,8 +17,24 @@ const INTERACTION_KEYS_PER_IDENTITY: usize =
 
 #[derive(Debug, Default)]
 pub(crate) struct InteractionEngine {
-    states: BTreeMap<InteractionKey, InteractionState>,
+    states: BTreeMap<InteractionKey, WidgetInteractionEntry>,
     active: BTreeSet<InteractionKey>,
+    /// The full reported [`InteractionState`] each active control sampled at
+    /// bind time — draw sites read it back by key instead of repeating the
+    /// `Selected`/drag bookkeeping.
+    reported: BTreeMap<InteractionKey, InteractionState>,
+    /// `Selected` environment entries claimed this frame, keyed by the
+    /// entry's address — the outermost interactive control under the metadata
+    /// owns it, so the flag does not leak into controls nested inside it.
+    selected_claims: BTreeMap<usize, RetainedIdentity>,
+    /// `InteractionReport` env entries claimed this frame, keyed by each
+    /// entry's address — the outermost interactive control inside a reporting
+    /// view writes it.
+    report_claims: BTreeSet<usize>,
+    /// Bindings behind live report claims, so a scope whose control stops
+    /// reporting (it unmounted or went non-interactive) leaves the binding at
+    /// rest instead of frozen on the last sampled state.
+    live_reports: BTreeMap<usize, nami::Binding<InteractionState>>,
 }
 
 /// Stable identity of one semantic interaction target.
@@ -47,7 +65,7 @@ impl InteractionKey {
 }
 
 #[derive(Debug, Default)]
-struct InteractionState {
+struct WidgetInteractionEntry {
     hovering: bool,
     handles: Option<Rc<InteractionLayerHandles>>,
 }
@@ -58,7 +76,7 @@ pub(crate) struct InteractionFocus {
 }
 
 pub(crate) struct WidgetInteractionInput {
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) bounds: kurbo::Rect,
     pub(crate) hovered: bool,
     pub(crate) focus: Option<InteractionFocus>,
     /// The widget is disabled: inherited hover/press state is dropped and the
@@ -75,10 +93,68 @@ impl InteractionFocus {
 impl InteractionEngine {
     pub(crate) fn begin_rebuild_frame(&mut self) {
         self.active.clear();
+        self.selected_claims.clear();
+        self.report_claims.clear();
     }
 
     pub(crate) fn finish_rebuild_frame(&mut self) {
         self.states.retain(|key, _| self.active.contains(key));
+        self.reported.retain(|key, _| self.active.contains(key));
+        // A report whose control no longer binds goes back to rest.
+        self.live_reports.retain(|claim, binding| {
+            if self.report_claims.contains(claim) {
+                return true;
+            }
+            if binding.snapshot() != InteractionState::empty() {
+                binding.set(InteractionState::empty());
+            }
+            false
+        });
+    }
+
+    /// Claims `selected` for `key`'s owner this frame; `true` while `key`
+    /// owns the claim — the outermost interactive control under a `Selected`
+    /// scope wins, so the state does not leak into controls nested inside it.
+    /// Discriminators share one owner so a multi-part control (a stepper's
+    /// halves) reports one selected state.
+    pub(crate) fn claim_selected(&mut self, selected: &Selected, key: &InteractionKey) -> bool {
+        match self
+            .selected_claims
+            .entry(std::ptr::from_ref(selected) as usize)
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(key.owner.clone());
+                true
+            }
+            Entry::Occupied(entry) => *entry.get() == key.owner,
+        }
+    }
+
+    /// Claims `report` for this frame's outermost claimant; `true` only for
+    /// the first control binding under it — the caller then owns the write.
+    /// Claims are keyed by the env entry itself (the `InteractionReport` value
+    /// lives inside the env's `Rc`, so its address is stable while the scope
+    /// is): every binding lands in `live_reports`, identity-bearing or not, so
+    /// an unclaimed report resets to the resting state at frame end.
+    pub(crate) fn claim_report(&mut self, report: &InteractionReport) -> bool {
+        let claim = std::ptr::from_ref(report) as usize;
+        if !self.report_claims.insert(claim) {
+            return false;
+        }
+        self.live_reports.insert(claim, report.0.clone());
+        true
+    }
+
+    /// Records the resolved flags a bound control reports — draw sites read
+    /// them back through [`Self::reported_state`].
+    pub(crate) fn set_reported_state(&mut self, key: &InteractionKey, state: InteractionState) {
+        self.reported.insert(key.clone(), state);
+    }
+
+    /// The flags `key` reported at bind time; empty for a view that never
+    /// bound an interaction target.
+    pub(crate) fn reported_state(&self, key: &InteractionKey) -> InteractionState {
+        self.reported.get(key).copied().unwrap_or_default()
     }
 
     pub(crate) fn bind_hover(&mut self, key: &InteractionKey) -> (HoverSlot, bool) {
@@ -101,12 +177,7 @@ impl InteractionEngine {
             .hovering
     }
 
-    pub(crate) fn begin_press(
-        &mut self,
-        slot: &PressSlot,
-        origin: vello::kurbo::Point,
-        now: Instant,
-    ) {
+    pub(crate) fn begin_press(&mut self, slot: &PressSlot, origin: kurbo::Point, now: Instant) {
         if let Some(handles) = self
             .states
             .get(&slot.key)
@@ -256,16 +327,26 @@ impl InteractionEngine {
         }
         interaction_state.handles = Some(Rc::clone(&handles));
 
+        let mut flags = InteractionState::empty();
+        if input.disabled {
+            flags |= InteractionState::DISABLED;
+        }
+        if hovered {
+            flags |= InteractionState::HOVERED;
+        }
+        // Chrome reads the PHYSICAL press (the reference implementation removes [pressed] the
+        // instant the pointer lifts, so the 28dp pressed thumb and the
+        // pressed tint drop immediately on release). The ripple's Material
+        // minimum-press gating lives in the waves themselves and must not
+        // leak into pressed chrome after release.
+        if handles.pressing() {
+            flags |= InteractionState::PRESSED;
+        }
+        if focus_visible {
+            flags |= InteractionState::FOCUSED;
+        }
         let state = WidgetInteractionState {
-            disabled: input.disabled,
-            hovered,
-            // Chrome reads the PHYSICAL press (the reference implementation removes [pressed] the
-            // instant the pointer lifts, so the 28dp pressed thumb and the
-            // pressed tint drop immediately on release). The ripple's Material
-            // minimum-press gating lives in the waves themselves and must not
-            // leak into pressed chrome after release.
-            pressed: handles.pressing(),
-            focus_visible,
+            state: flags,
             focus_progress: focus_alpha.sample(now),
             state_layer_opacity: hover_alpha.sample(now),
             press_waves: handles.sample_waves(now),
@@ -298,7 +379,7 @@ pub(crate) struct HoverSlot {
 
 pub(crate) fn local_interaction_state(
     mut state: WidgetInteractionState,
-    hit_transform: vello::kurbo::Affine,
+    hit_transform: kurbo::Affine,
 ) -> WidgetInteractionState {
     let inverse = hit_transform.inverse();
     state.press_waves.map_origins(|origin| inverse * origin);
@@ -330,6 +411,7 @@ mod tests {
     use core::time::Duration;
     use std::rc::Rc;
     use waterui::animation::Animation;
+    use waterui::interaction::InteractionState;
     use waterui_backend_core::widget::InteractionMotion;
 
     fn motion() -> InteractionMotion {
@@ -372,7 +454,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -398,7 +480,7 @@ mod tests {
             };
 
         let (_, slot, _) = bind(&mut engine, &mut controller, started);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, kurbo::Point::new(10.0, 10.0), started);
 
         // Release after the grow completed (test grow: 225ms linear); the
         // minimum press duration (75ms) has elapsed, so the release applies
@@ -436,7 +518,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -462,7 +544,7 @@ mod tests {
             };
 
         let (_, slot, _) = bind(&mut engine, &mut controller, started);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, kurbo::Point::new(10.0, 10.0), started);
 
         // Quick tap: released long before the grow (225ms) finishes.
         engine.clear_all_presses(started + Duration::from_millis(40));
@@ -470,7 +552,7 @@ mod tests {
         // Re-press at a different point while the first wave is mid-flight.
         let repressed = started + Duration::from_millis(100);
         let (_, slot, _) = bind(&mut engine, &mut controller, repressed);
-        engine.begin_press(&slot, vello::kurbo::Point::new(80.0, 30.0), repressed);
+        engine.begin_press(&slot, kurbo::Point::new(80.0, 30.0), repressed);
 
         // Both waves are visible: the released first wave keeps its own grow
         // progress and origin while the fresh wave starts over from zero.
@@ -480,12 +562,12 @@ mod tests {
         assert_eq!(waves.len(), 2, "both press waves must be visible");
         assert_eq!(
             waves[0].origin,
-            Some(vello::kurbo::Point::new(10.0, 10.0)),
+            Some(kurbo::Point::new(10.0, 10.0)),
             "the older wave keeps the first press origin"
         );
         assert_eq!(
             waves[1].origin,
-            Some(vello::kurbo::Point::new(80.0, 30.0)),
+            Some(kurbo::Point::new(80.0, 30.0)),
             "the newest wave grows from the second press origin"
         );
         assert!(
@@ -502,7 +584,7 @@ mod tests {
         assert_eq!(waves.len(), 1, "the first wave must have faded out alone");
         assert_eq!(
             waves[0].origin,
-            Some(vello::kurbo::Point::new(80.0, 30.0)),
+            Some(kurbo::Point::new(80.0, 30.0)),
             "the held second wave must survive"
         );
         assert!(
@@ -517,7 +599,7 @@ mod tests {
         let mut engine = InteractionEngine::default();
         let mut controller = AnimationController::default();
         let motion = motion();
-        let bounds = vello::kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
+        let bounds = kurbo::Rect::new(0.0, 0.0, 100.0, 40.0);
         let owner = Rc::new(());
         let key = InteractionKey::for_rc(&owner, 0);
 
@@ -548,13 +630,19 @@ mod tests {
         // Hovered and mid-press, then the widget becomes disabled: the
         // sampled state comes to rest immediately and carries the flag.
         let (_, slot, _) = bind(&mut engine, &mut controller, started, true, false);
-        engine.begin_press(&slot, vello::kurbo::Point::new(10.0, 10.0), started);
+        engine.begin_press(&slot, kurbo::Point::new(10.0, 10.0), started);
 
         let disabled_at = started + Duration::from_millis(50);
         let (state, _, _) = bind(&mut engine, &mut controller, disabled_at, true, true);
-        assert!(state.disabled);
-        assert!(!state.hovered, "disabled widget must not sample hover");
-        assert!(!state.pressed, "disabled widget must not sample press");
+        assert!(state.state.contains(InteractionState::DISABLED));
+        assert!(
+            !state.state.contains(InteractionState::HOVERED),
+            "disabled widget must not sample hover"
+        );
+        assert!(
+            !state.state.contains(InteractionState::PRESSED),
+            "disabled widget must not sample press"
+        );
 
         // The in-flight ripple is released, fades out (the reference implementation keeps the fade),
         // and must be gone once the fade-out has finished.
@@ -568,8 +656,8 @@ mod tests {
         // Re-enabling starts at rest: the stale press must not resurface.
         let reenabled_at = faded_at + Duration::from_millis(50);
         let (state, _, _) = bind(&mut engine, &mut controller, reenabled_at, false, false);
-        assert!(!state.disabled);
-        assert!(!state.pressed);
+        assert!(!state.state.contains(InteractionState::DISABLED));
+        assert!(!state.state.contains(InteractionState::PRESSED));
         assert!(state.press_waves.is_empty());
     }
 
@@ -577,7 +665,7 @@ mod tests {
     fn released_press_stays_visually_pressed_until_minimum_duration() {
         let started = Instant::now();
         let handles = handles(started);
-        handles.begin_press(vello::kurbo::Point::new(4.0, 5.0), started);
+        handles.begin_press(kurbo::Point::new(4.0, 5.0), started);
         assert!(handles.release(started + Duration::from_millis(10)));
 
         assert!(handles.visually_pressed(started + Duration::from_millis(20)));

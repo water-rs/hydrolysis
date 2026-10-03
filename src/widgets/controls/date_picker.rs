@@ -8,6 +8,7 @@ use crate::renderer::{
 use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
+use nami::Signal;
 use std::cell::RefCell;
 use std::rc::Rc;
 use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size as LayoutSize, ViewDimensions};
@@ -18,9 +19,9 @@ use waterui_text::styled::StyledStr;
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
+use crate::widgets::util::inset_rect;
 #[cfg(feature = "accessibility")]
 use crate::widgets::util::widget_disabled;
-use crate::widgets::util::{inset_rect, widget_theme};
 
 /// The retained render state of a date picker: the cloneable [`DatePickerConfig`]
 /// drives the field + accessibility, and its main label is held as a
@@ -41,14 +42,23 @@ impl DatePickerRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
 
 impl HydroNativeView for Native<DatePickerConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_date_picker_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_date_picker_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -56,10 +66,11 @@ impl HydroNativeView for Native<DatePickerConfig> {
 /// path ([`Native<DatePickerConfig>::accessibility`]) and the retained `Widget`-node
 /// path so both produce the same a11y tree.
 pub(crate) fn date_picker_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     date_picker: &DatePickerConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -89,23 +100,32 @@ pub(crate) fn date_picker_accessibility(
             node.add_action(AccessibilityAction::Click);
             node.add_action(AccessibilityAction::SetValue);
         }
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let origin = waterui_core::layout::Point::new(bounds.x0 as f32, bounds.y1 as f32);
-        let _ = renderer.register_accessibility_node(
+        let origin = ctx.map(|ctx| {
+            let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+            waterui_core::layout::Point::new(bounds.x0 as f32, bounds.y1 as f32)
+        });
+        if let Some(node_id) = renderer.register_accessibility_leaf(
+            ctx,
             node,
-            bounds,
             env,
             (!disabled).then(|| AccessibilityActionTarget::DatePicker {
                 value: date_picker.value.clone(),
                 range: date_picker.range.clone(),
                 ty: date_picker.ty,
                 origin,
+                // The popup opens in the picker's own environment
+                // (water-rs/hydrolysis#140).
+                env: env.clone(),
             }),
-        );
+        ) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, date_picker, env);
+        let _ = (renderer, ctx, date_picker, env, focus_keys);
     }
 }
 
@@ -117,12 +137,12 @@ pub(crate) fn measure_date_picker_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
     let config = &render_state.config;
-    let theme = widget_theme(env);
     let metrics = theme.picker_metrics(PickerStyle::Menu);
     let input_metrics = theme.input_field_metrics();
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     let has_label = label_size.width > 0.0 || label_size.height > 0.0;
     let label_height = if has_label {
         f64::from(label_size.height).max(input_metrics.label_height)
@@ -131,7 +151,7 @@ pub(crate) fn measure_date_picker_node(
     };
     let current = config
         .value
-        .get()
+        .snapshot()
         .clamp(*config.range.start(), *config.range.end());
     let candidates = [
         config.ty.format_value(*config.range.start()),
@@ -171,7 +191,13 @@ pub(crate) fn render_date_picker_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        date_picker_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        date_picker_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            &state.borrow().config,
+            env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
+        );
     }
     render_date_picker_parts(ctx, state, env);
 }
@@ -182,7 +208,7 @@ pub(crate) fn render_date_picker_parts(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let metrics = theme.picker_metrics(PickerStyle::Menu);
     let input_metrics = theme.input_field_metrics();
     let mut state = state.borrow_mut();
@@ -204,19 +230,23 @@ pub(crate) fn render_date_picker_parts(
         0.0
     };
     if label_height > 0.0 {
-        let label_bounds = vello::kurbo::Rect::new(
+        let label_bounds = kurbo::Rect::new(
             ctx.bounds.x0,
             ctx.bounds.y0,
             ctx.bounds.x1,
             (ctx.bounds.y0 + label_height).min(ctx.bounds.y1),
         );
         let render_ctx = ctx.render_context();
-        state
-            .label_view
-            .flush_in_rect(ctx.renderer_mut(), render_ctx, env, label_bounds);
+        state.label_view.flush_in_rect(
+            ctx.renderer_mut(),
+            render_ctx,
+            env,
+            ProposalSize::UNSPECIFIED,
+            label_bounds,
+        );
     }
 
-    let field_bounds = vello::kurbo::Rect::new(
+    let field_bounds = kurbo::Rect::new(
         ctx.bounds.x0,
         ctx.bounds.y0 + label_height,
         ctx.bounds.x1,
@@ -251,7 +281,7 @@ pub(crate) fn render_date_picker_parts(
         input_metrics.horizontal_inset,
         input_metrics.vertical_inset,
     );
-    let text_bounds = vello::kurbo::Rect::new(
+    let text_bounds = kurbo::Rect::new(
         text_bounds.x0,
         text_bounds.y0,
         (text_bounds.x1 - metrics.indicator_space).max(text_bounds.x0),
@@ -265,11 +295,31 @@ pub(crate) fn render_date_picker_parts(
     );
 
     let origin = waterui_core::layout::Point::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
+    // The popup opens in the picker's environment layered over the
+    // dispatch's (water-rs/hydrolysis#140).
+    let picker_env = env.clone();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
-            renderer.show_date_picker(value_binding.clone(), range.clone(), ty, origin, env)
+            let env = picker_env.layered_on(env);
+            renderer.show_date_picker(value_binding.clone(), range.clone(), ty, origin, &env)
         },
     );
+}
+
+/// Emits a retained date picker's accessibility nodes for the semantic walk:
+/// the field node `date_picker_accessibility` registers, plus the label
+/// sub-view — it flushes unsuppressed in the rendered path, so it emits its
+/// own nodes here too.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_date_picker_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<DatePickerRenderState>>,
+    env: &Environment,
+) {
+    let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
+    let mut state = state.borrow_mut();
+    date_picker_accessibility(renderer, None, &state.config, env, &[interaction_key]);
+    state.label_view.emit_accessibility(renderer, env);
 }

@@ -1,6 +1,7 @@
-use super::HydrolysisRenderer;
-use crate::engine::vello_backend::VelloDrawContext;
+use super::{HydrolysisRenderer, Recording, SceneDrawContext, TailMark};
+
 use crate::renderer::HydroState;
+use crate::renderer::frame::LayerTransforms;
 use crate::renderer::navigation::{
     NavigationCapturedScene, NavigationTransitionFrame, draw_navigation_transition,
 };
@@ -13,9 +14,9 @@ use waterui_text::styled::StyledStr;
 /// Render context passed to handlers.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderContext {
-    pub transform: vello::kurbo::Affine,
-    pub hit_transform: vello::kurbo::Affine,
-    pub bounds: vello::kurbo::Rect,
+    pub transform: kurbo::Affine,
+    pub hit_transform: kurbo::Affine,
+    pub bounds: kurbo::Rect,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -32,16 +33,25 @@ pub(crate) enum HydrolysisTextContextMenuMode {
 
 pub(crate) struct WidgetRenderContext<'a> {
     renderer: &'a mut HydrolysisRenderer,
-    pub transform: vello::kurbo::Affine,
-    pub hit_transform: vello::kurbo::Affine,
-    pub bounds: vello::kurbo::Rect,
+    pub transform: kurbo::Affine,
+    pub hit_transform: kurbo::Affine,
+    pub bounds: kurbo::Rect,
+}
+
+/// An explicit offer from a native widget-owned content region.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn bounded_proposal(bounds: kurbo::Rect) -> waterui_core::layout::ProposalSize {
+    waterui_core::layout::ProposalSize::new(
+        Some(bounds.width() as f32),
+        Some(bounds.height() as f32),
+    )
 }
 
 impl RenderContext {
     pub(crate) fn with_transforms(
-        bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
-        hit_transform: vello::kurbo::Affine,
+        bounds: kurbo::Rect,
+        transform: kurbo::Affine,
+        hit_transform: kurbo::Affine,
     ) -> Self {
         Self {
             transform,
@@ -51,19 +61,10 @@ impl RenderContext {
     }
 
     #[must_use]
-    pub fn child(&self, transform: vello::kurbo::Affine, bounds: vello::kurbo::Rect) -> Self {
+    pub fn child(&self, transform: kurbo::Affine, bounds: kurbo::Rect) -> Self {
         Self {
             transform: self.transform * transform,
             hit_transform: self.hit_transform * transform,
-            bounds,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn with_identity_transforms(&self, bounds: vello::kurbo::Rect) -> Self {
-        Self {
-            transform: vello::kurbo::Affine::IDENTITY,
-            hit_transform: vello::kurbo::Affine::IDENTITY,
             bounds,
         }
     }
@@ -83,11 +84,13 @@ impl<'a> WidgetRenderContext<'a> {
         RenderContext::with_transforms(self.bounds, self.transform, self.hit_transform)
     }
 
-    pub(crate) fn child(
-        &self,
-        transform: vello::kurbo::Affine,
-        bounds: vello::kurbo::Rect,
-    ) -> RenderContext {
+    /// The renderer-owned widget theme, cloned out as an `Rc` so callers can
+    /// hold it without borrowing the context across a `&mut` renderer call.
+    pub(crate) fn theme(&self) -> std::rc::Rc<dyn crate::engine::WidgetTheme> {
+        self.renderer.theme()
+    }
+
+    pub(crate) fn child(&self, transform: kurbo::Affine, bounds: kurbo::Rect) -> RenderContext {
         self.render_context().child(transform, bounds)
     }
 
@@ -95,7 +98,7 @@ impl<'a> WidgetRenderContext<'a> {
         self.renderer
     }
 
-    pub(crate) fn draw_context(&mut self) -> VelloDrawContext<'_> {
+    pub(crate) fn draw_context(&mut self) -> SceneDrawContext<'_> {
         self.renderer.draw_context(self.render_context())
     }
 
@@ -103,12 +106,51 @@ impl<'a> WidgetRenderContext<'a> {
         &mut self.renderer.state
     }
 
-    pub(crate) fn push_layer_rect(&mut self, alpha: f32, clip: vello::kurbo::Rect) {
-        self.renderer.push_layer_rect(alpha, self.transform, clip);
+    pub(crate) fn push_layer_rect(&mut self, alpha: f32, clip: kurbo::Rect) {
+        self.renderer.push_layer_rect(
+            alpha,
+            LayerTransforms {
+                paint: self.transform,
+                hit: self.hit_transform,
+            },
+            clip,
+        );
     }
 
     pub(crate) fn pop_layer(&mut self) {
         self.renderer.pop_layer();
+    }
+
+    /// The [`HydrolysisRenderer::with_clip_rect_scope`] pairing through this
+    /// context's transforms.
+    pub(crate) fn with_clip_rect_scope(
+        &mut self,
+        alpha: f32,
+        clip: kurbo::Rect,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.push_layer_rect(alpha, clip);
+        f(self);
+        self.pop_layer();
+    }
+
+    /// [`Self::with_clip_rect_scope`] when the scope only exists conditionally
+    /// (a disabled-control alpha group, a viewport clip that only out-scrolls
+    /// need): pairing stays lexical either way.
+    pub(crate) fn with_clip_rect_scope_if(
+        &mut self,
+        enabled: bool,
+        alpha: f32,
+        clip: kurbo::Rect,
+        f: impl FnOnce(&mut Self),
+    ) {
+        if enabled {
+            self.push_layer_rect(alpha, clip);
+        }
+        f(self);
+        if enabled {
+            self.pop_layer();
+        }
     }
 
     pub(crate) fn render_styled_text(
@@ -116,7 +158,7 @@ impl<'a> WidgetRenderContext<'a> {
         styled: StyledStr,
         alignment: HorizontalAlignment,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: kurbo::Rect,
     ) {
         self.render_styled_text_limited(styled, alignment, env, bounds, None);
     }
@@ -126,17 +168,23 @@ impl<'a> WidgetRenderContext<'a> {
         styled: StyledStr,
         alignment: HorizontalAlignment,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: kurbo::Rect,
         max_lines: Option<usize>,
     ) {
         let child_ctx = self.child(
-            vello::kurbo::Affine::translate((bounds.x0, bounds.y0)),
-            vello::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
+            kurbo::Affine::translate((bounds.x0, bounds.y0)),
+            kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
         );
         let renderer = self.renderer_mut();
         let (state, scene) = renderer.state_and_scene_mut();
         HydrolysisRenderer::render_styled_text_limited(
-            state, scene, child_ctx, styled, alignment, env, max_lines,
+            state,
+            scene,
+            child_ctx,
+            styled,
+            alignment,
+            env,
+            max_lines.map_or(TailMark::None, TailMark::Clip),
         );
     }
 
@@ -144,11 +192,11 @@ impl<'a> WidgetRenderContext<'a> {
         &mut self,
         styled: StyledStr,
         env: &Environment,
-        bounds: vello::kurbo::Rect,
+        bounds: kurbo::Rect,
     ) {
         let child_ctx = self.child(
-            vello::kurbo::Affine::translate((bounds.x0, bounds.y0)),
-            vello::kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
+            kurbo::Affine::translate((bounds.x0, bounds.y0)),
+            kurbo::Rect::new(0.0, 0.0, bounds.width(), bounds.height()),
         );
         let renderer = self.renderer_mut();
         let (state, scene) = renderer.state_and_scene_mut();
@@ -157,10 +205,8 @@ impl<'a> WidgetRenderContext<'a> {
         );
     }
 
-    pub(crate) fn append_scene(&mut self, scene: &vello::Scene) {
-        self.renderer
-            .scene_mut()
-            .append(scene, Some(self.transform));
+    pub(crate) fn append_scene(&mut self, scene: &Recording) {
+        self.renderer.scene_mut().append(scene, self.transform);
     }
 
     pub(crate) fn draw_navigation_transition(

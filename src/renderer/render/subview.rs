@@ -1,5 +1,7 @@
 use super::*;
+use crate::engine::WidgetTheme;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use waterui_core::MainThreadBound;
 
@@ -14,7 +16,14 @@ pub(crate) struct HydroSubview<'a> {
     view: MainThreadBound<&'a AnyView>,
     state: MainThreadBound<&'a RefCell<&'a mut HydroState>>,
     env: MainThreadBound<Environment>,
+    /// The widget theme widget leaves measure against. Stored as an `Rc` so
+    /// the layout `SubView` contract — which carries no theme — still answers
+    /// the recursion path with the runtime's style. Main-thread only, like
+    /// `state` and `env`.
+    theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch_axis: StretchAxis,
+    /// Whether this child draws nothing — the §4.4 membership answer.
+    is_empty: bool,
     /// Per-proposal memo for this layout pass (containers probe children with
     /// repeated proposals). Only the recursion path caches here; the text path
     /// memoizes in the content-keyed [`TextMeasureService`] instead.
@@ -38,6 +47,7 @@ impl<'a> HydroSubview<'a> {
         view: &'a AnyView,
         state: &'a RefCell<&'a mut HydroState>,
         env: &'a Environment,
+        theme: &'a Rc<dyn WidgetTheme>,
     ) -> Self {
         let resolved_text =
             try_resolve_text_leaf(view, env).map(|(input, max_lines)| ResolvedTextMeasure {
@@ -49,7 +59,9 @@ impl<'a> HydroSubview<'a> {
             view: MainThreadBound::new(view),
             state: MainThreadBound::new(state),
             env: MainThreadBound::new(env.clone()),
+            theme: MainThreadBound::new(Rc::clone(theme)),
             stretch_axis: effective_stretch_axis(view),
+            is_empty: view_renders_nothing(view),
             measure_cache: MainThreadBound::new(RefCell::new(Vec::new())),
             resolved_text,
         }
@@ -88,8 +100,12 @@ impl SubView for HydroSubview<'_> {
         // Worker-safe path: shaping a resolved text leaf touches no
         // `MainThreadBound` state, so it may run on any thread.
         if let Some(resolved) = &self.resolved_text {
-            let layout = resolved.service.shape(&resolved.input, proposal.width);
-            let dimensions = text_dimensions_from_layout(&layout, resolved.max_lines);
+            let layout =
+                resolved
+                    .service
+                    .shape_limited(&resolved.input, proposal.width, resolved.max_lines);
+            let dimensions =
+                text_dimensions_from_layout(resolved.service.as_ref(), &layout, resolved.max_lines);
             return self.apply_stretch(dimensions, proposal);
         }
 
@@ -104,7 +120,13 @@ impl SubView for HydroSubview<'_> {
 
         let dimensions = {
             let mut state = self.state.borrow_mut();
-            measure_view_dimensions_with_proposal(*self.view, proposal, &mut state, &self.env)
+            measure_view_dimensions_with_proposal(
+                *self.view,
+                proposal,
+                &mut state,
+                &self.env,
+                &self.theme,
+            )
         };
         let dimensions = self.apply_stretch(dimensions, proposal);
 
@@ -120,6 +142,10 @@ impl SubView for HydroSubview<'_> {
 
     fn priority(&self) -> i32 {
         0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty
     }
 }
 
@@ -158,8 +184,8 @@ fn try_resolve_text_leaf(
         let resolved = text.resolve(&scoped_env);
         return Some((
             resolve_text_layout_input(
-                &resolved.content.get(),
-                resolved.paragraph_alignment.get(),
+                &resolved.content.snapshot(),
+                resolved.paragraph_alignment.snapshot(),
                 &scoped_env,
             ),
             resolved.line_limit.map(core::num::NonZeroUsize::get),
@@ -170,8 +196,8 @@ fn try_resolve_text_leaf(
         let config = text.as_inner();
         return Some((
             resolve_text_layout_input(
-                &config.content.get(),
-                config.paragraph_alignment.get(),
+                &config.content.snapshot(),
+                config.paragraph_alignment.snapshot(),
                 &scoped_env,
             ),
             config.line_limit.map(core::num::NonZeroUsize::get),

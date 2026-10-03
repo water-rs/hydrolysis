@@ -3,6 +3,8 @@
 //! shaping fast path.
 
 use super::*;
+use crate::engine::WidgetTheme;
+use std::rc::Rc;
 
 /// A [`SubView`] adapter that measures a child [`RenderNode`] **on demand** at
 /// whatever proposal the real [`Layout`] passes — the node analogue of
@@ -20,8 +22,13 @@ pub(super) struct NodeSubView<'a> {
     node: MainThreadBound<&'a RenderNode>,
     state: MainThreadBound<&'a RefCell<&'a mut HydroState>>,
     env: MainThreadBound<Environment>,
+    /// The widget theme widget leaves measure against, forwarded by
+    /// `measure` to [`RenderNode::measure`]. Main-thread only, like `state`.
+    theme: MainThreadBound<Rc<dyn WidgetTheme>>,
     stretch: StretchAxis,
     priority: i32,
+    /// Whether this child draws nothing — the §4.4 membership answer.
+    is_empty: bool,
     /// Per-proposal memo for this layout pass (containers probe children with
     /// repeated proposals). Only the recursion path caches here; the text path
     /// memoizes in the content-keyed `TextMeasureService` instead.
@@ -50,7 +57,7 @@ fn try_resolve_node_text_leaf(
 ) -> Option<(ResolvedTextLayoutInput, Option<usize>)> {
     match node {
         RenderNode::Text(text) => Some((
-            resolve_text_layout_input(&text.content.get(), text.alignment.get(), env),
+            resolve_text_layout_input(&text.content.snapshot(), text.alignment.snapshot(), env),
             text.line_limit,
         )),
         RenderNode::Opacity(node) => try_resolve_node_text_leaf(&node.child, env),
@@ -58,7 +65,7 @@ fn try_resolve_node_text_leaf(
         RenderNode::Rotation(node) => try_resolve_node_text_leaf(&node.child, env),
         RenderNode::Offset(node) => try_resolve_node_text_leaf(&node.child, env),
         RenderNode::Retain(node) => try_resolve_node_text_leaf(&node.child, env),
-        RenderNode::Dynamic(node) => try_resolve_node_text_leaf(&node.child, env),
+        RenderNode::Dynamic(node) => try_resolve_node_text_leaf(&node.child.borrow(), env),
         RenderNode::Env(node) => try_resolve_node_text_leaf(&node.child, &node.env),
         RenderNode::Wrapper(node) => try_resolve_node_text_leaf(&node.child, &node.env),
         _ => None,
@@ -70,6 +77,7 @@ impl<'a> NodeSubView<'a> {
         node: &'a RenderNode,
         state: &'a RefCell<&'a mut HydroState>,
         env: &'a Environment,
+        theme: &'a Rc<dyn WidgetTheme>,
     ) -> Self {
         let resolved_text = try_resolve_node_text_leaf(node, env).map(|(input, max_lines)| {
             ResolvedNodeTextMeasure {
@@ -81,9 +89,11 @@ impl<'a> NodeSubView<'a> {
         Self {
             stretch: node.stretch(),
             priority: node.priority(),
+            is_empty: node.is_empty(),
             node: MainThreadBound::new(node),
             state: MainThreadBound::new(state),
             env: MainThreadBound::new(env.clone()),
+            theme: MainThreadBound::new(Rc::clone(theme)),
             measure_cache: MainThreadBound::new(RefCell::new(Vec::new())),
             resolved_text,
         }
@@ -115,8 +125,12 @@ impl SubView for NodeSubView<'_> {
         // Worker-safe path: shaping a resolved text leaf touches no
         // `MainThreadBound` state, so it may run on any thread.
         if let Some(resolved) = &self.resolved_text {
-            let layout = resolved.service.shape(&resolved.input, proposal.width);
-            let dimensions = text_dimensions_from_layout(&layout, resolved.max_lines);
+            let layout =
+                resolved
+                    .service
+                    .shape_limited(&resolved.input, proposal.width, resolved.max_lines);
+            let dimensions =
+                text_dimensions_from_layout(resolved.service.as_ref(), &layout, resolved.max_lines);
             return self.apply_stretch(dimensions, proposal);
         }
         if let Some((_, dimensions)) = self
@@ -129,7 +143,8 @@ impl SubView for NodeSubView<'_> {
         }
         let dimensions = {
             let mut state = self.state.borrow_mut();
-            self.node.measure(&mut state, &self.env, proposal)
+            self.node
+                .measure(&mut state, &self.env, &self.theme, proposal)
         };
         let dimensions = self.apply_stretch(dimensions, proposal);
         self.measure_cache
@@ -142,5 +157,8 @@ impl SubView for NodeSubView<'_> {
     }
     fn priority(&self) -> i32 {
         self.priority
+    }
+    fn is_empty(&self) -> bool {
+        self.is_empty
     }
 }

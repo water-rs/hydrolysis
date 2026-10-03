@@ -15,18 +15,19 @@
 use parley::fontique::{Collection, FallbackKey, FamilyId, FontInfo, GenericFamily, Script};
 use waterui_text::FontCollection;
 
-use crate::renderer::HydrolysisRenderer;
-
 /// Font-family buckets recognized from WaterUI's bundled resource fonts.
 #[derive(Default)]
 pub(super) struct ResourceFontFamilies {
     generic: Vec<FamilyId>,
+    emoji: Vec<FamilyId>,
     hani_simplified: Vec<FamilyId>,
     hani_traditional: Vec<FamilyId>,
     hani_japanese: Vec<FamilyId>,
     hani_korean: Vec<FamilyId>,
     arabic: Vec<FamilyId>,
     hebrew: Vec<FamilyId>,
+    thai: Vec<FamilyId>,
+    devanagari: Vec<FamilyId>,
 }
 
 fn extend_family_ids(target: &mut Vec<FamilyId>, families: &[(FamilyId, Vec<FontInfo>)]) {
@@ -51,7 +52,9 @@ impl ResourceFontFamilies {
     /// family names (`Noto Sans CJK SC`).
     pub(super) fn classify(&mut self, name: &str, families: &[(FamilyId, Vec<FontInfo>)]) {
         let key = name.to_ascii_lowercase().replace(' ', "");
-        if key.contains("roboto") {
+        if key.contains("emoji") {
+            extend_family_ids(&mut self.emoji, families);
+        } else if key.contains("roboto") {
             extend_family_ids(&mut self.generic, families);
         } else if key.contains("notosanscjksc") {
             extend_family_ids(&mut self.hani_simplified, families);
@@ -65,6 +68,10 @@ impl ResourceFontFamilies {
             extend_family_ids(&mut self.arabic, families);
         } else if key.contains("notosanshebrew") {
             extend_family_ids(&mut self.hebrew, families);
+        } else if key.contains("notosansthai") {
+            extend_family_ids(&mut self.thai, families);
+        } else if key.contains("notosansdevanagari") {
+            extend_family_ids(&mut self.devanagari, families);
         }
     }
 
@@ -77,6 +84,9 @@ impl ResourceFontFamilies {
                 .set_generic_families(GenericFamily::UiSansSerif, self.generic.iter().copied());
             collection.set_generic_families(GenericFamily::SystemUi, self.generic.iter().copied());
         }
+        if !self.emoji.is_empty() {
+            collection.set_generic_families(GenericFamily::Emoji, self.emoji.iter().copied());
+        }
 
         let hani = Script::from_str_unchecked("Hani");
         set_fallbacks(collection, hani, &self.hani_simplified);
@@ -88,8 +98,21 @@ impl ResourceFontFamilies {
         }
         set_fallbacks(collection, (hani, "ja"), &self.hani_japanese);
         set_fallbacks(collection, (hani, "ko"), &self.hani_korean);
+        // Hangul text selects the Hang script, not Hani: the KR face a host
+        // bundles for Korean must answer that key too or it sits unreachable.
+        set_fallbacks(
+            collection,
+            Script::from_str_unchecked("Hang"),
+            &self.hani_korean,
+        );
         set_fallbacks(collection, Script::from_str_unchecked("Arab"), &self.arabic);
         set_fallbacks(collection, Script::from_str_unchecked("Hebr"), &self.hebrew);
+        set_fallbacks(collection, Script::from_str_unchecked("Thai"), &self.thai);
+        set_fallbacks(
+            collection,
+            Script::from_str_unchecked("Deva"),
+            &self.devanagari,
+        );
     }
 }
 
@@ -116,30 +139,101 @@ const TEST_FONTS: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// The faces that answer what the bundled Roboto cannot cover, subsetted from
+/// the Noto Sans families the runner ships to applications and classified
+/// through the same [`ResourceFontFamilies`] path — so a cluster Roboto has no
+/// glyph for resolves to a known face on every host, not to whatever the
+/// platform happened to install.
+///
+/// Each file is a `pyftsubset` of the corresponding full face kept to the
+/// sample strings the suite shapes: a host with no CJK, Hangul, Thai, or
+/// Devanagari faces installed — a clean CI image counts — still answers every
+/// script a `WaterUI` application is expected to draw. They are registered
+/// like any other resource font but never pinned to a generic family, which
+/// is what keeps them "not bundled" for the fallback assertions.
+#[cfg(any(test, feature = "testing"))]
+const TEST_FALLBACK_FONTS: &[(&str, &[u8])] = &[
+    (
+        "NotoSansCJKsc-Regular.otf",
+        include_bytes!("../../test-fonts/NotoSansCJKsc-Regular.otf"),
+    ),
+    (
+        "NotoSansCJKkr-Regular.otf",
+        include_bytes!("../../test-fonts/NotoSansCJKkr-Regular.otf"),
+    ),
+    (
+        "NotoSansArabic-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansArabic-Regular.ttf"),
+    ),
+    (
+        "NotoSansHebrew-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansHebrew-Regular.ttf"),
+    ),
+    (
+        "NotoSansThai-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansThai-Regular.ttf"),
+    ),
+    (
+        "NotoSansDevanagari-Regular.ttf",
+        include_bytes!("../../test-fonts/NotoSansDevanagari-Regular.ttf"),
+    ),
+    // A face whose outlines overhang the pen advance on both edges ('p' 119u
+    // left, 'y'/'f' ~105u right at upem 1000): the ink-extent tests shape
+    // against it by family name so the #237 invariant is exercised on hosts
+    // whose default faces measure snug. Never pinned to a generic family.
+    (
+        "PacificoSubset.ttf",
+        include_bytes!("../../test-fonts/PacificoSubset.ttf"),
+    ),
+    // The colour-emoji face a host carries: classifies into the `emoji`
+    // generic family so emoji-presentation clusters shape — and rasterize
+    // through the bitmap image atlas — the way they do in production.
+    (
+        "NotoColorEmojiSubset.ttf",
+        include_bytes!("../../test-fonts/NotoColorEmojiSubset.ttf"),
+    ),
+    // A variable face (wght 100–900, wdth 75–100) named so the frame-work
+    // fixture shapes a variation instance deterministically on every host.
+    // Renamed family ("Test Variable ABC") keeps it out of every classify
+    // bucket and every generic pinning.
+    (
+        "TestVariable-ABC.ttf",
+        include_bytes!("../../test-fonts/TestVariable-ABC.ttf"),
+    ),
+    // A COLRv0 colour face ("Bungee Color Regular", 868 glyphs): colour
+    // glyphs take a different scene-ingest path than outline glyphs, and the
+    // frame-work fixtures need that path measured on a font the fixture
+    // can name directly.
+    (
+        "BungeeColor-Regular.ttf",
+        include_bytes!("../../test-fonts/BungeeColor-Regular.ttf"),
+    ),
+];
+
 /// The collection a test host shapes with: the bundled Roboto for everything it
-/// covers, the platform's own faces for everything it does not.
+/// covers, the bundled Noto subsets for everything it does not.
 ///
 /// Test text used to shape against whatever the host OS discovered first, so a
 /// layout assertion tuned on one platform's metrics failed on another's fonts.
 /// Pinning the generic families to exactly the Roboto files bundled with this
-/// crate is what fixed that, and it is why Latin and Cyrillic still measure
-/// identically on every runner: a family the collection registered itself is
-/// matched ahead of any system family of the same generic.
+/// crate is what fixed the half of that about selection: Latin and Cyrillic
+/// measure identically on every runner because a family the collection
+/// registered itself is matched ahead of any system family of the same generic.
 ///
-/// Turning system discovery off on top of that pinning did not help and cost
-/// the platform *fallback*, which is the only thing that can answer a cluster
-/// the pinned face has no glyph for. Every script outside Roboto's coverage —
-/// Han, Hangul, Arabic, Hebrew, Thai, Devanagari — therefore shaped to
-/// `.notdef` and drew as tofu, which is how the avatar gallery came to render
-/// `山田 太郎`'s monogram as two empty boxes while `Ольга Ладыженская`'s read
-/// correctly, and why no non-Latin text could be tested or reviewed by eye
-/// anywhere in the framework.
+/// The fallback half had the same disease one layer down. System discovery
+/// stays on so a cluster the pinned face has no glyph for can be answered, but
+/// the host's font set is not deterministic either — a clean Linux image
+/// carries no CJK, Hangul, Thai, or Devanagari face at all, so every script
+/// outside Roboto's coverage shaped to `.notdef` and drew as tofu, which is how
+/// the avatar gallery came to render `山田 太郎`'s monogram as two empty boxes
+/// while `Ольга Ладыженская`'s read correctly.
 ///
-/// So discovery stays on and the pinning does the deterministic half of the
-/// job by itself. Only what Roboto cannot cover reaches the platform's
-/// fallback — the same path the shipping runner's own collection takes, which
-/// is what makes a script exercised here evidence about the renderer rather
-/// than about the test host.
+/// So the test host installs the same kind of fallback an application does:
+/// [`TEST_FALLBACK_FONTS`] registers through the same `ResourceFontFamilies`
+/// classify/install path the shipping runner's own collection takes, which is
+/// what makes a script exercised here evidence about the renderer rather than
+/// about the test host. Only a cluster no bundled face maps reaches the
+/// platform — the last resort, as in the shipping runner.
 #[cfg(any(test, feature = "testing"))]
 pub(crate) fn deterministic_test_fonts() -> parley::FontContext {
     use parley::fontique::{Blob, CollectionOptions};
@@ -156,7 +250,7 @@ pub(crate) fn deterministic_test_fonts() -> parley::FontContext {
         source_cache: parley::fontique::SourceCache::default(),
     };
     let mut resource_fonts = ResourceFontFamilies::default();
-    for (name, bytes) in TEST_FONTS {
+    for (name, bytes) in TEST_FONTS.iter().chain(TEST_FALLBACK_FONTS.iter()) {
         let families = font_cx
             .collection
             .register_fonts(Blob::new(Arc::new(*bytes)), None);
@@ -166,42 +260,25 @@ pub(crate) fn deterministic_test_fonts() -> parley::FontContext {
     font_cx
 }
 
-/// The system's fonts plus every `.ttf`/`.otf` under the app's `resources/fonts`
-/// directories, with the recognized script fallbacks installed.
+/// The system's fonts plus every `.ttf`/`.otf` under the application's staged
+/// fonts directory, with the recognized script fallbacks installed.
+///
+/// `resources` is the application's own [`waterui_core::ResourceContext`]: the
+/// fonts directory is owned by that context and is never probed from the
+/// process's working directory or executable location, so an embedded host's
+/// fonts come from the roots it installed.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn native_resource_fonts() -> parley::FontContext {
+pub(super) fn native_resource_fonts(
+    resources: &waterui_core::ResourceContext,
+) -> parley::FontContext {
     use parley::fontique::Blob;
     use std::sync::Arc;
 
-    let mut roots = Vec::new();
-    if let Ok(current_dir) = std::env::current_dir() {
-        roots.push(current_dir.join("resources").join("fonts"));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        roots.push(exe_dir.join("resources").join("fonts"));
-        if let Some(contents_dir) = exe_dir.parent()
-            && contents_dir
-                .file_name()
-                .is_some_and(|name| name == "Contents")
-        {
-            roots.push(
-                contents_dir
-                    .join("Resources")
-                    .join("resources")
-                    .join("fonts"),
-            );
-        }
-    }
-
+    let root = resources.fonts();
     let mut font_cx = parley::FontContext::new();
     let mut resource_fonts = ResourceFontFamilies::default();
-    for root in roots {
-        if !root.exists() {
-            continue;
-        }
-        let entries = std::fs::read_dir(&root).unwrap_or_else(|error| {
+    if root.is_dir() {
+        let entries = std::fs::read_dir(root).unwrap_or_else(|error| {
             panic!(
                 "hydrolysis native font loader failed to read `{}`: {error}",
                 root.display()
@@ -252,14 +329,33 @@ pub(super) fn native_resource_fonts() -> parley::FontContext {
     font_cx
 }
 
-/// Gives `renderer` the application's fonts to shape with.
+/// The native collection plus the bundled fallback faces, registered under
+/// their own family names only — [`ResourceFontFamilies::classify`] stays out
+/// of it, so the platform's collection still answers every generic family —
+/// which is what lets a test name a bundled family like `Pacifico` and reach
+/// the overhang face on a host (macOS included) that does not carry it.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
+pub(crate) fn native_test_fonts(resources: &waterui_core::ResourceContext) -> parley::FontContext {
+    use parley::fontique::Blob;
+    use std::sync::Arc;
+
+    let mut font_cx = native_resource_fonts(resources);
+    for (_, bytes) in TEST_FALLBACK_FONTS {
+        font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(*bytes)), None);
+    }
+    font_cx
+}
+
+/// Gives `core` the application's fonts to shape with.
 ///
 /// Every window shapes against the one collection the runner installed, so a
 /// popup opened later measures text exactly as the window that opened it does.
 /// The renderer keeps its own copy because it shapes across worker threads and
 /// `parley`'s contexts are not `Sync`; the faces in it are the same ones.
-pub(super) fn seed_renderer(renderer: &mut HydrolysisRenderer, fonts: &FontCollection) {
-    *renderer.state_mut().text_fonts_mut() = fonts.use_fonts(|fonts| fonts.clone());
+pub(super) fn seed_core(core: &mut crate::renderer::SemanticCore, fonts: &FontCollection) {
+    *core.state_mut().text_fonts_mut() = fonts.use_fonts(|fonts| fonts.clone());
 }
 
 #[cfg(test)]
@@ -269,7 +365,7 @@ mod tests {
     use waterui_core::layout::HorizontalAlignment;
     use waterui_text::styled::StyledStr;
 
-    use super::{TEST_FONTS, deterministic_test_fonts};
+    use super::{TEST_FALLBACK_FONTS, TEST_FONTS, deterministic_test_fonts, native_resource_fonts};
     use crate::renderer::{TextMeasureService, resolve_text_layout_input};
 
     /// One sample per script a `WaterUI` application is expected to draw.
@@ -328,6 +424,44 @@ mod tests {
         (glyphs, missing, all_bundled)
     }
 
+    /// The staged fonts directory belongs to the installed `ResourceContext`:
+    /// a face dropped into an arbitrary directory the context points at is
+    /// registered and reachable, and the loader never probes the process's
+    /// own location for one.
+    #[test]
+    fn staged_fonts_directory_supplies_resource_fonts() {
+        let staged =
+            std::env::temp_dir().join(format!("hydrolysis-fonts-test-{}", std::process::id()));
+        let fonts_dir = staged.join("fonts");
+        std::fs::create_dir_all(&fonts_dir).unwrap();
+        let (name, bytes) = TEST_FALLBACK_FONTS
+            .iter()
+            .find(|(name, _)| *name == "PacificoSubset.ttf")
+            .expect("PacificoSubset is pinned in TEST_FALLBACK_FONTS");
+        std::fs::write(fonts_dir.join(name), bytes).unwrap();
+
+        let resources = waterui_core::ResourceContext::new(staged.join("assets"), &fonts_dir);
+        let mut font_cx = native_resource_fonts(&resources);
+
+        let family = font_cx
+            .collection
+            .family_by_name("Pacifico")
+            .expect("the staged Pacifico face must register under its family name");
+        let font = family
+            .fonts()
+            .first()
+            .expect("the Pacifico family has a face")
+            .load(Some(&mut font_cx.source_cache))
+            .expect("the staged face must load");
+        assert_eq!(
+            font.data(),
+            *bytes,
+            "the registered face is the file staged in the context's fonts directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&staged);
+    }
+
     /// The defect this collection was fixed for: a cluster the bundled face
     /// cannot map must reach a face that can, on every script, not just the
     /// ones Roboto happens to carry.
@@ -364,12 +498,247 @@ mod tests {
         }
     }
 
+    /// Long enough that a narrow proposal can only answer it with many lines,
+    /// and mixing Japanese kana and kanji with Chinese hanzi so every CJ
+    /// complex-script classification passes through the word segmenter.
+    const CJK_PARAGRAPH: &str = "こんにちは世界。これは日本語のテキストです。雨にも負けず風にも負けず。中文也可以排版，天涯海角任我行。";
+
+    /// UAX #14 already allows a line break between adjacent ideographs, so a
+    /// narrow proposal must wrap a CJK paragraph into several lines. And with
+    /// the bundled segmentation dictionaries the segmenter answers every
+    /// complex-script run with a model, so the layout pass must stay silent:
+    /// `No segmentation model for complex script` was the warn/debug record a
+    /// missing model emitted once per CJK run per layout.
+    #[test]
+    fn a_cjk_paragraph_wraps_at_ideographic_boundaries_and_logs_nothing() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for LogBuffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("log capture buffer mutex poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+            type Writer = LogBuffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buffer = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_max_level(tracing::Level::DEBUG)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        // ICU4X data warnings travel through `log`; `LogTracer` lands them in
+        // the same subscriber, so a missing model could not hide behind the
+        // `eprintln` path debug builds take without `icu_provider/logging`.
+        tracing_log::LogTracer::init().ok();
+
+        let mut lines = 0;
+        tracing::subscriber::with_default(subscriber, || {
+            let service = test_host_service();
+            let mut env = Environment::new();
+            crate::testing::install_theme(&mut env);
+            let input = resolve_text_layout_input(
+                &StyledStr::from(CJK_PARAGRAPH),
+                HorizontalAlignment::Leading,
+                &env,
+            );
+            let layout = service.shape(&input, Some(80.0));
+            lines = layout.lines().count();
+        });
+
+        assert!(
+            lines >= 3,
+            "a CJK paragraph in an 80px width must wrap at ideographic boundaries; got {lines} line(s)"
+        );
+        let logged = String::from_utf8(
+            buffer
+                .0
+                .lock()
+                .expect("log capture buffer mutex poisoned")
+                .clone(),
+        )
+        .expect("captured log output must be UTF-8");
+        assert!(
+            !logged.contains("segmentation model") && !logged.contains("icu_segmenter"),
+            "laying out CJK text must not log segmentation-model misses: {logged}"
+        );
+    }
+
+    /// A DejaVu-Sans subset kept to ASCII and the emoji codepoints the
+    /// emoji-family test exercises — including the ones that *also* live in a
+    /// colour face. DejaVu covering `U+1F600` at all is the whole point of
+    /// <https://github.com/water-rs/hydrolysis/issues/119>: a desktop sans
+    /// carries monochrome glyphs for emoji-presentation codepoints, so which
+    /// family answers the cluster decides whether it draws colour or flat
+    /// text.
+    const TEXT_WITH_EMOJI_COVERAGE: &[u8] =
+        include_bytes!("../../test-fonts/DejaVuSansEmojiCoverage.ttf");
+
+    /// A Noto Color Emoji subset over the same codepoints, playing the
+    /// `emoji` generic family.
+    const EMOJI_FACE: &[u8] = include_bytes!("../../test-fonts/NotoColorEmojiSubset.ttf");
+
+    /// A shaping service whose collection holds exactly the two fixture
+    /// faces, each pinned to its generic family: the text face at
+    /// `sans-serif`, the colour face at `emoji`. Both cover every emoji
+    /// codepoint the test shapes, so which blob a run resolves to reports
+    /// which family list the cluster consulted first — host fonts cannot
+    /// leak in because system discovery is off.
+    fn emoji_fixture_service() -> TextMeasureService {
+        use parley::fontique::{Blob, Collection, CollectionOptions, GenericFamily};
+        use std::sync::Arc;
+
+        let mut font_cx = parley::FontContext {
+            collection: Collection::new(CollectionOptions {
+                system_fonts: false,
+                ..CollectionOptions::default()
+            }),
+            source_cache: parley::fontique::SourceCache::default(),
+        };
+        let text_families = font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(TEXT_WITH_EMOJI_COVERAGE)), None);
+        let emoji_families = font_cx
+            .collection
+            .register_fonts(Blob::new(Arc::new(EMOJI_FACE)), None);
+        font_cx.collection.set_generic_families(
+            GenericFamily::SansSerif,
+            text_families.iter().map(|(family_id, _)| *family_id),
+        );
+        font_cx.collection.set_generic_families(
+            GenericFamily::Emoji,
+            emoji_families.iter().map(|(family_id, _)| *family_id),
+        );
+        let mut service = TextMeasureService::new();
+        *service.fonts_mut() = font_cx;
+        service
+    }
+
+    /// <https://github.com/water-rs/hydrolysis/issues/119>: a cluster whose
+    /// presentation is emoji — an `Emoji_Presentation=Yes` codepoint, or an
+    /// `Emoji=Yes` base followed by U+FE0F — must resolve through the `emoji`
+    /// generic family *before* the text families. `parley` instead appends
+    /// the emoji fallback after the requested family, so a text face that
+    /// covers the codepoint wins and the cluster draws monochrome.
+    #[test]
+    fn emoji_presentation_clusters_resolve_through_the_emoji_family_first() {
+        let service = emoji_fixture_service();
+        let mut env = Environment::new();
+        crate::testing::install_theme(&mut env);
+
+        let faces_of = |text: &'static str| -> Vec<Vec<u8>> {
+            let input = resolve_text_layout_input(
+                &StyledStr::from(text),
+                HorizontalAlignment::Leading,
+                &env,
+            );
+            let layout = service.shape(&input, None);
+            layout
+                .lines()
+                .flat_map(|line| line.items())
+                .filter_map(|item| {
+                    let PositionedLayoutItem::GlyphRun(run) = item else {
+                        return None;
+                    };
+                    Some(run.run().font().data.data().to_vec())
+                })
+                .collect()
+        };
+
+        // Emoji presentation: the bare `Emoji_Presentation=Yes` codepoints
+        // and the `Emoji=Yes` bases followed by U+FE0F must all come back in
+        // the face pinned at `emoji`, never in the text face that also
+        // covers them.
+        for text in [
+            "\u{1F600}",
+            "\u{2764}\u{FE0F}",
+            "\u{2615}",
+            "\u{26A0}\u{FE0F}",
+            "\u{26A1}",
+        ] {
+            let faces = faces_of(text);
+            assert!(!faces.is_empty(), "`{text}` produced no glyph runs");
+            for face in &faces {
+                assert_eq!(
+                    face.as_slice(),
+                    EMOJI_FACE,
+                    "emoji-presentation `{text}` resolved to the text face"
+                );
+            }
+        }
+
+        // Text presentation keeps the text face: Latin, bare `Emoji=Yes`
+        // codepoints whose `Emoji_Presentation` is `No`, and one followed by
+        // U+FE0E all stay monochrome.
+        for text in ["plain", "\u{2764}", "\u{26A0}", "\u{2764}\u{FE0E}"] {
+            let faces = faces_of(text);
+            assert!(!faces.is_empty(), "`{text}` produced no glyph runs");
+            for face in &faces {
+                assert_eq!(
+                    face.as_slice(),
+                    TEXT_WITH_EMOJI_COVERAGE,
+                    "text-presentation `{text}` left the text face"
+                );
+            }
+        }
+
+        // Mixed text: the emoji cluster inside Latin text takes the emoji
+        // face while its ASCII neighbours keep the text face.
+        let text = "a\u{1F600}b";
+        let input =
+            resolve_text_layout_input(&StyledStr::from(text), HorizontalAlignment::Leading, &env);
+        let layout = service.shape(&input, None);
+        let (mut saw_emoji, mut saw_text) = (false, false);
+        for line in layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else {
+                    continue;
+                };
+                let face = run.run().font().data.data();
+                for cluster in run.run().clusters() {
+                    if text[cluster.text_range()].contains('\u{1F600}') {
+                        saw_emoji = true;
+                        assert_eq!(
+                            face, EMOJI_FACE,
+                            "the emoji cluster in `{text}` resolved to the text face"
+                        );
+                    } else {
+                        saw_text = true;
+                        assert_eq!(
+                            face, TEXT_WITH_EMOJI_COVERAGE,
+                            "a text cluster in `{text}` left the text face"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_emoji && saw_text,
+            "`{text}` produced no runs to assert on"
+        );
+    }
+
     /// And the same statement from the other side: a script Roboto does not
-    /// carry must be answered by a face that is *not* bundled. Without this the
+    /// carry must be answered by a face other than the pinned Roboto. Without this the
     /// test above could pass on a collection that had quietly stopped
     /// registering anything at all.
     #[test]
-    fn a_script_roboto_lacks_is_answered_by_a_platform_face() {
+    fn a_script_roboto_lacks_is_answered_by_a_fallback_face() {
         let service = test_host_service();
         for (script, text) in &SAMPLES[2..] {
             let (_, _, all_bundled) = shaped(&service, text);

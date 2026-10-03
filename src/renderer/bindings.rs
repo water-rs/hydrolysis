@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(super) fn target_hit_priority(
         depth: usize,
         order: usize,
@@ -12,10 +12,7 @@ impl HydrolysisRenderer {
         (order, depth, index)
     }
 
-    pub(super) fn topmost_text_input_index_at_point(
-        &self,
-        point: vello::kurbo::Point,
-    ) -> Option<usize> {
+    pub(super) fn topmost_text_input_index_at_point(&self, point: kurbo::Point) -> Option<usize> {
         self.text_editing
             .text_input_targets
             .iter()
@@ -30,12 +27,22 @@ impl HydrolysisRenderer {
     }
 
     #[cfg(feature = "accessibility")]
-    pub(super) fn focused_text_input_accessibility_node(&self) -> Option<AccessibilityNodeId> {
+    pub(crate) fn focused_text_input_accessibility_node(&self) -> Option<AccessibilityNodeId> {
         self.text_editing.focused_target()?.accessibility_node_id
     }
 
+    /// Whether a text input claims this accessibility node — the check the
+    /// Android runner runs before the panicking focus call.
+    #[cfg(all(feature = "accessibility", target_os = "android"))]
+    pub(crate) fn accessibility_node_is_text_input(&self, node_id: AccessibilityNodeId) -> bool {
+        self.text_editing
+            .text_input_targets
+            .iter()
+            .any(|target| target.accessibility_node_id == Some(node_id))
+    }
+
     #[cfg(feature = "accessibility")]
-    pub(super) fn focus_text_input_for_accessibility_node(
+    pub(crate) fn focus_text_input_for_accessibility_node(
         &mut self,
         node_id: AccessibilityNodeId,
     ) -> bool {
@@ -52,7 +59,7 @@ impl HydrolysisRenderer {
         self.set_focused_text_input(Some(focused))
     }
 
-    pub(crate) fn push_lazy_viewport(&mut self, viewport: vello::kurbo::Rect) {
+    pub(crate) fn push_lazy_viewport(&mut self, viewport: LazyViewport) {
         self.lazy.lazy_viewport_stack.push(viewport);
     }
 
@@ -72,6 +79,36 @@ impl HydrolysisRenderer {
 
     pub(crate) fn current_ime_preedit(&self) -> Option<Str> {
         self.text_editing.ime_preedit.clone()
+    }
+
+    /// The platform-reported caret inside [`Self::current_ime_preedit`], so a
+    /// field can map it onto the composed text's layout.
+    pub(crate) fn current_ime_preedit_caret(&self) -> Option<usize> {
+        self.text_editing.ime_preedit.as_ref()?;
+        self.text_editing.ime_preedit_caret
+    }
+
+    /// Whether an IME composition currently owns keyboard input — either a
+    /// widget field holding marked text or an embedded surface's session.
+    pub(crate) fn ime_composition_active(&self) -> bool {
+        self.text_editing.ime_preedit.is_some() || self.hit_test.embedded_composing
+    }
+
+    /// Records a key press the IME consumed while it owned input; the press's
+    /// release must be swallowed when it arrives, however many batches later.
+    pub(crate) fn swallow_ime_key_press(&mut self, code: keyboard_types::Code) {
+        self.ime_swallowed_codes.push(code);
+    }
+
+    /// True once for a release matching a swallowed press: wl_keyboard (and
+    /// X11's filtered-key quirk) still deliver it, but it belongs to the
+    /// composition, not to the application.
+    pub(crate) fn take_ime_swallowed_release(&mut self, code: keyboard_types::Code) -> bool {
+        let Some(index) = self.ime_swallowed_codes.iter().position(|c| *c == code) else {
+            return false;
+        };
+        self.ime_swallowed_codes.swap_remove(index);
+        true
     }
 
     /// Where the platform should anchor the input-method panel.
@@ -100,6 +137,12 @@ impl HydrolysisRenderer {
         })
     }
 
+    /// The focused text input's accessibility node — UI focus is the text
+    /// caret's home, deliberately separate from the semantic tree's focus
+    /// (`accessibility.focus`, reported as `TreeUpdate::focus`): the tree's
+    /// focus landing on a non-text node leaves the caret on the field it
+    /// belongs to, while a move that carries keyboard focus — traversal or
+    /// a pointer press — ends editing (#95).
     #[cfg(feature = "accessibility")]
     #[must_use]
     pub fn focused_ui_node(&self) -> Option<AccessibilityNodeId> {
@@ -112,7 +155,7 @@ impl HydrolysisRenderer {
 
     #[must_use]
     pub fn cursor_style_at(&self, x: f32, y: f32) -> CursorStyle {
-        let point = vello::kurbo::Point::new(f64::from(x), f64::from(y));
+        let point = kurbo::Point::new(f64::from(x), f64::from(y));
         self.hit_test.cursor_style_at(point)
     }
 
@@ -124,10 +167,11 @@ impl HydrolysisRenderer {
         phase: TouchPhase,
         env: &Environment,
     ) -> bool {
-        let center = vello::kurbo::Point::new(f64::from(x), f64::from(y));
+        let center = kurbo::Point::new(f64::from(x), f64::from(y));
         let at = self.frame_instant;
-        self.gesture_engine
-            .handle_magnification(center, delta, phase, at, env)
+        self.with_unoccluded_gesture_targets(center, |engine| {
+            engine.handle_magnification(center, delta, phase, at, env)
+        })
     }
 
     pub fn apply_magnification_gesture(
@@ -155,10 +199,11 @@ impl HydrolysisRenderer {
         phase: TouchPhase,
         env: &Environment,
     ) -> bool {
-        let center = vello::kurbo::Point::new(f64::from(x), f64::from(y));
+        let center = kurbo::Point::new(f64::from(x), f64::from(y));
         let at = self.frame_instant;
-        self.gesture_engine
-            .handle_rotation(center, delta, phase, at, env)
+        self.with_unoccluded_gesture_targets(center, |engine| {
+            engine.handle_rotation(center, delta, phase, at, env)
+        })
     }
 
     pub fn handle_gesture_tick(&mut self, at: Instant, env: &Environment) -> bool {
@@ -172,23 +217,27 @@ impl HydrolysisRenderer {
             .has_focus()
             .then_some(self.text_editing.text_caret_next_frame_at)
             .flatten();
-        match (gesture_deadline, caret_deadline) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(left), None) => Some(left),
-            (None, Some(right)) => Some(right),
-            (None, None) => None,
-        }
+        // An armed context-menu hold wakes the runner at the same instant
+        // its tick fires it — it shares the gesture deadline channel.
+        let hold_deadline = self
+            .hit_test
+            .pending_context_menu_hold
+            .map(|hold| hold.started_at + CONTEXT_MENU_HOLD_DURATION);
+        [gesture_deadline, caret_deadline, hold_deadline]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub fn sync_active_interactions_after_layout(&mut self, pointer: Option<(f32, f32)>) {
-        let pointer = pointer.map(|(x, y)| vello::kurbo::Point::new(f64::from(x), f64::from(y)));
+        let pointer = pointer.map(|(x, y)| kurbo::Point::new(f64::from(x), f64::from(y)));
         self.gesture_engine.sync_after_layout(pointer);
         self.sync_active_pointer_drag_target_after_layout(pointer);
     }
 
     pub(crate) fn register_gesture_target(
         &mut self,
-        bounds: vello::kurbo::Rect,
+        bounds: kurbo::Rect,
         group_id: usize,
         gesture: Gesture,
         action: BoxedAction<()>,
@@ -196,7 +245,13 @@ impl HydrolysisRenderer {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return None;
         }
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
         let order = self.hit_test.next_hit_test_order();
+        self.hit_test.gesture_regions.push(GestureRegion {
+            bounds,
+            order,
+            owners: self.owner_stack.clone(),
+        });
         Some(self.gesture_engine.register_target(
             bounds,
             gesture,
@@ -211,21 +266,30 @@ impl HydrolysisRenderer {
     /// at that row's current bounds. The recognizer state machine is shared, so
     /// a drag that began before this frame keeps running instead of being
     /// forgotten when the engine's per-frame target list is rebuilt.
+    ///
+    /// The order minted on the target's birth frame is not reused: the hit-test
+    /// order counter resets every rebuild, so a stale order ranks the target
+    /// against siblings it was never painted with. Re-minting keeps the
+    /// recognizer while ranking the target by where it paints this frame.
     pub(crate) fn register_retained_gesture_target(
         &mut self,
         target: &crate::gesture::GestureTarget,
-        bounds: vello::kurbo::Rect,
+        bounds: kurbo::Rect,
         group_id: usize,
     ) {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
         }
-        self.gesture_engine
-            .register_existing_target(target.with_bounds_depth_and_group(
-                bounds,
-                self.render_depth,
-                group_id,
-            ));
+        let bounds = self.hit_test.clip_hit_bounds(bounds);
+        let order = self.hit_test.next_hit_test_order();
+        self.hit_test.gesture_regions.push(GestureRegion {
+            bounds,
+            order,
+            owners: self.owner_stack.clone(),
+        });
+        let mut target = target.with_bounds_depth_and_group(bounds, self.render_depth, group_id);
+        target.order = order;
+        self.gesture_engine.register_existing_target(target);
     }
 
     pub(crate) fn allocate_gesture_group_id(&mut self) -> usize {
@@ -266,20 +330,25 @@ impl HydrolysisRenderer {
             return;
         }
         let order = self.hit_test.next_hit_test_order();
+        let key_handlers = self.snapshot_key_handlers();
         self.text_editing.text_input_targets.push(TextInputTarget {
             interaction_key: data.target.interaction_key,
             modal: data.target.modal,
-            bounds: data.target.bounds,
+            bounds: self.hit_test.clip_hit_bounds(data.target.bounds),
             cursor_area: data.target.cursor_area,
             text_bounds: data.target.text_bounds,
             text_clip_bounds: data.target.text_clip_bounds,
             content_alpha: data.target.content_alpha,
             layout: data.target.layout,
+            display_text: data.target.display_text,
+            display_layout: data.target.display_layout,
             purpose: data.target.purpose,
             depth: data.depth,
             order,
             model: data.target.model,
             selection: data.target.selection,
+            env: data.target.env,
+            key_handlers,
             focus_binding: data.focus_binding,
             #[cfg(feature = "accessibility")]
             accessibility_node_id: data.accessibility_node_id,

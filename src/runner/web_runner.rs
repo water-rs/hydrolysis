@@ -16,19 +16,20 @@ use executor_core::{
     try_init_local_executor,
 };
 use js_sys::Uint8Array;
+use nami::Signal;
 use parley::fontique::{Blob, FontInfoOverride};
 use serde::Deserialize;
 use wasm_bindgen::{JsCast, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
-use waterui::app::App;
-use waterui::window::WindowState;
+use waterui::app::{App, AppParts};
+use waterui::window::{Window, WindowState};
 use waterui_core::Environment;
 use waterui_text::FontCollection;
 use web_sys::Response;
 
 use super::fonts::ResourceFontFamilies;
-use crate::platform::{BrowserWindow, PlatformWindow};
-use crate::renderer::{HydrolysisRenderer, HydrolysisTextContextMenuMode};
+use crate::platform::{BrowserWindow, GpuSurfaceWindow, PlatformWindow};
+use crate::renderer::{HydrolysisRenderer, HydrolysisTextContextMenuMode, MenuShortcutRegistry};
 use crate::runner::web_accessibility::WebAccessibilityBridge;
 use crate::runner::{
     RenderDiagnosticsConfig, RuntimeWindow, advance_runtime, handle_input_events, render_window,
@@ -96,12 +97,18 @@ async fn load_web_fonts() -> parley::FontContext {
         panic!("hydrolysis web font manifest parse failed for `{WEB_FONT_MANIFEST_PATH}`: {error}")
     });
 
+    // Every font file is in flight at once; registration order follows the
+    // manifest so the collection is the same as a serial load would build.
+    let font_files = futures::future::join_all(manifest.fonts.iter().map(|font| {
+        let font_path = format!("fonts/{}", font.file_name);
+        async move { fetch_bytes(&font_path).await }
+    }))
+    .await;
+
     let mut default_family_ids = Vec::new();
     let mut resource_fonts = ResourceFontFamilies::default();
     let mut font_cx = parley::FontContext::new();
-    for font in manifest.fonts {
-        let font_path = format!("fonts/{}", font.file_name);
-        let font_data = fetch_bytes(&font_path).await;
+    for (font, font_data) in manifest.fonts.iter().zip(font_files) {
         let families = font_cx.collection.register_fonts(
             Blob::new(Arc::new(font_data)),
             Some(FontInfoOverride {
@@ -158,12 +165,19 @@ struct BrowserRunner {
     runnable_queue: Rc<RefCell<VecDeque<Runnable>>>,
     accessibility_actions: Rc<RefCell<VecDeque<AccessibilityActionRequest>>>,
     accessibility_bridge: WebAccessibilityBridge,
+    /// Whether the page has been told its first frame is up, which ends the
+    /// launch screen the page shows until then.
+    first_frame_announced: bool,
 }
 
 impl BrowserRunner {
     fn drain_runnable_queue(runnable_queue: &RefCell<VecDeque<Runnable>>) -> bool {
         let mut drained = false;
-        while let Some(runnable) = runnable_queue.borrow_mut().pop_front() {
+        // The pop borrow must end before `run`: running a task can schedule
+        // more runnables, which pushes onto this same queue.
+        loop {
+            let runnable = runnable_queue.borrow_mut().pop_front();
+            let Some(runnable) = runnable else { break };
             drained = true;
             runnable.run();
         }
@@ -174,9 +188,20 @@ impl BrowserRunner {
         Self::drain_runnable_queue(&self.runnable_queue)
     }
 
-    fn frame(&mut self) -> bool {
+    /// Async because the engine render inside awaits the browser's GPU
+    /// device; the caller drives it through `spawn_local` — wasm32 only ever
+    /// runs this path.
+    async fn frame(&mut self) -> bool {
         let _ = self.drain_local_executor_queue();
-        while let Some(request) = self.accessibility_actions.borrow_mut().pop_front() {
+        // The page's occlusion report drives the pump state each frame — a
+        // hidden page still drains events and executor work; only drawing
+        // stops.
+        self.runtime.sync_occlusion();
+        // Same borrow discipline: handling an action may schedule work that
+        // queues further accessibility requests.
+        loop {
+            let request = self.accessibility_actions.borrow_mut().pop_front();
+            let Some(request) = request else { break };
             if self
                 .runtime
                 .renderer
@@ -186,13 +211,26 @@ impl BrowserRunner {
             }
         }
         let should_close = handle_input_events(&mut self.runtime, &self.env);
-        if should_close || self.runtime.window.state.get() == WindowState::Closed {
+        if should_close || self.runtime.window.state.snapshot() == WindowState::Closed {
             return false;
         }
         let _ = advance_runtime(&mut self.runtime, &self.env, Instant::now());
-        render_window(&mut self.runtime, &self.env, &mut || {
-            Self::drain_runnable_queue(&self.runnable_queue)
-        });
+        // A hidden window produces no frame — a tick already posted when
+        // the occluding listener landed must not present either — and a
+        // wake that carried no armed work answers without one. Only armed
+        // work on a visible window encodes a frame.
+        if !self.runtime.is_hidden()
+            && (self.runtime.mode.is_pending() || self.runtime.renderer.take_redraw_request())
+        {
+            let presented = render_window(&mut self.runtime, &self.env, &mut || {
+                Self::drain_runnable_queue(&self.runnable_queue)
+            })
+            .await;
+            if presented && !self.first_frame_announced {
+                self.first_frame_announced = true;
+                self.runtime.platform.announce_first_frame();
+            }
+        }
         if let Some(update) = self.runtime.renderer.take_accessibility_tree_update() {
             self.accessibility_bridge.update(update);
         }
@@ -200,7 +238,12 @@ impl BrowserRunner {
     }
 
     fn needs_next_frame(&self) -> bool {
-        self.runtime.platform.take_redraw_request() || !self.runnable_queue.borrow().is_empty()
+        // A hidden page schedules nothing: the armed mode and queued
+        // redraws survive for the restore frame, but no rAF is posted
+        // into a parked pump.
+        !self.runtime.is_hidden()
+            && (self.runtime.platform.take_redraw_request()
+                || !self.runnable_queue.borrow().is_empty())
     }
 }
 
@@ -215,6 +258,11 @@ type ScheduleFrameSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 struct BrowserRunnerHandle {
     runner: RefCell<BrowserRunner>,
     raf_pending: Cell<bool>,
+    /// A frame suspended inside an engine `await`: another rAF arriving while
+    /// it is pending cannot borrow the runner, so it takes a repeat ticket and
+    /// the suspended frame's continuation schedules again.
+    frame_in_flight: Cell<bool>,
+    frame_again: Cell<bool>,
     raf_callback: RefCell<Option<AnimationFrameCallback>>,
 }
 
@@ -235,31 +283,60 @@ impl BrowserRunnerHandle {
             .expect("hydrolysis web runner: failed to schedule animation frame");
     }
 
+    // The runner borrow spans the engine's await by design: `frame_in_flight`
+    // bars the reentrant borrow a suspended frame would otherwise let a
+    // second rAF take, so the RefMut-across-await is sound.
+    #[allow(clippy::await_holding_refcell_ref)]
     fn frame(self: &Rc<Self>) {
         self.raf_pending.set(false);
-        let should_continue = self.runner.borrow_mut().frame();
-        if !should_continue {
+        if self.frame_in_flight.replace(true) {
+            self.frame_again.set(true);
             return;
         }
-
-        if self.runner.borrow().needs_next_frame() {
-            self.schedule_frame();
-        }
+        let handle = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let should_continue = handle.runner.borrow_mut().frame().await;
+            handle.frame_in_flight.set(false);
+            if !should_continue {
+                return;
+            }
+            if handle.frame_again.replace(false) || handle.runner.borrow().needs_next_frame() {
+                handle.schedule_frame();
+            }
+        });
     }
 }
 
-pub fn run(app: App) {
+pub fn run(app: App, style: impl crate::Style) {
     wasm_bindgen_futures::spawn_local(async move {
         let schedule_frame_ref: ScheduleFrameSlot = Rc::new(RefCell::new(None));
         let browser_schedule = {
             let schedule_frame_ref = schedule_frame_ref.clone();
             Rc::new(move || {
-                let schedule = schedule_frame_ref
-                    .borrow()
-                    .as_ref()
-                    .cloned()
-                    .expect("hydrolysis web runner: frame scheduler is not ready");
-                schedule();
+                // Setup observers — the IntersectionObserver's initial
+                // delivery, `visibilitychange`, a queued runnable — can
+                // request a frame before the runner installs the
+                // scheduler below. The `handle.schedule_frame()` after
+                // installation starts the pump unconditionally, so an
+                // early request needs no reply.
+                if let Some(schedule) = schedule_frame_ref.borrow().as_ref().cloned() {
+                    schedule();
+                }
+            }) as Rc<dyn Fn()>
+        };
+        // `visibilitychange` and the IntersectionObserver cannot report
+        // through the frame loop: a hidden tab's rAF callback never fires,
+        // so the pump would never learn it became hidden. This wake pulls
+        // the occlusion report into the pump synchronously — logging the
+        // transition and suppressing wake requests while hidden — then
+        // posts the frame that presents the restore.
+        let occlusion_wake_ref: ScheduleFrameSlot = Rc::new(RefCell::new(None));
+        let browser_occlusion_wake = {
+            let occlusion_wake_ref = occlusion_wake_ref.clone();
+            Rc::new(move || {
+                if let Some(wake) = occlusion_wake_ref.borrow().as_ref().cloned() {
+                    wake();
+                }
             }) as Rc<dyn Fn()>
         };
         let runnable_queue = Rc::new(RefCell::new(VecDeque::new()));
@@ -268,43 +345,73 @@ pub fn run(app: App) {
             schedule_frame: browser_schedule.clone(),
         };
         // Nothing probes the browser executor: the inspector endpoint is a TCP
-        // server the page cannot host, so no probe exists to hand it.
+        // server the page cannot host, so no probe exists to hand it. The
+        // browser's rAF rate is not queryable up front, so the executor budgets
+        // at the headless rate.
         let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
             local_executor,
+            waterui::task::RefreshRate::HEADLESS,
             None,
         ));
 
-        let (windows, _menu_bar, env) = app.into_parts();
-        let mut windows = windows.into_iter();
-        let window = windows
-            .next()
-            .expect("hydrolysis web runner requires exactly one window");
-        assert!(
-            windows.next().is_none(),
-            "hydrolysis web runner supports exactly one window"
-        );
+        // The page is the application's one window: it has no windowless
+        // state to stay resident in, and closing the tab ends the application
+        // whatever its policy says.
+        let AppParts {
+            windows,
+            menu_bar,
+            env,
+            last_window: _,
+        } = app.into_parts();
+        let window_count = windows.len();
+        let Ok([window]) = <[Window; 1]>::try_from(windows) else {
+            panic!(
+                "hydrolysis web runner requires exactly one window, got {window_count}: a browser \
+                 page is the application's only window and has no windowless state"
+            );
+        };
 
-        let mut env = env;
+        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
         let render_diagnostics_config = RenderDiagnosticsConfig::from_env();
         super::install_native_component_hooks(&mut env);
+        // Every runner seeds the chord table so mounted menus resolve
+        // shortcuts through the same path (water-rs/hydrolysis#247).
+        let _ = env.get_or_insert_with::<MenuShortcutRegistry, _>(MenuShortcutRegistry::default);
+        // A browser page cannot own the browser's menu bar, so the app menus
+        // contribute their chords only — nothing renders.
+        super::menu_bar::register_menu_bar(&menu_bar, &env);
         env.insert(HydrolysisTextContextMenuMode::Overlay);
+        crate::theme::install_theme_tokens(&mut env, Some(&style));
+        let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
-            crate::view_renderer::HydrolysisViewRenderer::default(),
+            crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
         ));
 
-        let mut platform = BrowserWindow::new(Rc::clone(&browser_schedule)).await;
+        // The application's fonts are fetched while the GPU adapter and device
+        // are requested; neither waits on the other. The window's renderer is
+        // seeded from the collection, and a self-drawn component that typesets
+        // text itself reads it out of the environment instead of building a
+        // collection of its own.
+        let (mut platform, font_cx) = futures::join!(
+            BrowserWindow::new(
+                Rc::clone(&browser_schedule),
+                Rc::clone(&browser_occlusion_wake),
+            ),
+            load_web_fonts()
+        );
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), theme)
         };
-        // The application's fonts, fetched once. The window's renderer is
-        // seeded from this collection, and a self-drawn component that typesets
-        // text itself reads it out of the environment instead of building a
-        // collection of its own.
-        let fonts = FontCollection::new(load_web_fonts().await);
+        let fonts = FontCollection::new(font_cx);
         fonts.clone().install(&mut env);
-        super::fonts::seed_renderer(&mut renderer, &fonts);
+        super::fonts::seed_core(&mut renderer, &fonts);
+        renderer.set_window_id(
+            env.get::<MenuShortcutRegistry>()
+                .expect("the web runner seeds MenuShortcutRegistry")
+                .mint_window_id(),
+        );
         let runtime = RuntimeWindow::new(window, platform, renderer, render_diagnostics_config);
         let accessibility_actions = Rc::new(RefCell::new(VecDeque::new()));
         let accessibility_bridge =
@@ -315,11 +422,14 @@ pub fn run(app: App) {
             runnable_queue,
             accessibility_actions,
             accessibility_bridge,
+            first_frame_announced: false,
         };
 
         let handle = Rc::new(BrowserRunnerHandle {
             runner: RefCell::new(runner),
             raf_pending: Cell::new(false),
+            frame_in_flight: Cell::new(false),
+            frame_again: Cell::new(false),
             raf_callback: RefCell::new(None),
         });
         let callback_handle = handle.clone();
@@ -330,6 +440,25 @@ pub fn run(app: App) {
             let handle = handle.clone();
             Rc::new(move || handle.schedule_frame())
         });
+        *occlusion_wake_ref.borrow_mut() = Some({
+            let handle = handle.clone();
+            Rc::new(move || {
+                // DOM listeners fire between frames, so the runner is
+                // normally free; if a frame is mid-borrow the occlusion
+                // report is read there anyway (`frame` syncs every tick).
+                let mut hidden = false;
+                if let Ok(mut runner) = handle.runner.try_borrow_mut() {
+                    runner.runtime.sync_occlusion();
+                    hidden = runner.runtime.is_hidden();
+                }
+                // A hidden pump posts nothing: the armed work survives
+                // for the restore frame the next wake schedules.
+                if !hidden {
+                    handle.schedule_frame();
+                }
+            })
+        });
+        waterui_locale::start_system_locale_listener();
         handle.schedule_frame();
     });
 }

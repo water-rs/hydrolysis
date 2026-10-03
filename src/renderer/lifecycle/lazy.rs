@@ -3,7 +3,14 @@ use waterui_layout::stack::LazyStackAxis;
 
 #[derive(Default)]
 pub(crate) struct LazyState {
-    pub(crate) lazy_viewport_stack: Vec<vello::kurbo::Rect>,
+    pub(crate) lazy_viewport_stack: Vec<LazyViewport>,
+}
+
+/// Viewport geometry with the coordinate transform of its scroll content.
+#[derive(Clone, Copy)]
+pub(crate) struct LazyViewport {
+    pub(crate) bounds: kurbo::Rect,
+    pub(crate) transform: kurbo::Affine,
 }
 
 impl LazyState {
@@ -97,9 +104,9 @@ pub(crate) fn place_lazy_stack_item(
     axis_config: &LazyStackAxisConfig,
     stretch_axis: StretchAxis,
     size: waterui_core::layout::Size,
-    bounds: vello::kurbo::Rect,
+    bounds: kurbo::Rect,
     cursor: f64,
-) -> vello::kurbo::Rect {
+) -> kurbo::Rect {
     match axis_config {
         LazyStackAxisConfig::Vertical { alignment, .. } => {
             assert!(
@@ -126,12 +133,12 @@ pub(crate) fn place_lazy_stack_item(
             } else {
                 bounds.x0 + (bounds.width() - child_width) / 2.0
             };
-            let x = if axis_config.direction().get().is_right_to_left() {
+            let x = if axis_config.direction().snapshot().is_right_to_left() {
                 bounds.x0 + bounds.x1 - logical_x - child_width
             } else {
                 logical_x
             };
-            vello::kurbo::Rect::new(x, cursor, x + child_width, cursor + child_height)
+            kurbo::Rect::new(x, cursor, x + child_width, cursor + child_height)
         }
         LazyStackAxisConfig::Horizontal { alignment, .. } => {
             assert!(
@@ -158,12 +165,12 @@ pub(crate) fn place_lazy_stack_item(
             } else {
                 bounds.y0 + (bounds.height() - child_height) / 2.0
             };
-            let x = if axis_config.direction().get().is_right_to_left() {
+            let x = if axis_config.direction().snapshot().is_right_to_left() {
                 bounds.x0 + bounds.x1 - cursor - child_width
             } else {
                 cursor
             };
-            vello::kurbo::Rect::new(x, y, x + child_width, y + child_height)
+            kurbo::Rect::new(x, y, x + child_width, y + child_height)
         }
     }
 }
@@ -198,8 +205,8 @@ impl VirtualExtentIndex {
         self.estimate = estimate;
         self.spacing = spacing;
         let estimated_stride = estimate + spacing;
-        for index in 1..=count {
-            self.fenwick[index] = estimated_stride * (index & index.wrapping_neg()) as f64;
+        for (index, slot) in self.fenwick.iter_mut().enumerate().take(count + 1).skip(1) {
+            *slot = estimated_stride * (index & index.wrapping_neg()) as f64;
         }
     }
 
@@ -440,11 +447,11 @@ mod tests {
             &axis,
             StretchAxis::None,
             Size::new(20.0, 10.0),
-            vello::kurbo::Rect::new(0.0, 0.0, 100.0, 100.0),
+            kurbo::Rect::new(0.0, 0.0, 100.0, 100.0),
             8.0,
         );
 
-        assert_eq!(rect, vello::kurbo::Rect::new(80.0, 8.0, 100.0, 18.0));
+        assert_eq!(rect, kurbo::Rect::new(80.0, 8.0, 100.0, 18.0));
     }
 
     #[test]
@@ -459,10 +466,10 @@ mod tests {
             &axis,
             StretchAxis::None,
             Size::new(20.0, 10.0),
-            vello::kurbo::Rect::new(0.0, 0.0, 100.0, 100.0),
+            kurbo::Rect::new(0.0, 0.0, 100.0, 100.0),
             0.0,
         );
 
-        assert_eq!(rect, vello::kurbo::Rect::new(80.0, 0.0, 100.0, 10.0));
+        assert_eq!(rect, kurbo::Rect::new(80.0, 0.0, 100.0, 10.0));
     }
 }

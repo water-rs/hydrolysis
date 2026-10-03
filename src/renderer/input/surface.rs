@@ -2,9 +2,12 @@
 //!
 //! An embedded surface is a rectangle of the window that draws its own
 //! interactive content and therefore owns the input landing on it: a browser
-//! engine, or any [`GpuSurface`](waterui_graphics::GpuSurface) whose view asks
-//! for input with
-//! [`wants_input_events`](waterui_graphics::GpuView::wants_input_events).
+//! engine, any [`GpuContentView`](waterui_graphics::GpuContentView) whose
+//! view asks for input with
+//! [`wants_input_events`](waterui_graphics::GpuContentView::wants_input_events),
+//! or any [`SceneView`](waterui_graphics::SceneView) whose content asks the same
+//! through
+//! [`SceneContent::wants_input_events`](waterui_graphics::SceneContent::wants_input_events).
 //!
 //! There is one target list, one hit-test arbitration and one focus/capture
 //! state machine for both, reached through [`EmbeddedInputSink`], and one
@@ -15,8 +18,11 @@
 //! their own input ABIs — so the renderer knows nothing about any of them.
 
 use super::*;
-use crate::renderer::render::EmbeddedGpuSurfaceRuntime;
-use waterui_graphics::input::{Code, Key, ScrollUnit, SurfaceInputEvent, SurfacePointerButton};
+use crate::gpu_view::GpuContentRuntime;
+use waterui_graphics::SceneContent;
+use waterui_graphics::input::{
+    Code, Key, NamedKey, ScrollUnit, SurfaceInputEvent, SurfacePointerButton,
+};
 
 /// One key transition, in the W3C UI Events vocabulary.
 pub(crate) struct KeyDelivery<'a> {
@@ -44,11 +50,11 @@ pub(crate) trait EmbeddedInputSink {
     fn identity(&self) -> *const ();
     fn set_focus(&self, focused: bool);
     fn set_modifiers(&self, modifiers: Modifiers);
-    fn pointer_move(&self, position: vello::kurbo::Point);
-    fn pointer_button(&self, pressed: bool, button: PointerButton, position: vello::kurbo::Point);
+    fn pointer_move(&self, position: kurbo::Point);
+    fn pointer_button(&self, pressed: bool, button: PointerButton, position: kurbo::Point);
     fn scroll(
         &self,
-        position: vello::kurbo::Point,
+        position: kurbo::Point,
         delta_x: f32,
         delta_y: f32,
         unit: ScrollUnit,
@@ -62,20 +68,41 @@ pub(crate) trait EmbeddedInputSink {
     fn composition_cancel(&self);
     /// The surface's own text caret, in logical surface-local coordinates, for
     /// placing the platform's input-method candidate window.
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect>;
+    fn ime_caret(&self) -> Option<kurbo::Rect>;
 }
 
 #[derive(Clone)]
 pub(crate) struct EmbeddedInputTarget {
-    pub(crate) local_bounds: vello::kurbo::Rect,
-    pub(crate) inverse_transform: vello::kurbo::Affine,
+    /// The surface owner's interaction identity — what keyboard focus and a
+    /// `.focused(binding)` write address the surface by.
+    pub(crate) interaction_key: InteractionKey,
+    pub(crate) local_bounds: kurbo::Rect,
+    /// The paint clip enclosing the surface when it flushed, in window
+    /// hit-test space — a surface straddling a scroll viewport only takes
+    /// input where it is painted (water-rs/hydrolysis#252).
+    pub(crate) hit_clip: Option<kurbo::Rect>,
+    pub(crate) inverse_transform: kurbo::Affine,
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) sink: Rc<dyn EmbeddedInputSink>,
+    /// The `OnKeyPress` scopes enclosing the view this target was registered
+    /// from, innermost first — the chain an unconsumed key bubbles through
+    /// while this surface holds keyboard focus.
+    pub(crate) key_handlers: Option<Rc<KeyHandlerNode>>,
+    /// Written by `.focused(binding)` when it wraps this surface.
+    pub(crate) focus_binding: Option<Binding<bool>>,
+    /// The node the surface emits for the semantic tree. Keyboard traversal
+    /// reaches the surface through it, and an assistive `Focus` request on it
+    /// resolves back to the surface's interaction identity.
+    #[cfg(feature = "accessibility")]
+    pub(crate) accessibility_node_id: Option<AccessibilityNodeId>,
 }
 
 impl EmbeddedInputTarget {
-    pub(crate) fn local_position(&self, point: vello::kurbo::Point) -> Option<vello::kurbo::Point> {
+    pub(crate) fn local_position(&self, point: kurbo::Point) -> Option<kurbo::Point> {
+        if self.hit_clip.is_some_and(|clip| !clip.contains(point)) {
+            return None;
+        }
         self.local_bounds
             .contains(self.inverse_transform * point)
             .then(|| self.local_position_unclamped(point))
@@ -84,41 +111,78 @@ impl EmbeddedInputTarget {
     /// The surface-local position of a window point, whether or not it is
     /// inside the surface. Used while this target holds the pointer capture, a
     /// drag that has left the surface still being the surface's drag.
-    pub(crate) fn local_position_unclamped(
-        &self,
-        point: vello::kurbo::Point,
-    ) -> vello::kurbo::Point {
+    pub(crate) fn local_position_unclamped(&self, point: kurbo::Point) -> kurbo::Point {
         let local = self.inverse_transform * point;
-        vello::kurbo::Point::new(
+        kurbo::Point::new(
             local.x - self.local_bounds.x0,
             local.y - self.local_bounds.y0,
         )
     }
 
     /// Maps a surface-local rect back into window hit-test space.
-    pub(crate) fn to_window_rect(&self, local: vello::kurbo::Rect) -> vello::kurbo::Rect {
+    pub(crate) fn to_window_rect(&self, local: kurbo::Rect) -> kurbo::Rect {
         self.inverse_transform.inverse().transform_rect_bbox(
-            local + vello::kurbo::Vec2::new(self.local_bounds.x0, self.local_bounds.y0),
+            local + kurbo::Vec2::new(self.local_bounds.x0, self.local_bounds.y0),
         )
     }
 }
 
-/// Bridges an embedded [`GpuSurface`](waterui_graphics::GpuSurface) runtime to
-/// the neutral [`SurfaceInputEvent`] vocabulary.
-///
-/// Constructed fresh on every registration; [`Self::identity`] reports the
-/// runtime it drives, which outlives the frame.
-pub(crate) struct GpuSurfaceInputSink {
-    runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
+/// An embedded surface that took a bubbled key press — the matching release
+/// belongs to it, not to whichever sink holds keyboard focus.
+pub(crate) struct BubbledKeySink {
+    pub(crate) logical: Key,
+    pub(crate) code: Code,
+    pub(crate) modifiers: Modifiers,
+    pub(crate) sink: Rc<dyn EmbeddedInputSink>,
 }
 
-impl GpuSurfaceInputSink {
-    pub(crate) const fn new(runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>) -> Self {
-        Self { runtime }
+/// Something that consumes the neutral [`SurfaceInputEvent`] vocabulary: the
+/// runtime of an embedded [`GpuContentView`](waterui_graphics::GpuContentView),
+/// or the content of a self-drawn [`SceneView`](waterui_graphics::SceneView).
+pub(crate) trait SurfaceInputReceiver {
+    fn input(&mut self, event: &SurfaceInputEvent);
+    /// The receiver's text caret, in logical surface-local coordinates.
+    fn ime_caret(&self) -> Option<kurbo::Rect>;
+}
+
+impl SurfaceInputReceiver for GpuContentRuntime {
+    fn input(&mut self, event: &SurfaceInputEvent) {
+        self.view.input(event);
+    }
+
+    fn ime_caret(&self) -> Option<kurbo::Rect> {
+        self.view.ime_caret()
+    }
+}
+
+/// Scene content redraws through the invalidator it was handed at build time,
+/// so delivering an event requests no frame here: content whose drawing the
+/// event changed calls that invalidator itself.
+impl SurfaceInputReceiver for Box<dyn SceneContent> {
+    fn input(&mut self, event: &SurfaceInputEvent) {
+        SceneContent::input(&mut **self, event);
+    }
+
+    fn ime_caret(&self) -> Option<kurbo::Rect> {
+        SceneContent::ime_caret(&**self)
+    }
+}
+
+/// Bridges a [`SurfaceInputReceiver`] to the renderer's embedded input routing.
+///
+/// Constructed fresh on every registration; [`Self::identity`] reports the
+/// receiver it drives, which outlives the frame.
+pub(crate) struct SurfaceInputSink<R> {
+    receiver: Rc<RefCell<R>>,
+}
+
+impl<R: SurfaceInputReceiver> SurfaceInputSink<R> {
+    pub(crate) const fn new(receiver: Rc<RefCell<R>>) -> Self {
+        Self { receiver }
     }
 
     fn send(&self, event: &SurfaceInputEvent) {
-        self.runtime.borrow_mut().input(event);
+        self.receiver.borrow_mut().input(event);
     }
 }
 
@@ -136,9 +200,9 @@ fn surface_pointer_button(button: PointerButton) -> Option<SurfacePointerButton>
     }
 }
 
-impl EmbeddedInputSink for GpuSurfaceInputSink {
+impl<R: SurfaceInputReceiver> EmbeddedInputSink for SurfaceInputSink<R> {
     fn identity(&self) -> *const () {
-        Rc::as_ptr(&self.runtime).cast()
+        Rc::as_ptr(&self.receiver).cast()
     }
 
     fn set_focus(&self, focused: bool) {
@@ -149,11 +213,11 @@ impl EmbeddedInputSink for GpuSurfaceInputSink {
         self.send(&SurfaceInputEvent::Modifiers(modifiers.into()));
     }
 
-    fn pointer_move(&self, position: vello::kurbo::Point) {
+    fn pointer_move(&self, position: kurbo::Point) {
         self.send(&SurfaceInputEvent::PointerMove { position });
     }
 
-    fn pointer_button(&self, pressed: bool, button: PointerButton, position: vello::kurbo::Point) {
+    fn pointer_button(&self, pressed: bool, button: PointerButton, position: kurbo::Point) {
         let Some(button) = surface_pointer_button(button) else {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
@@ -171,7 +235,7 @@ impl EmbeddedInputSink for GpuSurfaceInputSink {
 
     fn scroll(
         &self,
-        position: vello::kurbo::Point,
+        position: kurbo::Point,
         delta_x: f32,
         delta_y: f32,
         unit: ScrollUnit,
@@ -221,23 +285,30 @@ impl EmbeddedInputSink for GpuSurfaceInputSink {
         self.send(&SurfaceInputEvent::CompositionCancel);
     }
 
-    fn ime_caret(&self) -> Option<vello::kurbo::Rect> {
-        self.runtime.borrow().ime_caret()
+    fn ime_caret(&self) -> Option<kurbo::Rect> {
+        self.receiver.borrow().ime_caret()
     }
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     /// Registers an embedded input target at a laid-out surface's bounds.
     ///
     /// `transform` maps `local_bounds` into window hit-test space, which is
     /// already logical: the projection back through its inverse is exactly the
     /// logical surface-local position the sink is contracted to receive, with
     /// no display-scale division anywhere on the path.
+    ///
+    /// `interaction_key` is the surface owner's interaction identity — what
+    /// keyboard focus and a `.focused(binding)` write address the surface by.
+    /// `accessibility_node_id` is the surface's semantic node, when the
+    /// semantic tree exists.
     pub(crate) fn register_embedded_input_target(
         &mut self,
-        local_bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
+        local_bounds: kurbo::Rect,
+        transform: kurbo::Affine,
         sink: Rc<dyn EmbeddedInputSink>,
+        interaction_key: InteractionKey,
+        #[cfg(feature = "accessibility")] accessibility_node_id: Option<AccessibilityNodeId>,
     ) {
         if self.hit_test.hit_test_opacity <= HIT_TEST_ALPHA_THRESHOLD {
             return;
@@ -255,36 +326,52 @@ impl HydrolysisRenderer {
             order,
             "registered an embedded surface input target"
         );
+        let key_handlers = self.snapshot_key_handlers();
         self.hit_test
             .embedded_input_targets
             .push(EmbeddedInputTarget {
+                interaction_key,
                 local_bounds,
+                hit_clip: self.hit_test.hit_clip_stack.last().copied(),
                 inverse_transform: transform.inverse(),
                 depth: self.render_depth,
                 order,
                 sink,
+                key_handlers,
+                focus_binding: None,
+                #[cfg(feature = "accessibility")]
+                accessibility_node_id,
             });
     }
 
-    /// Registers an embedded [`GpuSurface`](waterui_graphics::GpuSurface)
-    /// runtime whose view asked for input.
-    pub(crate) fn register_gpu_surface_input_target(
+    /// Registers a surface whose drawing asked for input: an embedded
+    /// [`GpuContentView`](waterui_graphics::GpuContentView) runtime or a
+    /// [`SceneView`](waterui_graphics::SceneView)'s content.
+    ///
+    /// `focus_node` is the surface's semantic node, when the semantic tree
+    /// exists.
+    pub(crate) fn register_surface_input_target<R: SurfaceInputReceiver + 'static>(
         &mut self,
-        local_bounds: vello::kurbo::Rect,
-        transform: vello::kurbo::Affine,
-        runtime: Rc<RefCell<EmbeddedGpuSurfaceRuntime>>,
+        local_bounds: kurbo::Rect,
+        transform: kurbo::Affine,
+        receiver: Rc<RefCell<R>>,
+        #[cfg(feature = "accessibility")] focus_node: Option<AccessibilityNodeId>,
     ) {
+        let interaction_key = InteractionKey::for_rc(&receiver, 0);
         self.register_embedded_input_target(
             local_bounds,
             transform,
-            Rc::new(GpuSurfaceInputSink::new(runtime)),
+            Rc::new(SurfaceInputSink::new(receiver)),
+            interaction_key,
+            #[cfg(feature = "accessibility")]
+            focus_node,
         );
     }
 
-    fn topmost_embedded_target_at(
+    pub(super) fn topmost_embedded_target_at(
         &self,
-        point: vello::kurbo::Point,
-    ) -> Option<(usize, vello::kurbo::Point)> {
+        point: kurbo::Point,
+    ) -> Option<(usize, kurbo::Point)> {
         self.hit_test
             .embedded_input_targets
             .iter()
@@ -305,10 +392,10 @@ impl HydrolysisRenderer {
 
     pub(super) fn embedded_target_wins_at(
         &self,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         pointer_priority: Option<(usize, usize, usize)>,
         text_priority: Option<(usize, usize, usize)>,
-    ) -> Option<(EmbeddedInputTarget, vello::kurbo::Point)> {
+    ) -> Option<(usize, EmbeddedInputTarget, kurbo::Point)> {
         let (index, position) = self.topmost_embedded_target_at(point)?;
         let target = &self.hit_test.embedded_input_targets[index];
         let embedded_priority = Self::target_hit_priority(target.depth, target.order, index);
@@ -317,15 +404,26 @@ impl HydrolysisRenderer {
         {
             return None;
         }
-        Some((target.clone(), position))
+        Some((index, target.clone(), position))
     }
 
-    pub(crate) fn handle_embedded_pointer_move(&mut self, point: vello::kurbo::Point) -> bool {
+    pub(crate) fn handle_embedded_pointer_move(&mut self, point: kurbo::Point) -> bool {
         if let Some(target) = self.hit_test.active_embedded_target.as_ref() {
             target
                 .sink
                 .pointer_move(target.local_position_unclamped(point));
             return true;
+        }
+        // Pointer-capture semantics: a press that landed on a gesture
+        // recognizer, a `captures_drag` target, or a text-selection drag owns
+        // the sequence until release — surfaces it crosses see none of its
+        // moves. A surface that took the press itself keeps its own capture
+        // through `active_embedded_target` above.
+        if self.gesture_engine.has_active_recognizer()
+            || self.hit_test.active_pointer_drag_target.is_some()
+            || self.text_editing.selection_drag_index().is_some()
+        {
+            return false;
         }
         let pointer_priority = self
             .hit_test
@@ -339,7 +437,7 @@ impl HydrolysisRenderer {
             let target = &self.text_editing.text_input_targets[index];
             Self::target_hit_priority(target.depth, target.order, index)
         });
-        let Some((target, position)) =
+        let Some((_, target, position)) =
             self.embedded_target_wins_at(point, pointer_priority, text_priority)
         else {
             return false;
@@ -348,24 +446,35 @@ impl HydrolysisRenderer {
         true
     }
 
-    pub(crate) fn handle_embedded_scroll(
-        &mut self,
-        point: vello::kurbo::Point,
-        delta_x: f32,
-        delta_y: f32,
-        unit: ScrollUnit,
-        finished: bool,
-    ) -> bool {
-        let Some((index, position)) = self.topmost_embedded_target_at(point) else {
+    /// Delivers the release of a key whose press bubbled into an embedded
+    /// surface back to that same surface — the focused sink never saw the
+    /// press, so it must not see the release either.
+    pub(crate) fn handle_bubbled_key_release(&mut self, delivery: &KeyDelivery<'_>) -> bool {
+        if delivery.pressed {
+            return false;
+        }
+        let Some(index) =
+            self.hit_test.bubbled_key_sinks.iter().position(|entry| {
+                entry.code == delivery.code && entry.logical == *delivery.logical
+            })
+        else {
             return false;
         };
-        self.hit_test.embedded_input_targets[index]
-            .sink
-            .scroll(position, delta_x, delta_y, unit, finished);
+        self.hit_test.bubbled_key_sinks[index].sink.key(delivery);
+        self.hit_test.bubbled_key_sinks.remove(index);
         true
     }
 
     pub(crate) fn handle_embedded_key(&mut self, delivery: &KeyDelivery<'_>) -> bool {
+        // GTK's text-view convention: while a surface holds keyboard focus,
+        // Tab and Shift-Tab are surface input like any other key — a
+        // terminal needs them for completion and backtab. Ctrl+Tab and
+        // Ctrl+Shift+Tab are the way out: the surface never sees them, the
+        // traversal gate takes them, and the move sends the surface its
+        // `Focus(false)` exactly as it does for any other focused control.
+        if matches!(delivery.logical, Key::Named(NamedKey::Tab)) && delivery.modifiers.control {
+            return false;
+        }
         let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() else {
             return false;
         };
@@ -435,9 +544,104 @@ impl HydrolysisRenderer {
     }
 
     pub(crate) fn update_embedded_modifiers(&mut self, modifiers: Modifiers) {
+        self.hit_test.modifiers = modifiers;
         if let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() {
             sink.set_modifiers(modifiers);
         }
+    }
+
+    /// The window itself gained or lost focus.
+    ///
+    /// Blur is not a focus move: the sink holding keyboard focus keeps it —
+    /// as platforms keep the focused element of an inactive window — and is
+    /// only told focus left (`Focus(false)`), hearing it return
+    /// (`Focus(true)`) on the refocus, which is what a terminal's focus
+    /// reporting (DECSET 1004) needs. Element-focus moves made while the
+    /// window is blurred emit no Focus events at all — both surfaces stay
+    /// reportably unfocused — so the holder hears a single `Focus(true)` on
+    /// the refocus.
+    pub(crate) fn handle_window_focused(&mut self, focused: bool) -> bool {
+        if self.hit_test.window_blurred == !focused {
+            return false;
+        }
+        self.hit_test.window_blurred = !focused;
+        let Some(sink) = self.hit_test.focused_embedded_sink.as_ref() else {
+            return false;
+        };
+        sink.set_focus(focused);
+        true
+    }
+
+    /// The embedded-input target registered for the surface owner behind
+    /// `key`, if the surface is still mounted.
+    pub(crate) fn embedded_index_for_key(&self, key: &InteractionKey) -> Option<usize> {
+        self.hit_test
+            .embedded_input_targets
+            .iter()
+            .position(|target| &target.interaction_key == key)
+    }
+
+    /// The embedded-input target behind the semantic node the surface
+    /// emitted, when the tree walks it.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn embedded_index_for_node(&self, node: AccessibilityNodeId) -> Option<usize> {
+        self.hit_test
+            .embedded_input_targets
+            .iter()
+            .position(|target| target.accessibility_node_id == Some(node))
+    }
+
+    /// Whether the surface owner behind `key` holds embedded focus.
+    pub(crate) fn is_focused_embedded(&self, key: &InteractionKey) -> bool {
+        self.hit_test.focused_embedded_key.as_ref() == Some(key)
+    }
+
+    /// Moves embedded focus to the surface owner `key` names — the
+    /// programmatic half of the shared focus model, reached by
+    /// `.focused(binding)` writes and the keyboard traversal alike.
+    ///
+    /// Taking focus: the surface takes semantic focus with it, its sink
+    /// receives `Focus(true)`, and editing on any text field ends — the same
+    /// rule a pointer press on the surface follows. Releasing it drops
+    /// semantic focus only while it still rests on that surface, then sends
+    /// `Focus(false)`.
+    pub(crate) fn set_focused_embedded_key(&mut self, focused: Option<InteractionKey>) -> bool {
+        let previous = self.hit_test.focused_embedded_key.clone();
+        if previous == focused {
+            return false;
+        }
+        let index = focused
+            .as_ref()
+            .and_then(|key| self.embedded_index_for_key(key));
+        let mut changed = false;
+        match focused.as_ref() {
+            Some(key) => {
+                #[cfg(feature = "accessibility")]
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    #[cfg(feature = "accessibility")]
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+                changed |= self.hit_test.set_embedded_focus_index(index);
+                // Landing on a surface ends text editing exactly as a
+                // pointer press on one does (#95's rule).
+                changed |= self.set_focused_text_input(None);
+            }
+            None => {
+                if self.hit_test.keyboard_focus == previous {
+                    changed |= self.set_keyboard_focus_impl(
+                        None,
+                        #[cfg(feature = "accessibility")]
+                        None,
+                        false,
+                    );
+                }
+                changed |= self.hit_test.set_embedded_focus_index(None);
+            }
+        }
+        changed
     }
 
     /// The focused embedded surface's caret, in window hit-test space.
@@ -445,7 +649,7 @@ impl HydrolysisRenderer {
     /// The surface reports it in its own logical coordinates; its live target
     /// supplies the transform, so a surface that has moved since it was
     /// focused still places the candidate window correctly.
-    pub(crate) fn focused_embedded_ime_caret(&self) -> Option<vello::kurbo::Rect> {
+    pub(crate) fn focused_embedded_ime_caret(&self) -> Option<kurbo::Rect> {
         let sink = self.hit_test.focused_embedded_sink.as_ref()?;
         let caret = sink.ime_caret()?;
         let target = self

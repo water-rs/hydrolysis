@@ -2,50 +2,7 @@
 //! scene rebuild/refresh/render phases, and input-event dispatch.
 
 use super::*;
-
-#[cfg(feature = "winit")]
-#[cfg(not(target_os = "linux"))]
-pub(super) fn probe_accessibility_runtime() -> bool {
-    true
-}
-
-#[cfg(feature = "winit")]
-#[cfg(target_os = "linux")]
-pub(super) fn probe_accessibility_runtime() -> bool {
-    let output = Command::new("busctl")
-        .args([
-            "--user",
-            "get-property",
-            "org.a11y.Bus",
-            "/org/a11y/bus",
-            "org.a11y.Status",
-            "ScreenReaderEnabled",
-        ])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => true,
-        Ok(output) => {
-            let stderr = str::from_utf8(&output.stderr)
-                .map(str::trim)
-                .unwrap_or("<non-utf8 stderr>");
-            tracing::warn!(
-                target: "waterui::hydrolysis::a11y",
-                status = %output.status,
-                stderr,
-                "disabling accesskit adapter: org.a11y.Bus probe failed"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "waterui::hydrolysis::a11y",
-                error = %error,
-                "disabling accesskit adapter: failed to execute busctl probe"
-            );
-            false
-        }
-    }
-}
+use crate::platform::GpuSurfaceWindow;
 
 /// The work scheduled for the next pump of a window.
 ///
@@ -60,11 +17,22 @@ pub(super) enum FrameMode {
     /// Refresh the retained window tree on the next pump (building it first if this
     /// renderer has not built it yet).
     Refresh,
+    /// Re-sample animated scalars on the next pump: the same full refresh pass
+    /// as `Refresh`, but scheduled by the animation tick itself, so it marks
+    /// the app busy rather than stale — the tree last emitted is current.
+    Animate,
 }
 
 impl FrameMode {
     pub(super) const fn is_pending(self) -> bool {
         !matches!(self, FrameMode::Idle)
+    }
+
+    /// Whether the scheduled frame exists to apply an unapplied semantic
+    /// change. `Animate` is scheduled continuation work, not staleness.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn is_unapplied_change(self) -> bool {
+        matches!(self, FrameMode::Refresh)
     }
 }
 
@@ -73,14 +41,35 @@ pub(super) struct RuntimeWindow<P: PlatformWindow> {
     pub(super) platform: P,
     pub(super) renderer: HydrolysisRenderer,
     pub(super) mode: FrameMode,
+    /// The pump is parked: the host reports the window cannot be seen
+    /// (minimized, occluded, backgrounded or surface-less). While parked no
+    /// frame is produced and no wake is posted — armed work stays armed for
+    /// the frame `set_hidden(false)` schedules when visibility returns.
+    pub(super) hidden: bool,
+    /// Frames this window has presented, counted for the debug-level
+    /// `frame presented` log a hidden-window verification reads: while the
+    /// pump is parked that line must go quiet.
+    pub(super) presented_frames: u64,
     pub(super) pointer_position: Option<(f32, f32)>,
     pub(super) render_diagnostics: RenderDiagnostics,
     /// Last display refresh rate (Hz) observed from the platform, used to detect changes
     /// and re-derive the diagnostics frame budget. `None` until first observed.
     pub(super) refresh_rate_hz: Option<f64>,
+    /// The (min, max) inner-size limits most recently pushed to the platform
+    /// window. Only a change in them may move the window — an unchanged
+    /// re-measure leaves the user's size untouched — so `None` until the
+    /// first apply has run.
+    pub(super) applied_size_limits: Option<(
+        Option<waterui_core::layout::Size>,
+        Option<waterui_core::layout::Size>,
+    )>,
 }
 
-impl<P: PlatformWindow> RuntimeWindow<P> {
+// `RuntimeWindow` is generic over the host-services contract; the GPU
+// painter's presentation attachment is the `GpuSurfaceWindow` refinement
+// below, so the construction site of a GPU-pumped window is a
+// compile-time painter boundary.
+impl<P: GpuSurfaceWindow> RuntimeWindow<P> {
     pub(super) fn new(
         window: Window,
         platform: P,
@@ -95,12 +84,17 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
             platform,
             renderer,
             mode: FrameMode::Refresh,
+            hidden: false,
+            presented_frames: 0,
             pointer_position: None,
             render_diagnostics: RenderDiagnostics::new(render_diagnostics_config),
             refresh_rate_hz: None,
+            applied_size_limits: None,
         }
     }
+}
 
+impl<P: PlatformWindow> RuntimeWindow<P> {
     /// Schedules a refresh of the retained window tree on the next pump (the first
     /// pump builds the tree).
     pub(super) fn request_refresh(&mut self) {
@@ -110,17 +104,93 @@ impl<P: PlatformWindow> RuntimeWindow<P> {
     pub(super) fn clear_frame_mode(&mut self) {
         self.mode = FrameMode::Idle;
     }
+
+    /// Whether the pump is parked — the host reports the window cannot be
+    /// seen (minimized, occluded, backgrounded or surface-less).
+    ///
+    /// Exercised by the web and Android runners, which gate their frame
+    /// loops on it; feature-gated builds without them keep it for them.
+    #[allow(dead_code)]
+    pub(super) fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// Parks or unparks the pump. Un-hiding arms a refresh — the first
+    /// visible frame is rendered from the current state and time — but
+    /// posts nothing itself: the platform event that carried the
+    /// visibility change wakes the loop, and the mode arm makes
+    /// `advance_runtime` schedule the redraw. Posting one here too would
+    /// double the restore frame on hosts that deliver a platform redraw
+    /// alongside un-hide (X11 `Expose`, macOS `drawRect`, Windows
+    /// `WM_PAINT`).
+    #[allow(dead_code)] // see is_hidden
+    pub(super) fn set_hidden(&mut self, hidden: bool) {
+        if self.hidden == hidden {
+            return;
+        }
+        self.hidden = hidden;
+        tracing::debug!(hidden, "window pump visibility changed");
+        if !hidden {
+            self.request_refresh();
+        }
+    }
+
+    /// Pulls the platform window's occlusion report into the pump state;
+    /// hosts call it after delivering an event that may have moved
+    /// visibility.
+    #[allow(dead_code)] // see is_hidden
+    pub(super) fn sync_occlusion(&mut self) {
+        self.set_hidden(self.platform.is_occluded());
+    }
+
+    /// [`Self::sync_occlusion`] plus the wake the restore frame needs on
+    /// hosts whose frame loop never notices an armed [`FrameMode`] on its
+    /// own: Android's pump is only reached by a Choreographer post, so an
+    /// un-hide there that only armed the mode would leave the last
+    /// presented frame up until the next unrelated wake. Hosts whose
+    /// platform posts its own restore frame (winit desktops: `WM_PAINT`,
+    /// `drawRect`, `Expose`) use [`Self::sync_occlusion`], which arms
+    /// without posting — posting there would double the restore frame.
+    #[allow(dead_code)] // see is_hidden
+    pub(super) fn sync_occlusion_and_post_restore(&mut self) {
+        let was_hidden = self.hidden;
+        self.sync_occlusion();
+        if was_hidden && !self.hidden {
+            self.request_redraw();
+        }
+    }
+
+    /// Posts the host wake the next frame needs. A hidden window posts no
+    /// wakes: the work the wake carried stays armed and applies to the
+    /// frame visibility restores.
+    pub(super) fn request_redraw(&self) {
+        if !self.hidden {
+            self.platform.request_redraw();
+        }
+    }
 }
 
-/// Applies the window's effective content-size limits to the platform window:
-/// the explicit `Window::min_size`/`max_size` signals when set (read through the
-/// renderer so a change schedules a frame), with the content's measured layout
-/// limits as the defaults.
-/// Push this frame's window size limits to the platform window.
+/// Whether a frame transaction may report the pump's "first frame presented;
+/// ui idle" readiness line: it has presented at least once, and this wake
+/// leaves it idle — but never while hidden. A wake that arrives on a parked
+/// pump presents nothing, and a present-named readiness line emitted there
+/// reads as a frame presented while hidden.
+#[allow(dead_code)] // see RuntimeWindow::is_hidden
+pub(super) fn reports_ui_idle(presented_once: bool, wants_next_frame: bool, hidden: bool) -> bool {
+    presented_once && !wants_next_frame && !hidden
+}
+
+/// Applies the window's effective inner-size limits to the platform window:
+/// the explicit `Window::min_size`/`max_size` signals when set (read through
+/// the renderer so a change schedules a frame). The minimum defaults to the
+/// content's measured minimum; the maximum stays unbounded unless the app
+/// pins one — content never contributes one, since content that does not
+/// stretch on an axis is laid out inside a larger offer per the layout spec
+/// rather than capping the window.
 ///
-/// Content-derived limits cost four whole-tree measure passes, so they are only
-/// measured when the answer will be used: never for a window that does not act
-/// on limits at all, and never when the app has pinned both axes explicitly.
+/// The content probe costs a whole-tree measure pass, so it is only taken
+/// when the answer will be used: never for a window that does not act on
+/// limits at all, and never when the app pins the minimum itself.
 pub(super) fn apply_window_size_limits<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
@@ -132,20 +202,86 @@ pub(super) fn apply_window_size_limits<P: PlatformWindow>(
         .window
         .min_size
         .clone()
-        .map(|signal| runtime.renderer.read_signal(&signal));
+        .map(|signal| validated_min_size(runtime.renderer.read_signal(&signal)));
     let explicit_max = runtime
         .window
         .max_size
         .clone()
-        .map(|signal| runtime.renderer.read_signal(&signal));
-    let content_limits = if explicit_min.is_some() && explicit_max.is_some() {
-        None
-    } else {
-        runtime.renderer.measure_content_size_limits(env)
+        .map(|signal| validated_max_size(runtime.renderer.read_signal(&signal)));
+    let min = match explicit_min {
+        Some(min) => Some(min),
+        None => runtime.renderer.measure_content_minimum(env),
     };
-    let min = explicit_min.or_else(|| content_limits.map(|limits| limits.minimum));
-    let max = explicit_max.or_else(|| content_limits.and_then(|limits| limits.maximum));
+    let max = explicit_max;
+    // A limit apply never moves the window onto the content's size — installing
+    // or re-installing limits only constrains the sizes it can take. The size
+    // the user settled on survives a re-measure: the window is clamped into
+    // the new limits only when the applied limits themselves changed, and only
+    // on the axes that fell outside them. The first apply installs limits on
+    // the geometry the window was created with, untouched.
+    let limits = (min, max);
+    let limits_changed = runtime
+        .applied_size_limits
+        .is_some_and(|applied| applied != limits);
+    runtime.applied_size_limits = Some(limits);
     runtime.platform.set_size_limits(min, max);
+    if limits_changed {
+        let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
+        let clamped = clamp_window_size(*frame.size(), min, max);
+        if clamped != *frame.size() {
+            runtime
+                .window
+                .frame
+                .set(waterui_core::layout::Rect::new(frame.origin(), clamped));
+        }
+    }
+}
+
+/// Asserts an app-pinned `Window::min_size` is finite on both axes — a NaN
+/// or infinite minimum is a programming error, not a bound to repair.
+fn validated_min_size(size: waterui_core::layout::Size) -> waterui_core::layout::Size {
+    for (axis, value) in [("width", size.width), ("height", size.height)] {
+        assert!(
+            value.is_finite(),
+            "hydrolysis runner: Window::min_size.{axis} must be finite, got {value}"
+        );
+    }
+    size
+}
+
+/// Asserts an app-pinned `Window::max_size` component is finite or `+∞` —
+/// the explicit per-axis "unbounded" an app writes to leave one side open.
+/// Any other non-finite value is a programming error.
+fn validated_max_size(size: waterui_core::layout::Size) -> waterui_core::layout::Size {
+    for (axis, value) in [("width", size.width), ("height", size.height)] {
+        assert!(
+            value.is_finite() || value == f32::INFINITY,
+            "hydrolysis runner: Window::max_size.{axis} must be finite or +inf for an unbounded axis, got {value}"
+        );
+    }
+    size
+}
+
+/// Clamps a window size into the new limits, axis by axis. A size already
+/// inside the limits passes through untouched — a re-measure keeps the size
+/// the user set — and only an out-of-bounds axis moves, to the nearer bound.
+pub(super) fn clamp_window_size(
+    size: waterui_core::layout::Size,
+    min: Option<waterui_core::layout::Size>,
+    max: Option<waterui_core::layout::Size>,
+) -> waterui_core::layout::Size {
+    waterui_core::layout::Size::new(
+        clamp_axis(size.width, min.map(|s| s.width), max.map(|s| s.width)),
+        clamp_axis(size.height, min.map(|s| s.height), max.map(|s| s.height)),
+    )
+}
+
+/// Every input is already validated by then: a `+∞` max component is the
+/// app's explicit per-axis unbounded, passing through as the high bound and
+/// leaving the axis uncapped.
+fn clamp_axis(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let lo = min.unwrap_or(0.0);
+    value.clamp(lo, max.unwrap_or(f32::INFINITY).max(lo))
 }
 
 pub(super) fn schedule_animation_update<P: PlatformWindow>(
@@ -156,8 +292,13 @@ pub(super) fn schedule_animation_update<P: PlatformWindow>(
         return;
     }
     // Every animated scalar is re-sampled in the render tree's node flush; the
-    // tick schedules a full frame like every other content change.
-    runtime.request_refresh();
+    // tick schedules a full frame like every other content change. It is
+    // scheduled as `Animate` rather than `Refresh`: the frame continues work
+    // already in flight, so it must not read as an unapplied semantic update.
+    // A `Refresh` already armed by a patch or rebuild is never downgraded.
+    if matches!(runtime.mode, FrameMode::Idle) {
+        runtime.mode = FrameMode::Animate;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +313,9 @@ pub(super) struct RenderWindowResult {
     pub(super) rebuilt: bool,
     pub(super) snapshot: Option<HeadlessSnapshot>,
     pub(super) profile: FrameProfile,
+    /// The frame's CPU/GPU stage split under `frame-profile`.
+    #[cfg(feature = "frame-profile")]
+    pub(super) stages: crate::renderer::FrameStageTimes,
 }
 
 /// Phase timing for one Hydrolysis frame.
@@ -212,29 +356,33 @@ pub struct FrameCounters {
     pub measurement_cache_misses: u32,
     /// Number of compositor layers submitted for this frame.
     pub scene_layers: u32,
-    /// Number of Vello scene layers submitted for this frame.
-    pub vello_scene_layers: u32,
-    /// Number of embedded GPU surface layers submitted for this frame.
-    pub gpu_surface_layers: u32,
-    /// Number of GPU surfaces that rendered straight into the window's own
-    /// target this frame, skipping the offscreen intermediate and the
-    /// compositor pass. At most one: the path exists only for a surface that is
-    /// the window's whole content.
-    pub direct_gpu_surfaces: u32,
-    /// Number of Vello clip layers pushed while building this frame.
+    /// Number of recorded scene segment layers submitted for this frame.
+    pub scene_segment_layers: u32,
+    /// Number of mounted `GpuContentView` layers submitted for this frame.
+    pub gpu_content_layers: u32,
+    /// Number of clip scopes pushed while building this frame.
     pub clip_layers: u32,
-    /// Maximum nested Vello clip depth while building this frame.
+    /// Maximum nested clip depth while building this frame.
     pub max_clip_depth: u32,
-    /// Number of AppliedFilter nodes dispatched in this frame.
+    /// Number of `FilteredView` mounts submitted in this frame.
+    pub filtered_layers: u32,
+    /// Filter effects that encoded in this frame.
     pub applied_filter_count: u32,
-    /// Time spent capturing AppliedFilter input subtrees, in microseconds.
+    /// Filtered-subtree capture time in this frame, in microseconds: `0` —
+    /// the engine captures inside the same render pass as the effect encode
+    /// and reports no per-phase split.
     pub applied_filter_capture_us: u64,
-    /// Time spent running AppliedFilter GPU effects, in microseconds.
+    /// Filter effect encode time in this frame, in microseconds.
     pub applied_filter_effect_us: u64,
     /// Whether this frame rendered to the target.
     pub rendered: bool,
     /// Whether this frame captured a CPU snapshot.
     pub captured_snapshot: bool,
+    /// Per-frame work counters for this frame (water-rs/hydrolysis#205):
+    /// semantic builds, patches, layout/measure traffic, recorded content and
+    /// GPU submissions — the numbers the fine-grained frame model is measured
+    /// by.
+    pub frame_work: crate::renderer::FrameWorkCounters,
 }
 
 /// Detailed profile for one Hydrolysis frame.
@@ -249,7 +397,6 @@ pub struct FrameProfile {
 }
 
 impl FrameProfile {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn with_total(mut self, total: Duration) -> Self {
         self.total = total;
         self
@@ -270,15 +417,16 @@ pub(super) fn schedule_redraw_or_refresh<P: PlatformWindow>(
     // consume it so it does not schedule a stale extra frame later.
     let _ = runtime.renderer.take_rebuild_request();
     runtime.request_refresh();
-    runtime.platform.request_redraw();
+    runtime.request_redraw();
+    runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
 }
 
-pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> vello::kurbo::Rect {
+pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> kurbo::Rect {
     assert!(
         scale_factor.is_finite() && scale_factor > 0.0,
         "hydrolysis runner: invalid scale factor {scale_factor}"
     );
-    vello::kurbo::Rect::new(
+    kurbo::Rect::new(
         0.0,
         0.0,
         f64::from(width) / scale_factor,
@@ -286,40 +434,63 @@ pub(super) fn create_bounds(width: u32, height: u32, scale_factor: f64) -> vello
     )
 }
 
-pub(super) fn window_clear_color(window: &Window, env: &Environment) -> vello::peniko::Color {
-    match &window.background {
-        WindowBackground::Opaque => {
-            resolve_window_clear_color(Color::new(theme::color::Background), env)
-        }
-        WindowBackground::Color(color) => resolve_window_clear_color(color.clone(), env),
-    }
-}
-
-pub(super) fn resolve_window_clear_color(color: Color, env: &Environment) -> vello::peniko::Color {
-    let resolved = color.resolve(env).get();
-    let srgb = resolved.to_srgb_with_headroom();
-    vello::peniko::Color::new([srgb.red, srgb.green, srgb.blue, resolved.opacity])
-}
-
-#[cfg(feature = "winit")]
-pub(super) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
-    match &window.background {
-        WindowBackground::Opaque => false,
-        WindowBackground::Color(color) => color.resolve(env).get().opacity < 1.0,
-    }
-}
-
-pub(super) fn render_window<P: PlatformWindow>(
+/// Realizes the window's reactive background for the frame about to be
+/// painted: resolves it, hands the platform whether the window must be
+/// transparent — the composite alpha mode and the native window's
+/// transparency follow a switch between opaque and translucent — and returns
+/// the clear colour. This is the one place the background reaches the
+/// presentation path.
+pub(super) fn apply_window_background<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
-    drain_local_tasks: &mut dyn FnMut() -> bool,
-) {
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
-    let result = render_window_with_capture(runtime, env, false, drain_local_tasks);
-    #[cfg(target_arch = "wasm32")]
-    let _ = (result.rebuilt, result.snapshot, result.profile);
+) -> peniko::Color {
+    let resolved = runtime.window.resolved_background(env).snapshot();
+    runtime
+        .platform
+        .set_transparent(resolved.components[3] < 1.0);
+    let srgb = waterui_graphics::color::working::to_srgb(resolved);
+    peniko::Color::new([srgb.red, srgb.green, srgb.blue, resolved.components[3]])
+}
+
+#[cfg(hydrolysis_winit)]
+pub(crate) fn window_requires_transparency(window: &Window, env: &Environment) -> bool {
+    window.resolved_background(env).snapshot().components[3] < 1.0
+}
+
+crate::engine::cfg_async_fn! {
+    /// Runs one frame and reports whether it was presented to the surface — an
+    /// idle frame, or one whose surface had to be reconfigured, is not.
+    ///
+    /// Async on wasm32, where the engine render inside awaits the browser device.
+    pub(super) fn render_window<P: GpuSurfaceWindow>(
+        runtime: &mut RuntimeWindow<P>,
+        env: &Environment,
+        drain_local_tasks: &mut dyn FnMut() -> bool,
+    ) -> bool {
+
+    // A hidden window produces no frame: nothing is encoded, submitted or
+    // presented, and a redraw already in flight when it hid is stale —
+    // dropped here rather than rendered.
+    if runtime.hidden {
+        return false;
+    }
+
+    let result = crate::engine::engine_await!(render_window_with_capture(
+        runtime,
+        env,
+        FrameReader::Display,
+        drain_local_tasks
+    ));
+    // The rebuild flag and the snapshot belong to the headless harness; a live
+    // window only asks whether the frame reached its surface.
+    let _ = (result.rebuilt, result.snapshot);
+    let rendered = result.profile.counters.rendered;
+    if rendered {
+        runtime.presented_frames += 1;
+        tracing::debug!(frames = runtime.presented_frames, "frame presented");
+    }
+    rendered
+    }
 }
 
 pub(super) const fn surface_error_requires_reconfigure(
@@ -357,12 +528,12 @@ fn refresh_window_scene<P: PlatformWindow>(
 ) {
     let refresh_started_at = Instant::now();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height) = runtime.platform.surface().size();
+    let (width, height) = runtime.platform.content_size();
     let bounds = create_bounds(width, height, scale_factor);
-    let transform = vello::kurbo::Affine::scale(scale_factor);
+    let transform = kurbo::Affine::scale(scale_factor);
     runtime
         .renderer
-        .flush_window_tree(env, bounds, transform, vello::kurbo::Affine::IDENTITY);
+        .flush_window_tree(env, bounds, transform, kurbo::Affine::IDENTITY);
     // An in-flight press/drag must follow the re-laid-out widget, and hover must be
     // re-evaluated at the pointer so a reflow that moved a widget under the cursor
     // updates its hover chrome.
@@ -385,8 +556,8 @@ fn refresh_window_scene<P: PlatformWindow>(
 fn build_window_scene<P: PlatformWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
-    bounds: vello::kurbo::Rect,
-    root_transform: vello::kurbo::Affine,
+    bounds: kurbo::Rect,
+    root_transform: kurbo::Affine,
     drain_local_tasks: &mut dyn FnMut() -> bool,
     phases: &mut FramePhases,
 ) {
@@ -402,11 +573,16 @@ fn build_window_scene<P: PlatformWindow>(
         env,
         bounds,
         root_transform,
-        vello::kurbo::Affine::IDENTITY,
+        kurbo::Affine::IDENTITY,
     );
     runtime
         .renderer
         .render_active_text_context_menu_overlay(env, root_transform);
+    // The same for an open `.context_menu` presentation — this one-time build
+    // path is where its sub-views are first built and placed.
+    runtime
+        .renderer
+        .render_context_menu_presentation(root_transform);
     phases.scene_dispatch += scene_dispatch_started_at.elapsed();
     let scene_finish_started_at = Instant::now();
     runtime.renderer.finish_rebuild_frame();
@@ -422,7 +598,7 @@ fn build_window_scene<P: PlatformWindow>(
 ///
 /// Returns whether the tree was built this pump, the number of build passes (0 or 1,
 /// kept for frame diagnostics), and the phase timing breakdown.
-pub(super) fn pump_window_scene<P: PlatformWindow>(
+pub(super) fn pump_window_scene<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
     drain_local_tasks: &mut dyn FnMut() -> bool,
@@ -431,10 +607,7 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     let surface = runtime.platform.surface();
     let (width, height) = surface.size();
     let bounds = create_bounds(width, height, scale_factor);
-    let root_transform = vello::kurbo::Affine::scale(scale_factor);
-    runtime
-        .renderer
-        .set_frame_resources(surface.adapter(), surface.device(), surface.queue());
+    let root_transform = kurbo::Affine::scale(scale_factor);
 
     let pump_started_at = Instant::now();
     let mut phases = FramePhases::default();
@@ -447,10 +620,9 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
     }
 
     let mut built = false;
-    let mut flushed = false;
     match runtime.mode {
         FrameMode::Idle => {}
-        FrameMode::Refresh if !runtime.renderer.has_render_tree() => {
+        FrameMode::Refresh | FrameMode::Animate if !runtime.renderer.has_render_tree() => {
             build_window_scene(
                 runtime,
                 env,
@@ -460,7 +632,6 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
                 &mut phases,
             );
             built = true;
-            flushed = true;
             runtime.clear_frame_mode();
             // Anything the build itself flagged as needing another pass — a hover
             // change under the pointer, a renderer-side structural request raised
@@ -483,47 +654,57 @@ pub(super) fn pump_window_scene<P: PlatformWindow>(
                 refresh_window_scene(runtime, env, &mut phases);
             }
         }
-        FrameMode::Refresh => {
+        FrameMode::Refresh | FrameMode::Animate => {
             refresh_window_scene(runtime, env, &mut phases);
             runtime.clear_frame_mode();
-            flushed = true;
         }
     }
     if runtime.renderer.take_next_frame_rebuild_request() {
         // An effect needs another frame.
         runtime.request_refresh();
-        runtime.platform.request_redraw();
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     } else if runtime.renderer.animations_active() && !runtime.mode.is_pending() {
         schedule_animation_update(runtime, true);
-        runtime.platform.request_redraw();
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
     phases.rebuild = pump_started_at.elapsed();
-    ScenePumpOutcome {
-        built,
-        flushed,
-        phases,
-    }
+    ScenePumpOutcome { built, phases }
 }
 
 /// What one scene pump did: whether the retained tree was built for the first
-/// time, and whether any flush (build, re-encode, or refresh) ran at all this
-/// frame. An idle pump leaves both false.
+/// time. An idle pump leaves it false.
 pub(super) struct ScenePumpOutcome {
     pub(super) built: bool,
-    pub(super) flushed: bool,
     pub(super) phases: FramePhases,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) fn pump_window_semantics<P: PlatformWindow>(
+#[cfg(any(test, all(not(target_arch = "wasm32"), hydrolysis_winit)))]
+pub(super) fn pump_window_semantics<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
+    // `frame`, `state`, `level`, `attention`, `resize_increments` and
+    // `style` drive `apply_properties` below: keep them subscribed so an
+    // app write to any of these bindings schedules a pump instead of
+    // needing an unrelated event to wake the loop.
+    let _ = runtime.renderer.read_signal(&runtime.window.frame);
+    let _ = runtime.renderer.read_signal(&runtime.window.state);
+    let _ = runtime.renderer.read_signal(&runtime.window.level);
+    let _ = runtime.renderer.read_signal(&runtime.window.attention);
+    if let Some(increments) = runtime.window.resize_increments.as_ref() {
+        let _ = runtime.renderer.read_signal(increments);
+    }
+    let _ = runtime.renderer.read_signal(&runtime.window.style);
+    // A replaced background repaints with a new clear colour and may switch
+    // the surface between opaque and translucent.
+    let _ = runtime.renderer.read_signal(&runtime.window.background);
     runtime.platform.apply_properties(&runtime.window);
-    #[cfg(feature = "winit")]
+    #[cfg(hydrolysis_winit)]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
 
     if runtime.renderer.take_rebuild_request() {
         runtime.request_refresh();
@@ -541,15 +722,13 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
     // pump below builds it first.
     if runtime.renderer.has_render_tree() {
         let scale_factor = runtime.platform.scale_factor();
-        let (width, height) = runtime.platform.surface().size();
+        let (width, height) = runtime.platform.content_size();
         let bounds = create_bounds(width, height, scale_factor);
-        let transform = vello::kurbo::Affine::scale(scale_factor);
-        let flushed = runtime.renderer.flush_window_tree(
-            env,
-            bounds,
-            transform,
-            vello::kurbo::Affine::IDENTITY,
-        );
+        let transform = kurbo::Affine::scale(scale_factor);
+        let flushed =
+            runtime
+                .renderer
+                .flush_window_tree(env, bounds, transform, kurbo::Affine::IDENTITY);
         assert!(
             flushed,
             "hydrolysis runner: retained render tree vanished during semantics pump"
@@ -561,7 +740,6 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
 
     let rebuilt = pump_window_scene(runtime, env, &mut || false).built;
     apply_window_size_limits(runtime, env);
-    runtime.renderer.clear_frame_resources();
     runtime
         .platform
         .sync_text_input_state(runtime.renderer.focused_text_input_state());
@@ -571,7 +749,8 @@ pub(super) fn pump_window_semantics<P: PlatformWindow>(
             .set_cursor_style(runtime.renderer.cursor_style_at(x, y));
     }
     if runtime.renderer.take_redraw_request() {
-        runtime.platform.request_redraw();
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
     rebuilt
 }
@@ -583,45 +762,86 @@ struct SurfaceRenderResult {
     snapshot: Option<HeadlessSnapshot>,
 }
 
-fn render_to_surface(
-    renderer: &mut HydrolysisRenderer,
-    surface: &mut dyn crate::platform::SurfaceProvider,
-    clear_color: vello::peniko::Color,
-    capture_snapshot: bool,
-    render: impl FnOnce(&mut HydrolysisRenderer, crate::renderer::HydrolysisRenderTarget<'_>),
-) -> Result<SurfaceRenderResult, crate::platform::SurfaceError> {
+crate::engine::cfg_async_fn! {
+    fn render_to_surface {
+        renderer: &mut HydrolysisRenderer,
+        surface: &mut dyn crate::platform::SurfaceProvider,
+        clear_color: peniko::Color,
+        display_scale: f64,
+        capture_snapshot: bool,
+        render: impl FnOnce(&mut HydrolysisRenderer, crate::renderer::FrameRenderTarget<'_>, bool),
+    } {
+        renderer: &mut HydrolysisRenderer,
+        surface: &mut dyn crate::platform::SurfaceProvider,
+        clear_color: peniko::Color,
+        display_scale: f64,
+        capture_snapshot: bool,
+        render: impl AsyncFnOnce(
+            &mut HydrolysisRenderer,
+            crate::renderer::FrameRenderTarget<'_>,
+            bool,
+        ),
+    } -> Result<SurfaceRenderResult, crate::platform::SurfaceError> {
     let (width, height) = surface.size();
     let format = surface.format();
+    let premultiply_alpha = surface.premultiply_alpha();
+    let context = surface.device_loss().gpu_context();
     let acquire_started_at = Instant::now();
     let frame = acquire_surface_frame(surface)?;
     let acquire = acquire_started_at.elapsed();
     let render_started_at = Instant::now();
-    render(
+    crate::engine::engine_await!(render(
         renderer,
-        crate::renderer::HydrolysisRenderTarget {
+        crate::renderer::FrameRenderTarget {
             adapter: surface.adapter(),
             device: surface.device(),
             queue: surface.queue(),
+            device_loss: surface.device_loss().clone(),
+            gpu_context_id: context.context_id,
+            shared_device: context.shared_device,
+            display_scale,
+            headroom: surface.display_headroom(),
+            persistent: true,
             texture: Some(frame.texture()),
-            view: frame.view(),
             format,
             width,
             height,
-            base_color: clear_color,
+            base_color: crate::renderer::working_color(clear_color),
         },
-    );
+        premultiply_alpha,
+    ));
+    let render = render_started_at.elapsed();
+    #[cfg(feature = "frame-profile")]
+    {
+        // The timestamp resolve blocks until the frame's submits finish — the
+        // headless frame's "present wait", kept separate from the CPU submit
+        // time `render` measures.
+        renderer.finish_gpu_frame_profile(surface.device(), surface.queue());
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    let snapshot = capture_snapshot.then(|| HeadlessSnapshot {
-        width,
-        height,
-        rgba8: readback_texture_rgba8(
-            surface.device(),
-            surface.queue(),
-            frame.texture(),
-            width,
-            height,
-        ),
-    });
+    let snapshot = {
+        #[cfg(feature = "frame-profile")]
+        let readback_started_at = Instant::now();
+        let snapshot = capture_snapshot.then(|| {
+            renderer.frame_work_counters_mut().gpu_submissions += 1;
+            HeadlessSnapshot {
+                width,
+                height,
+                rgba8: readback_texture_rgba8(
+                    surface.device(),
+                    surface.queue(),
+                    frame.texture(),
+                    width,
+                    height,
+                ),
+            }
+        });
+        #[cfg(feature = "frame-profile")]
+        {
+            renderer.frame_stage_times.readback += readback_started_at.elapsed();
+        }
+        snapshot
+    };
     #[cfg(target_arch = "wasm32")]
     let snapshot = {
         assert!(
@@ -630,7 +850,6 @@ fn render_to_surface(
         );
         None
     };
-    let render = render_started_at.elapsed();
     let present_started_at = Instant::now();
     surface.present(frame);
     let present = present_started_at.elapsed();
@@ -640,22 +859,78 @@ fn render_to_surface(
         present,
         snapshot,
     })
+    }
 }
 
-pub(super) fn render_window_with_capture<P: PlatformWindow>(
-    runtime: &mut RuntimeWindow<P>,
-    env: &Environment,
-    capture_snapshot: bool,
-    drain_local_tasks: &mut dyn FnMut() -> bool,
-) -> RenderWindowResult {
+/// Who reads the pixels of a frame `render_window_with_capture` renders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        dead_code,
+        reason = "the browser has no headless runtime, so only `Display` frames exist there"
+    )
+)]
+pub(super) enum FrameReader {
+    /// A live window: the display reads the presented surface.
+    Display,
+    /// A headless capture: the harness reads the surface back as a snapshot.
+    Snapshot,
+    /// A headless pump nobody reads. The frame still pumps the scene, ticks
+    /// embedded `GpuSurface` views and composites, but rasterizes no scene
+    /// layers: on a software rasterizer each of those submissions is a full
+    /// device-bound frame, and no consumer could observe its pixels.
+    Nobody,
+}
+
+impl FrameReader {
+    /// The reader of a headless frame: the snapshot when the pump captures
+    /// one, nobody otherwise.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn headless(capture_snapshot: bool) -> Self {
+        if capture_snapshot {
+            Self::Snapshot
+        } else {
+            Self::Nobody
+        }
+    }
+
+    const fn captures(self) -> bool {
+        matches!(self, Self::Snapshot)
+    }
+
+    const fn rasterizes(self) -> bool {
+        !matches!(self, Self::Nobody)
+    }
+}
+
+crate::engine::cfg_async_fn! {
+    /// Async on wasm32, where the surface render inside awaits the browser
+    /// device.
+    pub(super) fn render_window_with_capture<P: GpuSurfaceWindow>(
+        runtime: &mut RuntimeWindow<P>,
+        env: &Environment,
+        reader: FrameReader,
+        drain_local_tasks: &mut dyn FnMut() -> bool,
+    ) -> RenderWindowResult {
+    let capture_snapshot = reader.captures();
+    let _ = runtime.renderer.read_signal(&runtime.window.frame);
+    let _ = runtime.renderer.read_signal(&runtime.window.state);
+    let _ = runtime.renderer.read_signal(&runtime.window.level);
+    let _ = runtime.renderer.read_signal(&runtime.window.attention);
+    if let Some(increments) = runtime.window.resize_increments.as_ref() {
+        let _ = runtime.renderer.read_signal(increments);
+    }
     runtime.platform.apply_properties(&runtime.window);
-    #[cfg(feature = "winit")]
+    #[cfg(hydrolysis_winit)]
     runtime
         .renderer
-        .set_accessibility_root_label(runtime.window.title.get().as_str());
+        .set_accessibility_root_label(runtime.window.title.snapshot().as_str());
     let mut snapshot = None;
     let mut rebuilt = false;
     let profile;
+    #[cfg(feature = "frame-profile")]
+    let stages: crate::renderer::FrameStageTimes;
     // What the inspector is told about this frame, captured before the pump:
     // the scheduled mode is cleared while the scene is pumped, and the elapsed
     // total has to start before any of it runs. A browser page hosts no
@@ -671,22 +946,11 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         let rebuild_phases = pump_outcome.phases;
         rebuilt |= pump_outcome.built;
         apply_window_size_limits(runtime, env);
-        let clear_color = window_clear_color(&runtime.window, env);
+        let clear_color = apply_window_background(runtime, env);
 
-        let root_transform = vello::kurbo::Affine::scale(runtime.platform.scale_factor());
+        let root_transform = kurbo::Affine::scale(runtime.platform.scale_factor());
         #[cfg(hydrolysis_macos_system_webview)]
-        let (width, height) = runtime.platform.surface().size();
-        // The redraw-only filter refresh exists for frames that present without
-        // re-flushing the tree (an animated filter while the scene is idle). Any
-        // flush already ran every filter through its node, so refreshing again
-        // here would execute animated filters twice per frame.
-        if !pump_outcome.flushed {
-            runtime.renderer.begin_redraw_frame();
-            let surface = runtime.platform.surface();
-            runtime
-                .renderer
-                .refresh_active_applied_filters(surface.device(), surface.queue());
-        }
+        let (width, height) = runtime.platform.content_size();
         runtime
             .renderer
             .prepare_transient_text_input_overlay(env, root_transform);
@@ -713,6 +977,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 snapshot: None,
             };
             let mut result = Ok(());
+            let scale_factor = platform.scale_factor();
             for (index, segment) in composition.segments.iter_mut().enumerate() {
                 let transient_scene = (index + 1 == segment_count)
                     .then(|| composition.transient_scene.take())
@@ -725,15 +990,21 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 let segment_clear_color = if index == 0 {
                     clear_color
                 } else {
-                    vello::peniko::Color::TRANSPARENT
+                    peniko::Color::TRANSPARENT
                 };
                 match render_to_surface(
                     &mut runtime.renderer,
                     surface,
                     segment_clear_color,
+                    scale_factor,
                     false,
-                    |renderer, target| {
-                        renderer.render_hybrid_segment_to_surface(segment, transient_scene, target);
+                    |renderer, target, premultiply_alpha| {
+                        renderer.render_hybrid_segment_to_surface(
+                            segment,
+                            transient_scene,
+                            target,
+                            premultiply_alpha,
+                        );
                     },
                 ) {
                     Ok(rendered) => {
@@ -755,23 +1026,63 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
             {
                 platform.clear_hybrid_composition();
             }
-            render_to_surface(
+            let scale_factor = runtime.platform.scale_factor();
+            crate::engine::engine_await!(render_to_surface(
                 &mut runtime.renderer,
                 runtime.platform.surface(),
                 clear_color,
+                scale_factor,
                 capture_snapshot,
-                HydrolysisRenderer::render_scene_to_surface,
-            )
+                #[cfg(not(target_arch = "wasm32"))]
+                |renderer, target, premultiply_alpha| {
+                    renderer.render_scene_to_surface_with_alpha_mode(
+                        target,
+                        premultiply_alpha,
+                        reader.rasterizes(),
+                    );
+                },
+                #[cfg(target_arch = "wasm32")]
+                async |renderer, target, premultiply_alpha| {
+                    renderer
+                        .render_scene_to_surface_with_alpha_mode(
+                            target,
+                            premultiply_alpha,
+                            reader.rasterizes(),
+                        )
+                        .await;
+                },
+            ))
         };
 
         #[cfg(not(hydrolysis_macos_system_webview))]
-        let render_result = render_to_surface(
-            &mut runtime.renderer,
-            runtime.platform.surface(),
-            clear_color,
-            capture_snapshot,
-            HydrolysisRenderer::render_scene_to_surface,
-        );
+        let render_result = {
+            let scale_factor = runtime.platform.scale_factor();
+            crate::engine::engine_await!(render_to_surface(
+                &mut runtime.renderer,
+                runtime.platform.surface(),
+                clear_color,
+                scale_factor,
+                capture_snapshot,
+                #[cfg(not(target_arch = "wasm32"))]
+                |renderer, target, premultiply_alpha| {
+                    renderer.render_scene_to_surface_with_alpha_mode(
+                        target,
+                        premultiply_alpha,
+                        reader.rasterizes(),
+                    );
+                },
+                #[cfg(target_arch = "wasm32")]
+                async |renderer, target, premultiply_alpha| {
+                    renderer
+                        .render_scene_to_surface_with_alpha_mode(
+                            target,
+                            premultiply_alpha,
+                            reader.rasterizes(),
+                        )
+                        .await;
+                },
+            ))
+        };
 
         #[cfg(hydrolysis_macos_system_webview)]
         if let Some(composition) = hybrid_composition.take() {
@@ -787,7 +1098,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 | crate::platform::SurfaceError::Occluded,
             ) => {
                 runtime.request_refresh();
-                runtime.platform.request_redraw();
+                runtime.request_redraw();
+                runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
                 let (measurement_cache_hits, measurement_cache_misses) =
                     runtime.renderer.measurement_cache_stats();
                 let layer_stats = runtime.renderer.render_layer_stats();
@@ -797,6 +1109,8 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 return RenderWindowResult {
                     rebuilt,
                     snapshot,
+                    #[cfg(feature = "frame-profile")]
+                    stages: runtime.renderer.take_frame_stage_times(),
                     profile: FrameProfile {
                         phases: FramePhases {
                             rebuild: rebuild_phases.rebuild,
@@ -810,9 +1124,9 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                             measurement_cache_hits,
                             measurement_cache_misses,
                             scene_layers: layer_stats.composited_scene_layers,
-                            vello_scene_layers: layer_stats.vello_scene_layers,
-                            gpu_surface_layers: layer_stats.gpu_surface_layers,
-                            direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
+                            scene_segment_layers: layer_stats.scene_segment_layers,
+                            gpu_content_layers: layer_stats.gpu_content_layers,
+                            filtered_layers: layer_stats.filtered_layers,
                             clip_layers,
                             max_clip_depth,
                             applied_filter_count,
@@ -820,6 +1134,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                             applied_filter_effect_us,
                             rendered: false,
                             captured_snapshot: false,
+                            frame_work: runtime.renderer.frame_work_counters(),
                         },
                         ..FrameProfile::default()
                     },
@@ -833,7 +1148,10 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
         let render_duration = rendered.render;
         let present_duration = rendered.present;
         snapshot = rendered.snapshot;
-        runtime.renderer.clear_frame_resources();
+        #[cfg(feature = "frame-profile")]
+        {
+            stages = runtime.renderer.take_frame_stage_times();
+        }
         let (measurement_cache_hits, measurement_cache_misses) =
             runtime.renderer.measurement_cache_stats();
         let layer_stats = runtime.renderer.render_layer_stats();
@@ -856,9 +1174,9 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 measurement_cache_hits,
                 measurement_cache_misses,
                 scene_layers: layer_stats.composited_scene_layers,
-                vello_scene_layers: layer_stats.vello_scene_layers,
-                gpu_surface_layers: layer_stats.gpu_surface_layers,
-                direct_gpu_surfaces: layer_stats.direct_gpu_surfaces,
+                scene_segment_layers: layer_stats.scene_segment_layers,
+                gpu_content_layers: layer_stats.gpu_content_layers,
+                filtered_layers: layer_stats.filtered_layers,
                 clip_layers,
                 max_clip_depth,
                 applied_filter_count,
@@ -866,12 +1184,13 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                 applied_filter_effect_us,
                 rendered: true,
                 captured_snapshot: capture_snapshot,
+                frame_work: runtime.renderer.frame_work_counters(),
             },
             ..FrameProfile::default()
         };
 
         if diagnostics_enabled {
-            let window_title = runtime.window.title.get();
+            let window_title = runtime.window.title.snapshot();
             runtime.render_diagnostics.record_frame(
                 window_title.as_str(),
                 RenderPhaseSample {
@@ -884,9 +1203,7 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
                     present: present_duration,
                     total: elapsed_or_zero(frame_started_at),
                     rebuild_iterations: u32::from(pump_outcome.built),
-                    applied_filter_count,
-                    applied_filter_capture_us,
-                    applied_filter_effect_us,
+                    filtered_layers: layer_stats.filtered_layers,
                     rebuilt: pump_outcome.built,
                 },
             );
@@ -902,12 +1219,27 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
             .set_cursor_style(runtime.renderer.cursor_style_at(x, y));
     }
     if runtime.renderer.take_redraw_request() {
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
+    }
+    // The engine's own scheduling answer: an in-flight animation asks for its
+    // next frame through `Next::At` (its `RedrawCallback` already woke the
+    // host too — the request is idempotent).
+    if matches!(
+        runtime.renderer.take_engine_next(),
+        Some(cherenkov::Next::At { .. })
+    ) {
         runtime.platform.request_redraw();
     }
-
     #[cfg(not(target_arch = "wasm32"))]
     {
-        super::inspector::publish_frame(env, frame_mode, &profile, frame_pump_started_at.elapsed());
+        super::inspector::publish_frame(
+            env,
+            frame_mode,
+            &profile,
+            frame_pump_started_at.elapsed(),
+            runtime.refresh_rate_hz,
+        );
         #[cfg(feature = "accessibility")]
         if let Some(update) = runtime.renderer.peek_accessibility_tree_update() {
             super::inspector::publish_tree(env, update);
@@ -917,7 +1249,10 @@ pub(super) fn render_window_with_capture<P: PlatformWindow>(
     RenderWindowResult {
         rebuilt,
         snapshot,
+        #[cfg(feature = "frame-profile")]
+        stages,
         profile,
+    }
     }
 }
 
@@ -929,7 +1264,7 @@ pub(super) fn physical_to_logical_dimension(value: u32, scale_factor: f64) -> f3
     (f64::from(value) / scale_factor) as f32
 }
 
-pub(super) fn handle_input_events<P: PlatformWindow>(
+pub(super) fn handle_input_events<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) -> bool {
@@ -941,14 +1276,15 @@ pub(super) fn handle_input_events<P: PlatformWindow>(
 pub(super) fn runtime_window_origin<P: PlatformWindow>(
     runtime: &RuntimeWindow<P>,
 ) -> HydrolysisWindowOrigin {
+    let frame = crate::platform::validated_window_frame(runtime.window.frame.snapshot());
     HydrolysisWindowOrigin {
-        x: runtime.window.frame.get().x(),
-        y: runtime.window.frame.get().y(),
+        x: frame.x(),
+        y: frame.y(),
     }
 }
 
-/// Brings the retained hit-test geometry up to date before queued input is
-/// dispatched.
+/// Brings the retained hit-test geometry up to date before a queued scroll
+/// event is dispatched.
 ///
 /// Reactive layout and platform input are delivered independently. If a scroll
 /// wheel event arrives while a Dynamic/lazy item size refresh is pending, using
@@ -956,7 +1292,11 @@ pub(super) fn runtime_window_origin<P: PlatformWindow>(
 /// `max_y == 0`. This preflight patches and lays out the retained tree without
 /// presenting it; the already-pending render still presents the refreshed scene
 /// normally after input has been applied.
-fn refresh_pending_input_geometry<P: PlatformWindow>(
+///
+/// The refreshed registrations describe a frame the user has not seen yet, so
+/// the caller only runs this for scroll input — pointer events must keep
+/// resolving against the presented frame's geometry.
+fn refresh_pending_input_geometry<P: GpuSurfaceWindow>(
     runtime: &mut RuntimeWindow<P>,
     env: &Environment,
 ) {
@@ -972,29 +1312,33 @@ fn refresh_pending_input_geometry<P: PlatformWindow>(
 
     runtime.request_refresh();
     let scale_factor = runtime.platform.scale_factor();
-    let (width, height, adapter, device, queue) = {
-        let surface = runtime.platform.surface();
-        let (width, height) = surface.size();
-        (
-            width,
-            height,
-            surface.adapter().clone(),
-            surface.device().clone(),
-            surface.queue().clone(),
-        )
-    };
-    runtime
-        .renderer
-        .set_frame_resources(&adapter, &device, &queue);
+    let (width, height) = runtime.platform.surface().size();
     let bounds = create_bounds(width, height, scale_factor);
-    let transform = vello::kurbo::Affine::scale(scale_factor);
+    let transform = kurbo::Affine::scale(scale_factor);
     assert!(
         runtime
             .renderer
-            .flush_window_tree(env, bounds, transform, vello::kurbo::Affine::IDENTITY,),
+            .flush_window_tree(env, bounds, transform, kurbo::Affine::IDENTITY,),
         "hydrolysis input geometry refresh lost the retained window tree"
     );
     apply_window_size_limits(runtime, env);
+}
+
+/// Seeds the pointer position an OS file event conceptually arrives at:
+/// the host's live answer when it can give one.
+///
+/// winit's `HoveredFile`/`DroppedFile` carry no coordinates, and platforms
+/// that suppress cursor events while an external drag owns the pointer
+/// leave the stream's last position stale or unset — the drop then lands
+/// on a stale point or is discarded outright (water-rs/hydrolysis#127).
+/// Asking the platform where the pointer actually is before dispatching a
+/// file event restores the position winit withheld.
+fn sync_os_pointer_position<P: GpuSurfaceWindow>(runtime: &mut RuntimeWindow<P>) {
+    let Some((x, y)) = runtime.platform.pointer_position() else {
+        return;
+    };
+    runtime.pointer_position = Some((x, y));
+    runtime.renderer.note_pointer_position(x, y);
 }
 
 pub(super) fn handle_input_events_with<P, F>(
@@ -1003,15 +1347,44 @@ pub(super) fn handle_input_events_with<P, F>(
     input_env: F,
 ) -> bool
 where
-    P: PlatformWindow,
+    P: GpuSurfaceWindow,
     F: Fn(&RuntimeWindow<P>, &Environment) -> Environment,
 {
-    let mut should_close = runtime.window.state.get() == waterui::window::WindowState::Closed;
+    let mut should_close = runtime.window.state.snapshot() == waterui::window::WindowState::Closed;
     let events = runtime.platform.drain_events();
-    if !events.is_empty() {
-        refresh_pending_input_geometry(runtime, env);
-    }
-    for event in events {
+    // Platform IMEs mark their own keystrokes by what they emit: ownership
+    // follows the event order inside the batch (see `ime_owned_events`), so
+    // a confirming keystroke that arrives before its commit is the
+    // composition's while a key after the commit is ordinary input again.
+    // Those owned keys must never reach ordinary key handling or an
+    // embedded sink — the committing Enter/Backspace in particular must not
+    // activate a form or delete committed text.
+    let ime_owned = ime::ime_owned_events(&events, runtime.renderer.ime_composition_active());
+    let mut geometry_refreshed = false;
+    // A key press a handler consumed suppresses the `TextInput` that pairs
+    // with it — the press precedes its text in `pending_events`, so this
+    // flag set at the press is read by the very next `TextInput` event.
+    let mut suppress_key_text = false;
+    for (event, ime_owned) in events.into_iter().zip(ime_owned) {
+        let key_consumed = suppress_key_text;
+        suppress_key_text = false;
+        // The preflight re-registers every hit target at the geometry a
+        // pending refresh is *about to* paint, so it is reserved for the
+        // input that reads scroll extents: a wheel or trackpad-pan delta
+        // applied against the last presented extent can be rejected at a
+        // stale `max_y`. Pointer input instead resolves against the last
+        // *presented* frame — a tap targets the pixels the user saw, so
+        // hit-testing it against un-presented geometry would move every
+        // region out from under it (water-rs/hydrolysis#208).
+        if !geometry_refreshed
+            && matches!(
+                event,
+                InputEvent::Scroll { .. } | InputEvent::TrackpadPan { .. }
+            )
+        {
+            refresh_pending_input_geometry(runtime, env);
+            geometry_refreshed = true;
+        }
         match event {
             InputEvent::CloseRequested => {
                 runtime
@@ -1021,14 +1394,16 @@ where
                 should_close = true;
             }
             InputEvent::Moved { x, y } => {
-                let frame = runtime.window.frame.get();
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 runtime.window.frame.set(waterui_core::layout::Rect::new(
                     waterui_core::layout::Point::new(x, y),
                     *frame.size(),
                 ));
             }
             InputEvent::Resize { width, height } => {
-                let frame = runtime.window.frame.get();
+                let frame =
+                    crate::platform::validated_window_frame(runtime.window.frame.snapshot());
                 let logical_width =
                     physical_to_logical_dimension(width, runtime.platform.scale_factor());
                 let logical_height =
@@ -1039,7 +1414,8 @@ where
                 );
                 runtime.window.frame.set(frame);
                 runtime.request_refresh();
-                runtime.platform.request_redraw();
+                runtime.request_redraw();
+                runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
             }
             InputEvent::PointerDown {
                 id,
@@ -1185,8 +1561,26 @@ where
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::TextInput { text } => {
-                let changed = runtime.renderer.handle_embedded_text_input(text.as_str())
-                    || runtime.renderer.handle_text_input(text.as_str());
+                let changed = !ime_owned
+                    && (runtime.renderer.handle_embedded_text_input(text.as_str())
+                        || runtime.renderer.handle_text_input(text.as_str()));
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    event = "text_input",
+                    text = text.as_str(),
+                    changed,
+                    "runner dispatched input event"
+                );
+                schedule_redraw_or_refresh(runtime, changed);
+            }
+            // The text half of a key press, suppressed when the press was
+            // consumed by a handler — the web's preventDefault on keydown
+            // cancelling beforeinput.
+            InputEvent::KeyText { text } => {
+                let changed = !ime_owned
+                    && !key_consumed
+                    && (runtime.renderer.handle_embedded_text_input(text.as_str())
+                        || runtime.renderer.handle_text_input(text.as_str()));
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "text_input",
@@ -1204,17 +1598,38 @@ where
                 state: KeyState::Pressed,
                 modifiers,
             } => {
-                let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
-                    pressed: true,
-                    logical: &logical_key,
-                    code: physical_code,
-                    repeat,
-                    modifiers,
-                }) || runtime.renderer.handle_key_with_env(
-                    &key,
-                    modifiers,
-                    &input_env(runtime, env),
-                );
+                let changed = if ime_owned {
+                    // The press was consumed by the composition; record it so
+                    // its release — which wl_keyboard may deliver in a later
+                    // batch, after the commit — is swallowed too.
+                    runtime.renderer.swallow_ime_key_press(physical_code);
+                    false
+                } else {
+                    let key_env = input_env(runtime, env);
+                    let press = KeyPress {
+                        key: logical_key.clone(),
+                        code: physical_code,
+                        modifiers: modifiers.into(),
+                        repeat,
+                    };
+                    let outcome = if runtime.renderer.handle_embedded_key(&KeyDelivery {
+                        pressed: true,
+                        logical: &logical_key,
+                        code: physical_code,
+                        repeat,
+                        modifiers,
+                    }) {
+                        // Forwarded, not consumed — the surface owns its
+                        // key+text pair; the paired text is still delivered.
+                        KeyPressOutcome::ForwardedToSurface
+                    } else {
+                        runtime
+                            .renderer
+                            .handle_key_press(&key, modifiers, &key_env, &press)
+                    };
+                    suppress_key_text = outcome == KeyPressOutcome::Consumed;
+                    outcome != KeyPressOutcome::Ignored
+                };
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "key_pressed",
@@ -1229,7 +1644,7 @@ where
                 let changed = runtime
                     .renderer
                     .handle_embedded_ime_preedit(text.as_str(), caret)
-                    || runtime.renderer.handle_ime_preedit(text.as_str());
+                    || runtime.renderer.handle_ime_preedit(text.as_str(), caret);
                 tracing::trace!(
                     target: "waterui::hydrolysis::input",
                     event = "ime_preedit",
@@ -1270,21 +1685,107 @@ where
                 state: KeyState::Released,
                 modifiers,
             } => {
-                let changed = runtime.renderer.handle_embedded_key(&KeyDelivery {
-                    pressed: false,
-                    logical: &logical_key,
-                    code: physical_code,
-                    repeat,
-                    modifiers,
-                }) || runtime
-                    .renderer
-                    .handle_key_release_with_env(&key, &input_env(runtime, env));
+                let changed =
+                    !runtime.renderer.take_ime_swallowed_release(physical_code) && !ime_owned && {
+                        let key_env = input_env(runtime, env);
+                        runtime.renderer.handle_bubbled_key_release(&KeyDelivery {
+                            pressed: false,
+                            logical: &logical_key,
+                            code: physical_code,
+                            repeat,
+                            modifiers,
+                        }) || runtime.renderer.handle_embedded_key(&KeyDelivery {
+                            pressed: false,
+                            logical: &logical_key,
+                            code: physical_code,
+                            repeat,
+                            modifiers,
+                        }) || runtime.renderer.handle_key_release_with_env(&key, &key_env)
+                    };
+                schedule_redraw_or_refresh(runtime, changed);
+            }
+            InputEvent::KeyboardCancel => {
+                let changed = runtime.renderer.cancel_keyboard_press();
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    event = "keyboard_cancel",
+                    changed,
+                    "runner dispatched input event"
+                );
                 schedule_redraw_or_refresh(runtime, changed);
             }
             InputEvent::ModifiersChanged(modifiers) => {
                 runtime.renderer.update_embedded_modifiers(modifiers);
             }
+            InputEvent::Maximized(maximized) => {
+                // Chrome-driven maximize/restore reached the window server
+                // directly; write it back so `Window::state` tracks the real
+                // window. Only Normal/Maximized are touched — a minimized or
+                // fullscreen window's state is not overridden by the flag.
+                let state = runtime.window.state.snapshot();
+                let next = if maximized {
+                    waterui::window::WindowState::Maximized
+                } else {
+                    waterui::window::WindowState::Normal
+                };
+                if matches!(
+                    state,
+                    waterui::window::WindowState::Normal | waterui::window::WindowState::Maximized
+                ) && state != next
+                {
+                    runtime.window.state.set(next);
+                }
+            }
+            InputEvent::Focused(focused) => {
+                // The window gained focus: any outstanding attention request
+                // is spent — the contract hands the binding back as `None`.
+                if focused && runtime.window.attention.snapshot().is_some() {
+                    runtime.window.attention.set(None);
+                }
+                let changed = runtime.renderer.handle_window_focused(focused);
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    event = "window_focused",
+                    focused,
+                    changed,
+                    "runner dispatched input event"
+                );
+                schedule_redraw_or_refresh(runtime, changed);
+            }
+            InputEvent::FileHovered { path } => {
+                sync_os_pointer_position(runtime);
+                let event_env = input_env(runtime, env);
+                let changed = runtime.renderer.handle_file_hovered(path, &event_env);
+                schedule_redraw_or_refresh(runtime, changed);
+            }
+            InputEvent::FileDropped { path } => {
+                // The file joins the drag's collected list on the renderer;
+                // delivery is deferred to `finish_os_file_drop` below —
+                // winit reports one event per file and a drop's files can
+                // outlive a single batch.
+                sync_os_pointer_position(runtime);
+                runtime.renderer.handle_file_dropped(path);
+            }
+            InputEvent::FileHoverCancelled => {
+                let event_env = input_env(runtime, env);
+                let changed = runtime.renderer.handle_file_hover_cancelled(&event_env);
+                schedule_redraw_or_refresh(runtime, changed);
+            }
         }
+    }
+    {
+        let event_env = input_env(runtime, env);
+        let changed = runtime.renderer.finish_os_file_drop(&event_env);
+        if runtime.renderer.os_file_drop_pending() {
+            // The drop's files may still be landing and winit sends no
+            // drop-end marker, so the drain that will deliver it exists only
+            // if the runner asks for it — request one follow-up pump through
+            // the platform redraw request, the same wake a signal change
+            // triggers (platform.rs's signal waker calls `request_redraw`).
+            runtime.request_redraw();
+            runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
+        }
+        schedule_redraw_or_refresh(runtime, changed);
     }
     runtime
         .platform
@@ -1303,6 +1804,13 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     now: Instant,
 ) -> Option<Instant> {
     runtime.renderer.set_frame_instant(now);
+    // A hidden window does no rendering work — no ticks, no wakes, no
+    // GPU-content pulls. Armed work stays armed: patch, rebuild and
+    // animation requests pending in the renderer apply to the frame
+    // `set_hidden(false)` schedules on un-hide.
+    if runtime.hidden {
+        return None;
+    }
     // Track the display refresh rate so the diagnostics slow-frame threshold reflects the
     // real frame budget (e.g. 8.33ms on a 120Hz panel) instead of a hardcoded 60fps.
     let refresh_rate = runtime.platform.refresh_rate_hz();
@@ -1315,39 +1823,55 @@ pub(super) fn advance_runtime<P: PlatformWindow>(
     runtime
         .platform
         .sync_text_input_state(runtime.renderer.focused_text_input_state());
-    if runtime.renderer.poll_gpu_surface_redraw_handles() {
-        runtime.platform.request_redraw();
-    }
-    if runtime.renderer.handle_gesture_tick(now, env) {
+    // A gesture tick can mount a popup window — an armed context-menu hold
+    // fires here — and the popup anchors in absolute coordinates through
+    // `HydrolysisWindowOrigin`, the same extension pointer dispatch gets.
+    let gesture_env = env.extending(runtime_window_origin(runtime));
+    if runtime.renderer.handle_gesture_tick(now, &gesture_env) {
+        tracing::debug!("wake cause: gesture tick fired");
         runtime.request_refresh();
     }
     // Smoothed wheel scrolling eases offsets toward their targets per frame;
     // while any scroll view is still gliding, keep running full frames on the
     // redraw cadence.
     if runtime.renderer.tick_smooth_scrolls(now) {
+        tracing::debug!("wake cause: smooth scroll still gliding");
         runtime.request_refresh();
     }
     let animations_active = runtime.renderer.advance_animations();
+    if animations_active {
+        tracing::debug!("wake cause: animations active");
+    }
     schedule_animation_update(runtime, animations_active);
     // A pending fine-grained reactive patch composites through the window-refresh path,
     // which re-dispatches only the dirty Dynamic nodes. If there is no retained window
     // frame yet (or a structural rebuild is already pending), fall back to a rebuild.
     if runtime.renderer.take_patch_request() {
+        tracing::debug!("wake cause: reactive patch request");
         // The refresh re-flushes the retained tree, which applies the pending
         // Dynamic patch to only the affected subtree and relays out if it changed size.
         runtime.request_refresh();
-        runtime.platform.request_redraw();
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
     if runtime.renderer.advance_text_caret_animation(now) {
+        tracing::debug!("wake cause: text caret animation");
         runtime.renderer.request_redraw();
-        runtime.platform.request_redraw();
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
     if runtime.renderer.take_rebuild_request() {
+        tracing::debug!("wake cause: rebuild request");
         runtime.request_refresh();
     }
     let next_deadline = runtime.renderer.next_gesture_deadline();
+    if next_deadline.is_some() {
+        tracing::debug!(?next_deadline, "wake armed: engine deadline");
+    }
     if runtime.mode.is_pending() {
-        runtime.platform.request_redraw();
+        tracing::debug!("wake cause: frame mode still pending");
+        runtime.request_redraw();
+        runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
     }
     next_deadline
 }

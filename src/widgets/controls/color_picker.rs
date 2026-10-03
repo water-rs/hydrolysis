@@ -1,31 +1,31 @@
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 #[cfg(feature = "accessibility")]
-use crate::renderer::accessibility_activation_point;
-#[cfg(feature = "accessibility")]
 use accesskit::{
     Action as AccessibilityAction, Node as AccessibilityNode, Role as AccessibilityNodeRole,
 };
+use kurbo::Rect;
 use nami::Signal;
 use std::cell::RefCell;
 use std::rc::Rc;
-use vello::kurbo::{Rect, RoundedRectRadii};
-use waterui_backend_core::widget::{Brush, DrawContext as _};
+#[cfg(feature = "accessibility")]
+use waterui_core::layout::Point as LayoutPoint;
 use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size as LayoutSize, ViewDimensions};
 use waterui_core::{AnyView, Environment, Native};
 use waterui_form::picker::color::ColorPickerConfig;
+use waterui_graphics::cherenkov::Draw as _;
 use waterui_graphics::color::Color;
 use waterui_text::styled::StyledStr;
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, RenderContext, WidgetRenderContext,
-    measure_label_intrinsic, resolved_color_to_peniko, transformed_rect,
+    HydroNativeView, HydroState, RenderContext, WidgetRenderContext, measure_label_intrinsic,
+    transformed_rect,
 };
+use crate::widgets::util::inset_rect;
 #[cfg(feature = "accessibility")]
 use crate::widgets::util::widget_disabled;
-use crate::widgets::util::{inset_rect, widget_theme};
 
 const COLOR_SWATCH_SIZE: f64 = 32.0;
 const COLOR_SWATCH_RADIUS: f64 = 8.0;
@@ -50,14 +50,23 @@ impl ColorPickerRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
 
 impl HydroNativeView for Native<ColorPickerConfig> {
-    fn intrinsic(state: &mut HydroState, view: &Self, env: &Environment) -> LayoutSize {
-        measure_color_picker_intrinsic(view.as_inner(), state, env)
+    fn intrinsic(
+        state: &mut HydroState,
+        view: &Self,
+        env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
+    ) -> LayoutSize {
+        measure_color_picker_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
@@ -65,10 +74,11 @@ impl HydroNativeView for Native<ColorPickerConfig> {
 /// dispatch path ([`Native<ColorPickerConfig>::accessibility`]) and the retained
 /// `Widget`-node path so both produce the same a11y tree.
 pub(crate) fn color_picker_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     color_picker: &ColorPickerConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -78,7 +88,7 @@ pub(crate) fn color_picker_accessibility(
             .semantic_text()
             .resolve(env)
             .content
-            .get()
+            .snapshot()
             .to_plain()
             .to_string();
         let value = format!("{:?}", renderer.read_signal(&color_picker.value));
@@ -97,20 +107,65 @@ pub(crate) fn color_picker_accessibility(
         } else {
             node.add_action(AccessibilityAction::Click);
         }
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let activation_point = accessibility_activation_point(bounds);
-        let _ = renderer.register_accessibility_node(
-            node,
-            bounds,
-            env,
-            (!disabled).then(|| AccessibilityActionTarget::PointerPrimaryClick {
-                point: activation_point,
-            }),
-        );
+        // Direct semantic activation: `Click` shows the color picker under the
+        // trigger's own anchor — the pointer path's exact handler. A rendered
+        // node carries the anchor; a semantic node carries none and mounts the
+        // same window with no placement at all.
+        let origin = ctx.map(|ctx| {
+            let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+            LayoutPoint::new(bounds.x0 as f32, bounds.y1 as f32)
+        });
+        let action_target = (!disabled).then(|| {
+            let value = color_picker.value.clone();
+            let support_alpha = color_picker.support_alpha;
+            let support_hdr = color_picker.support_hdr;
+            // The popup opens in the picker's environment layered over the
+            // dispatch's (water-rs/hydrolysis#140).
+            let picker_env = env.clone();
+            AccessibilityActionTarget::Activate {
+                action: Rc::new(RefCell::new(
+                    move |renderer: &mut crate::renderer::SemanticCore, env: &Environment| {
+                        let env = picker_env.layered_on(env);
+                        match origin {
+                            Some(origin) => {
+                                renderer.show_color_picker(
+                                    value.clone(),
+                                    support_alpha,
+                                    support_hdr,
+                                    origin,
+                                    &env,
+                                );
+                            }
+                            None => {
+                                renderer.activate_color_picker(
+                                    value.clone(),
+                                    support_alpha,
+                                    support_hdr,
+                                    &env,
+                                );
+                            }
+                        }
+                        true
+                    },
+                )),
+            }
+        });
+        let node_id = match ctx {
+            Some(ctx) => {
+                let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+                renderer.register_accessibility_node(node, bounds, env, action_target)
+            }
+            None => renderer.register_accessibility_node_semantic(node, env, action_target),
+        };
+        if let Some(node_id) = node_id {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, color_picker, env);
+        let _ = (renderer, ctx, color_picker, env, focus_keys);
     }
 }
 
@@ -122,10 +177,10 @@ pub(crate) fn measure_color_picker_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let input_metrics = theme.input_field_metrics();
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     let label_height = if label_size.width > 0.0 || label_size.height > 0.0 {
         f64::from(label_size.height).max(input_metrics.label_height)
     } else {
@@ -150,7 +205,13 @@ pub(crate) fn render_color_picker_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        color_picker_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        color_picker_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            &state.borrow().config,
+            env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
+        );
     }
     render_color_picker_parts(ctx, state, env);
 }
@@ -159,10 +220,10 @@ fn measure_color_picker_intrinsic(
     color_picker: &ColorPickerConfig,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let theme = widget_theme(env);
     let input_metrics = theme.input_field_metrics();
-    let label_size = measure_label_intrinsic(&color_picker.label, state, env);
+    let label_size = measure_label_intrinsic(&color_picker.label, state, env, theme);
     let label_height = if label_size.width > 0.0 || label_size.height > 0.0 {
         f64::from(label_size.height).max(input_metrics.label_height)
     } else {
@@ -180,7 +241,7 @@ pub(crate) fn render_color_picker_parts(
     env: &Environment,
 ) {
     let interaction_key = crate::renderer::InteractionKey::for_rc(state, 0);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let input_metrics = theme.input_field_metrics();
     let mut state = state.borrow_mut();
     // The value/options are read from the retained config; the label is a retained
@@ -213,7 +274,13 @@ pub(crate) fn render_color_picker_parts(
         let label_view = &mut state.label_view;
         ctx.renderer_mut()
             .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(renderer, render_ctx, env, label_bounds);
+                label_view.flush_in_rect(
+                    renderer,
+                    render_ctx,
+                    env,
+                    ProposalSize::UNSPECIFIED,
+                    label_bounds,
+                );
             });
     }
 
@@ -253,21 +320,18 @@ pub(crate) fn render_color_picker_parts(
     // retained-refresh watcher), so a value change schedules a frame and this
     // persistent node re-renders the new swatch color.
     let color = ctx.renderer_mut().read_signal(&value_binding);
-    let swatch_color = resolved_color_to_peniko(color.resolve(env).get());
+    let swatch_color = color.resolve(env).snapshot();
     {
         let mut draw = ctx.draw_context();
-        draw.fill_rounded_rect(
-            swatch_rect,
-            RoundedRectRadii::from_single_radius(COLOR_SWATCH_RADIUS),
-            &Brush::from(swatch_color),
-        );
-        draw.stroke_rounded_rect(
-            swatch_rect,
-            RoundedRectRadii::from_single_radius(COLOR_SWATCH_RADIUS),
-            &Brush::from(resolved_color_to_peniko(
-                Color::srgb(0, 0, 0).with_opacity(0.16).resolve(env).get(),
-            )),
-            1.0,
+        let swatch_shape = kurbo::RoundedRect::from_rect(swatch_rect, COLOR_SWATCH_RADIUS);
+        draw.fill(swatch_shape, swatch_color);
+        draw.stroke(
+            swatch_shape,
+            kurbo::Stroke::new(1.0),
+            Color::srgb(0, 0, 0)
+                .with_opacity(0.16)
+                .resolve(env)
+                .snapshot(),
         );
     }
 
@@ -293,17 +357,39 @@ pub(crate) fn render_color_picker_parts(
     }
 
     let origin = waterui_core::layout::Point::new(hit_bounds.x0 as f32, hit_bounds.y1 as f32);
+    // The popup opens in the picker's environment layered over the
+    // dispatch's (water-rs/hydrolysis#140).
+    let picker_env = env.clone();
     ctx.renderer_mut().register_interactive_pointer_target(
         hit_bounds,
         press_slot,
         move |renderer, _point, env| {
+            let env = picker_env.layered_on(env);
             renderer.show_color_picker(
                 value_binding.clone(),
                 support_alpha,
                 support_hdr,
                 origin,
-                env,
+                &env,
             )
         },
+    );
+}
+
+/// Emits a retained color picker's accessibility node for the semantic walk —
+/// the same node `color_picker_accessibility` registers, with no bounds. The
+/// label sub-view flushes visual-only, so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_color_picker_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ColorPickerRenderState>>,
+    env: &Environment,
+) {
+    color_picker_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[crate::renderer::InteractionKey::for_rc(state, 0)],
     );
 }

@@ -1,19 +1,22 @@
 use super::headless::HeadlessPlatformWindow;
 use super::{
     FrameMode, RenderDiagnosticsConfig, RuntimeWindow, acquire_surface_frame, advance_runtime,
-    handle_input_events, pump_window_semantics, render_window, schedule_animation_update,
-    schedule_redraw_or_refresh, surface_error_requires_reconfigure,
+    clamp_window_size, handle_input_events, pump_window_semantics, render_window, reports_ui_idle,
+    schedule_animation_update, schedule_redraw_or_refresh, surface_error_requires_reconfigure,
 };
 use crate::platform::{
-    InputEvent, OffscreenSurface, PlatformWindow as _, SurfaceError, SurfaceFrame, SurfaceProvider,
+    GpuSurfaceWindow as _, InputEvent, OffscreenSurface, PlatformWindow as _, SurfaceError,
+    SurfaceFrame, SurfaceProvider,
 };
+use crate::renderer::tests::MinimalTestTheme;
 use crate::renderer::{HydrolysisRenderer, InteractionKey};
 use core::time::Duration;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
-use waterui::ViewExt as _;
 use waterui::component::list::{List, ListItem};
 use waterui::window::{Window, WindowState};
+use waterui::{Binding, Signal, ViewExt as _};
 use waterui_backend_core::widget::TextCaretMotion;
 use waterui_core::id::SelfId;
 use waterui_core::{AnyView, Environment, binding};
@@ -81,8 +84,9 @@ fn animation_ticks_schedule_full_frames() {
 
     assert!(runtime.mode.is_pending());
     assert!(
-        runtime.mode == FrameMode::Refresh,
-        "an animation tick schedules the same full frame as any content change"
+        runtime.mode == FrameMode::Animate,
+        "an animation tick schedules the same full frame as any content change, \
+         marked as continuation work rather than an unapplied update"
     );
 }
 
@@ -146,16 +150,211 @@ fn text_caret_tick_wakes_redraw_without_layout_rebuild() {
     assert!(runtime.platform.take_redraw_request());
 }
 
+/// A hidden window parks the pump: no frame renders, no wake deadline or
+/// platform redraw is posted, and work armed while hidden stays armed —
+/// the contract's "no frames, no wakes, no GPU pulls" half. Un-hiding
+/// renders exactly one frame from the current state, not a replay of the
+/// frames that were skipped.
+#[test]
+fn hidden_window_parks_the_pump_and_restores_exactly_one_frame() {
+    let mut runtime = test_runtime_window();
+    let env = crate::renderer::tests::test_environment();
+    let mut now = Instant::now();
+
+    // Settle the mount frames; the window goes idle on its own.
+    let idle_frames = drive_until_idle(&mut runtime, &env, &mut now, 60);
+    assert!(idle_frames < 60, "the window never went idle before hiding");
+    let presented_before = runtime.presented_frames;
+
+    runtime.set_hidden(true);
+    // Work that lands while hidden stays armed: neither the pump tick nor
+    // a platform redraw already in flight when the window hid may render it.
+    runtime.renderer.request_rebuild();
+    now += Duration::from_millis(32);
+    assert!(
+        advance_runtime(&mut runtime, &env, now).is_none(),
+        "a hidden window reports no wake deadline"
+    );
+    assert!(
+        !render_window(&mut runtime, &env, &mut || false),
+        "a hidden window presents no frame"
+    );
+    runtime.platform.request_redraw();
+    assert!(
+        !render_window(&mut runtime, &env, &mut || false),
+        "a stale in-flight wake renders nothing either"
+    );
+    assert_eq!(
+        runtime.presented_frames, presented_before,
+        "frames presented while hidden"
+    );
+    let _ = runtime.platform.take_redraw_request();
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "a hidden window posts no wakes — armed work stays armed"
+    );
+
+    // Visibility returns: the armed rebuild and the refresh the un-hide
+    // schedules produce exactly one frame, and the pump idles after it.
+    runtime.set_hidden(false);
+    assert!(runtime.mode.is_pending(), "un-hiding must arm a refresh");
+    let mut rendered = 0;
+    for _ in 0..10 {
+        now += Duration::from_millis(16);
+        let _ = advance_runtime(&mut runtime, &env, now);
+        let wake = runtime.mode.is_pending() | runtime.platform.take_redraw_request();
+        if !wake {
+            break;
+        }
+        if render_window(&mut runtime, &env, &mut || false) {
+            rendered += 1;
+        }
+    }
+    assert_eq!(rendered, 1, "un-hiding must render exactly one frame");
+}
+
+/// An animation in flight does not wake a hidden pump: no gesture
+/// deadline, no platform redraw — the armed wake the visible pump would
+/// post simply never runs.
+#[test]
+fn hidden_window_reports_no_deadline_for_an_armed_animation() {
+    let mut runtime = test_runtime_window();
+    let now = Instant::now();
+    let motion = TextCaretMotion {
+        fade_cycle_duration: Duration::from_millis(1_000),
+        frame_interval: Duration::from_millis(16),
+        min_opacity: 0.2,
+    };
+    runtime.renderer.set_frame_instant(now);
+    runtime.renderer.set_text_caret_motion(motion);
+    let focused_field = Rc::new(());
+    assert!(
+        runtime
+            .renderer
+            .set_focused_text_input_key(Some(InteractionKey::for_rc(&focused_field, 0)))
+    );
+
+    let env = Environment::new();
+    let deadline = now
+        .checked_add(motion.frame_interval)
+        .expect("test caret deadline overflow");
+
+    // The same arm the caret test proves wakes a visible pump.
+    runtime.set_hidden(true);
+    assert!(
+        advance_runtime(&mut runtime, &env, deadline).is_none(),
+        "an armed caret animation must not wake a hidden window"
+    );
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "an armed caret animation must not post a redraw while hidden"
+    );
+    assert!(
+        !render_window(&mut runtime, &env, &mut || false),
+        "a hidden window presents no frame"
+    );
+}
+
+/// The pump's "first frame presented; ui idle" readiness line must stay
+/// quiet while parked: the Choreographer wake a parked pump cannot unpost
+/// presents nothing, and a present-named line there reads as a frame
+/// presented while hidden — the false positive a device run counts.
+#[test]
+fn hidden_window_reports_no_ui_idle_readiness() {
+    assert!(
+        !reports_ui_idle(true, false, true),
+        "a parked pump must not report 'first frame presented; ui idle'"
+    );
+    assert!(
+        reports_ui_idle(true, false, false),
+        "a visible pump going idle after presenting reports readiness"
+    );
+    assert!(
+        !reports_ui_idle(false, false, false),
+        "readiness requires a presented frame"
+    );
+    assert!(
+        !reports_ui_idle(true, true, false),
+        "readiness requires the pump to be idle"
+    );
+}
+
+/// The un-hide contract hosts without an about-to-wait pass rely on:
+/// `sync_occlusion_and_post_restore` posts exactly one restore wake when
+/// the platform report flips the pump back to visible. It is what the
+/// Android host calls from `set_visible` and `surface_resized` — the
+/// resize that gives a band parked on a 0x0 attach its real extent —
+/// where only a Choreographer post reaches the frame scheduler.
+/// `sync_occlusion` itself must never post: a winit desktop's platform
+/// delivers its own restore event, and a second post would double the
+/// restore frame.
+#[test]
+fn un_hide_sync_posts_exactly_one_restore_wake() {
+    let mut runtime = test_runtime_window();
+    runtime.platform.set_occluded(true);
+    runtime.sync_occlusion();
+    assert!(runtime.is_hidden(), "an occluded report must park the pump");
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "sync_occlusion arms only — the restore post is the host's choice"
+    );
+
+    runtime.platform.set_occluded(false);
+    runtime.sync_occlusion_and_post_restore();
+    assert!(!runtime.is_hidden(), "a clear report must unpark the pump");
+    assert!(
+        runtime.platform.take_redraw_request(),
+        "un-hiding through the posting sync must wake the frame scheduler"
+    );
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "the restore wake is a single post, not a stream"
+    );
+
+    // Re-syncing a window already visible posts nothing again.
+    runtime.sync_occlusion_and_post_restore();
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "a sync that did not un-hide posts no wake"
+    );
+}
+
+/// `request_redraw`'s hidden gate: callers outside `advance_runtime` —
+/// the winit runner's cross-window rebuild flush, GPU settle wakes, a
+/// stale in-flight platform post — reach the platform's redraw post
+/// directly, and a parked window must absorb them. Without the gate each
+/// of those would keep waking a hidden pump.
+#[test]
+fn a_hidden_window_absorbs_direct_redraw_requests() {
+    let mut runtime = test_runtime_window();
+    let _ = runtime.platform.take_redraw_request();
+
+    runtime.set_hidden(true);
+    runtime.request_redraw();
+    assert!(
+        !runtime.platform.take_redraw_request(),
+        "a hidden window must not reach the platform redraw post"
+    );
+
+    runtime.set_hidden(false);
+    runtime.request_redraw();
+    assert!(
+        runtime.platform.take_redraw_request(),
+        "a visible window's redraw request must reach the platform"
+    );
+}
+
 /// The window's effective size limits reach the platform: the content's
-/// measured minimum and maximum are the defaults, and explicit limits override
-/// them.
+/// measured minimum is the default, the maximum stays unbounded unless the
+/// app pins one, and explicit limits override both.
 #[test]
 fn window_size_limits_reach_the_platform_window() {
     use waterui_core::layout::Size;
     use waterui_layout::frame::Frame;
 
-    // Content with hard limits must pass both ends of the layout negotiation to
-    // the platform window.
+    // Content with finite bounds declares no stretch axis, so the measured
+    // minimum reaches the platform while the maximum stays open — the window
+    // resizes and maximizes with the content laid out inside it.
     let content = || {
         Frame::new(())
             .min_width(200.0)
@@ -172,9 +371,9 @@ fn window_size_limits_reach_the_platform_window() {
         .applied_size_limits()
         .expect("runner must apply size limits on the pump");
     assert_eq!(min, Some(Size::new(200.0, 100.0)));
-    assert_eq!(max, Some(Size::new(640.0, 480.0)));
+    assert_eq!(max, None);
 
-    // Explicit limits override the derived minimum.
+    // Explicit limits win over the content-derived ones on both axes.
     let window = Window::new("", binding(WindowState::Normal), content)
         .min_size(Size::new(300.0, 150.0))
         .max_size(Size::new(640.0, 480.0));
@@ -188,9 +387,277 @@ fn window_size_limits_reach_the_platform_window() {
     assert_eq!(max, Some(Size::new(640.0, 480.0)));
 }
 
+/// Clamping only moves an axis that falls outside the new limits, to the
+/// nearer bound; a size inside the limits passes through untouched.
+#[test]
+fn clamp_window_size_only_moves_out_of_bounds_axes() {
+    use waterui_core::layout::Size;
+
+    let min = Some(Size::new(200.0, 100.0));
+    let max = Some(Size::new(640.0, 480.0));
+
+    // Inside the limits: untouched — a re-measure keeps the user's size.
+    assert_eq!(
+        clamp_window_size(Size::new(400.0, 300.0), min, max),
+        Size::new(400.0, 300.0)
+    );
+    // Below the minimum: lifted to it.
+    assert_eq!(
+        clamp_window_size(Size::new(50.0, 300.0), min, max),
+        Size::new(200.0, 300.0)
+    );
+    // Above the maximum: pulled down to it.
+    assert_eq!(
+        clamp_window_size(Size::new(800.0, 300.0), min, max),
+        Size::new(640.0, 300.0)
+    );
+    // Out of bounds on one axis only: the other axis passes through.
+    assert_eq!(
+        clamp_window_size(Size::new(50.0, 700.0), min, max),
+        Size::new(200.0, 480.0)
+    );
+    // An inverted range floors the maximum at the minimum rather than
+    // reporting an empty box.
+    assert_eq!(
+        clamp_window_size(
+            Size::new(400.0, 300.0),
+            Some(Size::new(700.0, 100.0)),
+            Some(Size::new(640.0, 480.0)),
+        ),
+        Size::new(700.0, 300.0)
+    );
+}
+
+/// A root stretching on one axis — a text field, a row with a `Spacer`, a
+/// frame pinned infinite on one side — leaves the window maximum unbounded
+/// on both axes: the axis it does not claim is laid out inside a larger
+/// offer per the layout spec, not capped to a measurement.
+#[test]
+fn stretch_axis_content_leaves_the_window_maximum_unbounded() {
+    use waterui_layout::frame::Frame;
+
+    let window = Window::new("", binding(WindowState::Normal), || {
+        Frame::new(().size(100.0, 50.0)).max_width(f32::INFINITY)
+    });
+    let mut runtime = runtime_window_for(window);
+    let _ = super::pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+    let (min, max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert!(min.is_some());
+    assert_eq!(
+        max, None,
+        "a stretching root applies no window maximum on either axis"
+    );
+}
+
+/// An app-pinned maximum may leave one axis unbounded explicitly: a `+∞`
+/// component inside `Window::max_size` binds only the other axis — a window
+/// past the bound clamps on that axis and keeps its size on the open one.
+#[test]
+fn an_infinite_max_size_component_leaves_that_axis_unbounded() {
+    use waterui_core::layout::Size;
+
+    let max = binding(Size::new(640.0, 480.0));
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .max_size(max.clone());
+    let mut runtime = runtime_window_for(window);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    // The user stretches the window past the pinned maximum.
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 900,
+        height: 700,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(900.0, 700.0)
+    );
+
+    max.set(Size::new(500.0, f32::INFINITY));
+    let _ = pump_window_semantics(&mut runtime, &env);
+    let (_, applied_max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert_eq!(applied_max, Some(Size::new(500.0, f32::INFINITY)));
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(500.0, 700.0),
+        "the bounded axis clamps while the +∞ axis keeps the user size"
+    );
+}
+
+/// A NaN in the app's `frame` binding is a programming error: the runner
+/// panics at the read, naming the field and the value, rather than quietly
+/// repairing it deeper in the geometry path.
+#[test]
+#[should_panic(expected = "Window::frame.width must be finite, got NaN")]
+fn a_nan_frame_panics_naming_the_field_and_value() {
+    use waterui_core::layout::{Point, Rect, Size};
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0));
+    window
+        .frame
+        .set(Rect::new(Point::new(0.0, 0.0), Size::new(f32::NAN, 300.0)));
+    let _ = runtime_window_for(window);
+}
+
+/// The same trust boundary applies to the explicit size limits: a NaN
+/// `min_size` panics at the read naming the field.
+#[test]
+#[should_panic(expected = "Window::min_size.width must be finite, got NaN")]
+fn a_nan_min_size_panics_naming_the_field_and_value() {
+    use waterui_core::layout::Size;
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .min_size(Size::new(f32::NAN, 100.0));
+    let mut runtime = runtime_window_for(window);
+    let _ = pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+}
+
+/// `max_size` accepts `+∞` per axis but nothing else non-finite.
+#[test]
+#[should_panic(
+    expected = "Window::max_size.height must be finite or +inf for an unbounded axis, got NaN"
+)]
+fn a_nan_max_size_panics_naming_the_field_and_value() {
+    use waterui_core::layout::Size;
+
+    let window = Window::new("", binding(WindowState::Normal), || ().size(100.0, 50.0))
+        .max_size(Size::new(640.0, f32::NAN));
+    let mut runtime = runtime_window_for(window);
+    let _ = pump_window_semantics(&mut runtime, &crate::renderer::tests::test_environment());
+}
+
+/// A re-measure on a screen change updates the limits only: a user-set size
+/// inside the new limits is left alone.
+#[test]
+fn a_remeasure_preserves_the_user_size_inside_the_new_limits() {
+    use waterui_core::dynamic::watch;
+    use waterui_core::layout::Size;
+
+    let main = binding(false);
+    let main_for_view = main.clone();
+    let window = Window::new("", binding(WindowState::Normal), move || {
+        let main = main_for_view.clone();
+        watch(main, |main| {
+            ().size(
+                if main { 700.0 } else { 200.0 },
+                if main { 500.0 } else { 100.0 },
+            )
+        })
+    });
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    // The user settles on a size beyond the loading screen's box.
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 900,
+        height: 700,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(900.0, 700.0)
+    );
+
+    // The main screen re-measures: only the limits move.
+    main.set(true);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    let (min, max) = runtime
+        .platform
+        .applied_size_limits()
+        .expect("runner must apply size limits on the pump");
+    assert_eq!(min, Some(Size::new(700.0, 500.0)));
+    assert_eq!(max, None);
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(900.0, 700.0),
+        "a re-measure must not override a user size inside the new limits"
+    );
+}
+
+/// A re-measure clamps a user size that falls outside the new limits.
+#[test]
+fn a_remeasure_clamps_the_window_size_into_the_new_limits() {
+    use waterui_core::dynamic::watch;
+    use waterui_core::layout::Size;
+
+    let main = binding(false);
+    let main_for_view = main.clone();
+    let window = Window::new("", binding(WindowState::Normal), move || {
+        let main = main_for_view.clone();
+        watch(main, |main| {
+            ().size(
+                if main { 700.0 } else { 200.0 },
+                if main { 500.0 } else { 100.0 },
+            )
+        })
+    });
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let env = crate::renderer::tests::test_environment();
+    let _ = pump_window_semantics(&mut runtime, &env);
+
+    runtime.platform.push_event(InputEvent::Resize {
+        width: 400,
+        height: 300,
+    });
+    let _ = handle_input_events(&mut runtime, &env);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(400.0, 300.0)
+    );
+
+    // The new screen's minimum is larger than the user size: the window clamps
+    // into the new limits — and only the size moves, not the layout semantics.
+    main.set(true);
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(700.0, 500.0),
+        "a size outside the new limits clamps to the nearer bound"
+    );
+    let _ = pump_window_semantics(&mut runtime, &env);
+    assert_eq!(runtime.platform.surface().size(), (700, 500));
+}
+
+/// An explicit `Window::max_size` wins over the user size: a window larger
+/// than the pin clamps down to it.
+#[test]
+fn an_explicit_maximum_clamps_a_larger_window() {
+    use waterui_core::layout::Size;
+
+    // The pin is reactive: tightening it below the settled window size is a
+    // limits change, so the window is clamped into it.
+    let pinned_max = Binding::container(Size::new(2000.0, 2000.0));
+    let window = Window::new("", binding(WindowState::Normal), || ()).max_size(pinned_max.clone());
+    let mut runtime = runtime_window_sized(window, 800, 600);
+    let _ = pump_window_semantics(&mut runtime, &Environment::new());
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(800.0, 600.0),
+        "a pin the window already satisfies leaves its size alone"
+    );
+    pinned_max.set(Size::new(500.0, 400.0));
+    let _ = pump_window_semantics(&mut runtime, &Environment::new());
+    assert_eq!(
+        *runtime.window.frame.snapshot().size(),
+        Size::new(500.0, 400.0),
+        "tightening the app-pinned maximum clamps the window into it"
+    );
+}
+
 #[test]
 fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
-    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView};
+    use waterui_core::layout::{Layout, ProposalSize, Rect, Size, SubView, SubviewPlacement};
     use waterui_layout::container::FixedContainer;
 
     #[derive(Debug)]
@@ -204,7 +671,12 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
             )
         }
 
-        fn place(&self, _bounds: Rect, _children: &[&dyn SubView]) -> Vec<Rect> {
+        fn place(
+            &self,
+            _bounds: Rect,
+            _proposal: ProposalSize,
+            _children: &[&dyn SubView],
+        ) -> Vec<SubviewPlacement> {
             Vec::new()
         }
     }
@@ -223,6 +695,42 @@ fn zero_layout_minimum_is_not_replaced_by_ideal_size() {
         min.expect("content-derived minimum must exist").width,
         0.0,
         "a valid zero minimum must not fall back to the content's ideal width"
+    );
+}
+
+/// The reported minimum must be a box the content can actually occupy: text
+/// re-wraps at the minimum width, so the minimum height is the wrapped height,
+/// not the single-line height a per-axis probe reports.
+#[test]
+fn window_minimum_is_the_coupled_box_not_independent_axes() {
+    use waterui::prelude::text;
+
+    let env = crate::renderer::tests::test_environment();
+    let minimum_of = |content: &'static str| {
+        let window = Window::new("", binding(WindowState::Normal), move || text(content));
+        let mut runtime = runtime_window_for(window);
+        let _ = super::pump_window_semantics(&mut runtime, &env);
+        runtime
+            .platform
+            .applied_size_limits()
+            .expect("runner must apply size limits on the pump")
+            .0
+            .expect("content-derived minimum must exist")
+    };
+
+    // Five words collapse to one word per line at the minimum width, so the
+    // window's minimum height must be five text lines — the per-axis probes
+    // used to report one line here, a box the content could never fit in.
+    let wrapped = minimum_of("AAAA AAAA AAAA AAAA AAAA");
+    let single_line = minimum_of("AAAA");
+    assert!(
+        wrapped.height >= single_line.height * 4.0,
+        "minimum {wrapped:?} must be the height the text needs at its minimum \
+         width, not the single-line height {single_line:?}"
+    );
+    assert!(
+        wrapped.width <= single_line.width * 2.0,
+        "minimum width {wrapped:?} should be word-granular, not the full line"
     );
 }
 
@@ -261,8 +769,8 @@ fn rapid_resize_events_keep_the_retained_tree_at_the_latest_size() {
         "resize must retain the existing view tree"
     );
     assert_eq!(runtime.platform.surface().size(), (640, 480));
-    assert_eq!(runtime.window.frame.get().width(), 640.0);
-    assert_eq!(runtime.window.frame.get().height(), 480.0);
+    assert_eq!(runtime.window.frame.snapshot().width(), 640.0);
+    assert_eq!(runtime.window.frame.snapshot().height(), 480.0);
 }
 
 #[test]
@@ -329,7 +837,11 @@ fn runtime_window_sized(
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,
@@ -434,7 +946,11 @@ fn test_runtime_window() -> RuntimeWindow<HeadlessPlatformWindow> {
     platform.apply_properties(&window);
     let renderer = {
         let surface = platform.surface();
-        HydrolysisRenderer::new(surface.adapter(), surface.device())
+        HydrolysisRenderer::new(
+            surface.adapter(),
+            surface.device(),
+            Rc::new(MinimalTestTheme::default()),
+        )
     };
     RuntimeWindow::new(
         window,
@@ -483,6 +999,10 @@ impl SurfaceProvider for RecoveringSurface {
         self.inner.queue()
     }
 
+    fn device_loss(&self) -> &crate::platform::DeviceLoss {
+        self.inner.device_loss()
+    }
+
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {
         self.acquire_count += 1;
         self.first_error
@@ -506,4 +1026,74 @@ impl SurfaceProvider for RecoveringSurface {
         self.resize_count += 1;
         self.inner.resize(width, height);
     }
+
+    fn gpu_context_id(&self) -> u64 {
+        self.inner.gpu_context_id()
+    }
+
+    fn shared_device(&self) -> cherenkov_gpu::interop::SharedDevice {
+        self.inner.shared_device()
+    }
+}
+
+/// Regression test for water-rs/hydrolysis#228: an `on_change` handler fed by
+/// `debounce` must still fire once the quiet period elapses. `OnChange`
+/// retains only the guard `watch()` returns, so the `Debounce` value drops
+/// when `body` evaluates — and with it the cell holding the upstream
+/// subscription, unless the guard keeps it alive. The timer itself has to run
+/// on the runner's local executor, the queue every `pump_*` drains the way
+/// the winit loop drains `PollLocalTasks`.
+#[test]
+fn debounced_on_change_fires_after_the_quiet_period() {
+    use nami::SignalExt as _;
+    use waterui::text;
+    use waterui_core::handler::AnyViewBuilder;
+
+    // `pumped_test_environment` leaves the local-executor slot open so the
+    // runtime installs its draining `HeadlessMainThreadExecutor` — a parked
+    // runnable would make the timer invisible regardless of the bug.
+    let env = crate::renderer::tests::pumped_test_environment();
+    let source = binding(0i32);
+    let fired = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let builder = {
+        let source = source.clone();
+        let fired = Rc::clone(&fired);
+        AnyViewBuilder::<AnyView>::new(move || {
+            let debounced = source.debounce(Duration::from_millis(20));
+            AnyView::new(text!("x").on_change(&debounced, {
+                let fired = Rc::clone(&fired);
+                move |value: i32| {
+                    fired.borrow_mut().push(value);
+                }
+            }))
+        })
+    };
+    let mut runtime =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
+    let executor = super::executor::HeadlessMainThreadExecutor::thread_shared();
+
+    // The mount pump builds the view, installs the watch, and drops the
+    // `Debounce` value — where a buggy subscription died with it.
+    let _ = runtime.pump_snapshot();
+    source.set(1);
+    // The first drain polls the spawned task once, arming the real
+    // `async_io::Timer`; its reactor-thread wake re-queues the runnable.
+    let _ = runtime.pump_offscreen();
+    // Wait on the wake edge itself: the executor signals when the reactor
+    // thread re-queues the runnable, however long that takes a loaded
+    // runner. The deadline fails the test only when the timer never fires.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fired.borrow().is_empty() {
+        assert!(
+            executor.wait_queued(deadline.saturating_duration_since(Instant::now())),
+            "the debounce timer never re-queued its runnable on the local executor"
+        );
+        let _ = runtime.pump_offscreen();
+    }
+
+    assert_eq!(
+        fired.borrow().as_slice(),
+        &[1],
+        "debounce never re-emitted: the upstream watch died with the combinator"
+    );
 }

@@ -1,7 +1,27 @@
 use super::*;
-use crate::engine::DrawContext;
 use unicode_segmentation::UnicodeSegmentation;
-use waterui_controls::button::button;
+use waterui_graphics::cherenkov::Draw as _;
+
+/// What became of a key press once the framework finished with it.
+///
+/// The distinction that matters is `Consumed` vs `ForwardedToSurface`:
+/// only a consumed press suppresses the paired `TextInput` that follows it
+/// in the event queue (the web platform's `keydown` → `beforeinput` rule —
+/// `preventDefault` on the press cancels the text). A press forwarded to an
+/// embedded surface was *delivered*, not consumed: the surface owns its
+/// key+text pair, exactly as `SurfaceInputEvent` documents, and decides
+/// internally what the press meant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KeyPressOutcome {
+    /// No handler, editor, or surface accepted the press.
+    Ignored,
+    /// A handler consumed the press — editing action, focus traversal, or
+    /// an `OnKeyPress` ancestor reporting `KeyHandling::Handled`.
+    Consumed,
+    /// The press was forwarded to an embedded surface; its paired text is
+    /// delivered too, as the surface contract.
+    ForwardedToSurface,
+}
 
 #[derive(Clone)]
 pub(crate) enum TextInputModel {
@@ -9,6 +29,9 @@ pub(crate) enum TextInputModel {
         value: nami::Binding<StyledStr>,
         line_limit: Option<usize>,
         selection_menu: nami::Computed<Vec<ResolvedMenuItem>>,
+        /// `TextField::on_submit` — run on Return in a line-limited field; a
+        /// field without one leaves the key unconsumed so it bubbles.
+        on_submit: Option<SharedAction>,
     },
     SecureField {
         value: nami::Binding<FormSecure>,
@@ -30,11 +53,20 @@ pub(crate) enum TextInputModel {
 #[derive(Default)]
 pub(crate) struct TextEditingState {
     pub(crate) text_input_targets: Vec<TextInputTarget>,
-    pub(crate) active_text_selection_drag: Option<InteractionKey>,
+    pub(crate) active_text_selection_drag: Option<ActiveTextSelectionDrag>,
     pub(crate) last_text_selection_click: Option<TextSelectionClickState>,
     pub(crate) active_text_context_menu: Option<ActiveTextContextMenu>,
     focused_text_input: RefCell<Option<InteractionKey>>,
+    /// The `.focused()` binding of the field holding text focus, captured
+    /// while the target is emitted so unfocus writes still reach it after
+    /// the target has been truncated or unmounted.
+    pub(crate) focused_binding: Option<nami::Binding<bool>>,
     pub(crate) ime_preedit: Option<Str>,
+    /// Byte offset of the caret inside `ime_preedit`, as the platform
+    /// reported it — the live composition caret the candidate window must
+    /// follow. `None` when the platform did not report one, or whenever
+    /// `ime_preedit` is `None`.
+    pub(crate) ime_preedit_caret: Option<usize>,
     pub(crate) text_caret_fade_started_at: Option<Instant>,
     pub(crate) text_caret_next_frame_at: Option<Instant>,
     pub(crate) text_caret_motion: Option<TextCaretMotion>,
@@ -89,7 +121,13 @@ impl TextEditingState {
 
     /// This frame's position of the drag-selected input, if it is still emitted.
     pub(crate) fn selection_drag_index(&self) -> Option<usize> {
-        self.index_of(self.active_text_selection_drag.as_ref()?)
+        self.index_of(&self.active_text_selection_drag.as_ref()?.target)
+    }
+
+    /// Drops the stored composition, keeping its caret consistent.
+    fn take_ime_preedit(&mut self) -> Option<Str> {
+        self.ime_preedit_caret = None;
+        self.ime_preedit.take()
     }
 }
 
@@ -103,43 +141,213 @@ pub(crate) struct TextSelectionSlot {
 #[derive(Debug, Clone)]
 pub(crate) struct TextSelectionClickState {
     pub(crate) target: InteractionKey,
-    pub(crate) point: vello::kurbo::Point,
+    pub(crate) point: kurbo::Point,
     pub(crate) at: Instant,
     pub(crate) count: u8,
+}
+
+/// An in-flight text-selection drag: which field it belongs to, the click
+/// streak granularity that armed it, and the plain-text range that gesture
+/// selected at pointer-down. The range is the drag's anchor side — for a
+/// multi-click drag it is the word/line the gesture snapped to — so later
+/// moves extend by whole units instead of collapsing the gesture back to a
+/// caret.
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveTextSelectionDrag {
+    pub(crate) target: InteractionKey,
+    /// The click streak that armed this drag: 1 = caret, 2 = word, 3+ = line.
+    pub(crate) click_count: u8,
+    /// The selection (plain-text byte indices) the arming gesture applied.
+    pub(crate) anchor: usize,
+    pub(crate) focus: usize,
 }
 
 #[derive(Clone)]
 pub(crate) struct TextInputTarget {
     pub(crate) interaction_key: InteractionKey,
     pub(crate) modal: bool,
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) cursor_area: vello::kurbo::Rect,
-    pub(crate) text_bounds: vello::kurbo::Rect,
-    pub(crate) text_clip_bounds: vello::kurbo::Rect,
+    pub(crate) bounds: kurbo::Rect,
+    pub(crate) cursor_area: kurbo::Rect,
+    pub(crate) text_bounds: kurbo::Rect,
+    pub(crate) text_clip_bounds: kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
+    /// The string the IME-visible layout was typeset from — the committed
+    /// text with the live pre-edit spliced in (a text field) or the mask
+    /// glyphs (a secure field) — and that layout, in `text_bounds`
+    /// coordinates. The platform editing session resolves cursor-anchor
+    /// character bounds against it.
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "read by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) display_text: Str,
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "read by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) display_layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
     pub(crate) purpose: TextInputPurpose,
     pub(crate) depth: usize,
     pub(crate) order: usize,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
+    /// The environment of the view the target was registered from — the
+    /// context menu it opens runs inside it (water-rs/hydrolysis#140).
+    pub(crate) env: Environment,
+    /// The `OnKeyPress` scopes enclosing the view this target was registered
+    /// from — the chain a key the field did not consume bubbles through,
+    /// innermost first at dispatch time.
+    pub(crate) key_handlers: Option<Rc<KeyHandlerNode>>,
     pub(crate) focus_binding: Option<Binding<bool>>,
     #[cfg(feature = "accessibility")]
     pub(crate) accessibility_node_id: Option<AccessibilityNodeId>,
 }
 
+/// One `OnKeyPress` ancestor scope a focused input's unconsumed keys bubble
+/// into. The scope stack is pushed while the retained tree flushes the
+/// `OnKeyPress` wrapper (outermost first), and a target snapshotting it keeps
+/// the whole chain even after the frame that produced it is gone.
+pub(crate) struct KeyHandlerScope {
+    /// The environment the `.on_key_press` view was built under — the handler
+    /// resolves `State`/`Use` extractors against it, extended with the press.
+    pub(crate) env: Environment,
+    pub(crate) handler: Rc<RefCell<OnKeyPress>>,
+}
+
+/// One link of the `OnKeyPress` scope chain: the innermost scope at a
+/// registration point plus the rest of its ancestors. Pushing a scope
+/// allocates a single node, and a target's snapshot of the chain is a single
+/// `Rc` clone, so neither the walk nor the snapshot allocates per frame.
+pub(crate) struct KeyHandlerNode {
+    pub(crate) scope: KeyHandlerScope,
+    pub(crate) parent: Option<Rc<KeyHandlerNode>>,
+}
+
+/// The innermost chain node shared by `a` and `b` — the scopes enclosing
+/// every registration the two chains were snapped from.
+pub(crate) fn common_key_handler_scope(
+    a: Option<Rc<KeyHandlerNode>>,
+    b: Option<Rc<KeyHandlerNode>>,
+) -> Option<Rc<KeyHandlerNode>> {
+    fn depth(mut node: Option<Rc<KeyHandlerNode>>) -> usize {
+        let mut depth = 0;
+        while let Some(link) = node {
+            depth += 1;
+            node = link.parent.clone();
+        }
+        depth
+    }
+    let mut a = a;
+    let mut b = b;
+    let mut a_depth = depth(a.clone());
+    let mut b_depth = depth(b.clone());
+    while a_depth > b_depth {
+        a = a.and_then(|link| link.parent.clone());
+        a_depth -= 1;
+    }
+    while b_depth > a_depth {
+        b = b.and_then(|link| link.parent.clone());
+        b_depth -= 1;
+    }
+    loop {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                if Rc::ptr_eq(&x, &y) {
+                    return Some(x);
+                }
+                a = x.parent.clone();
+                b = y.parent.clone();
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The focused text input's authoritative editing state, projected for a
+/// platform editing session — see
+/// [`SemanticCore::focused_editor_snapshot`]. Offsets are byte indices into
+/// `text` (the committed, pre-edit-free plain text) except `preedit_caret`,
+/// which indexes `preedit`.
+#[cfg_attr(
+    not(any(target_os = "android", test)),
+    allow(
+        dead_code,
+        reason = "read by the Android editing session and its tests"
+    )
+)]
+pub(crate) struct FocusedEditorSnapshot {
+    /// The focused field's stable identity; a host editing session tags its
+    /// writes with the editor this snapshot minted so a stale connection's
+    /// writes never reach a different field.
+    pub(crate) key: InteractionKey,
+    /// Committed (pre-edit-free) plain text.
+    pub(crate) text: String,
+    /// Selection slot in byte offsets of [`Self::text`]; `anchor` may lead
+    /// `focus` (a keyboard selection made backwards).
+    pub(crate) anchor: usize,
+    pub(crate) focus: usize,
+    /// Live pre-edit and the platform-reported caret byte offset in it.
+    pub(crate) preedit: Option<String>,
+    pub(crate) preedit_caret: Option<usize>,
+    /// `SecureField` — marked text is refused and copy/cut stay inert.
+    pub(crate) password: bool,
+    /// `Some(1)` for a single-line field, `None` for unbounded multiline.
+    pub(crate) line_limit: Option<usize>,
+    /// Whether the field declares `on_submit` — the editor action an IME's
+    /// Done key fires.
+    pub(crate) has_submit: bool,
+    /// The field's hit bounds in window logical coordinates — the editor
+    /// bounds an IME sizes candidate windows against.
+    pub(crate) bounds: kurbo::Rect,
+    /// Caret rect in window logical coordinates (composition-aware).
+    pub(crate) cursor_area: kurbo::Rect,
+    /// Origin of the layout [`Self::display_layout`] was typeset on.
+    pub(crate) text_bounds: kurbo::Rect,
+    /// The text `display_layout` describes — committed + pre-edit for a
+    /// field, the mask glyphs for a secure field.
+    pub(crate) display_text: String,
+    pub(crate) display_layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
+}
+
 pub(crate) struct TextInputTargetRegistration {
     pub(crate) interaction_key: InteractionKey,
     pub(crate) modal: bool,
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) cursor_area: vello::kurbo::Rect,
-    pub(crate) text_bounds: vello::kurbo::Rect,
-    pub(crate) text_clip_bounds: vello::kurbo::Rect,
+    pub(crate) bounds: kurbo::Rect,
+    pub(crate) cursor_area: kurbo::Rect,
+    pub(crate) text_bounds: kurbo::Rect,
+    pub(crate) text_clip_bounds: kurbo::Rect,
     pub(crate) content_alpha: f32,
     pub(crate) layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
+    /// See [`TextInputTarget::display_text`].
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "read by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) display_text: Str,
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "read by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) display_layout: std::sync::Arc<parley::Layout<[u8; 4]>>,
     pub(crate) purpose: TextInputPurpose,
     pub(crate) model: TextInputModel,
     pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
+    /// The environment of the registering view; the context menu opens inside
+    /// it (water-rs/hydrolysis#140).
+    pub(crate) env: Environment,
 }
 
 pub(crate) struct TextInputTargetData {
@@ -150,40 +358,68 @@ pub(crate) struct TextInputTargetData {
     pub(crate) accessibility_node_id: Option<AccessibilityNodeId>,
 }
 
-#[derive(Clone)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "context-menu actions are constructed one at a time on user interaction; size is immaterial"
-)]
+#[derive(Clone, Copy)]
 pub(crate) enum TextContextMenuAction {
     Copy,
     Cut,
     Paste,
     SelectAll,
-    Custom(ResolvedCommand),
 }
 
-#[derive(Clone)]
-pub(crate) enum TextContextMenuEntry {
-    Command {
-        label: String,
-        action: Box<TextContextMenuAction>,
-    },
-    Divider,
+/// A built-in selection-menu row as a [`PopupMenuNode`]: its action runs
+/// `action` against `model`/`selection` in the row's dispatch environment —
+/// the environment the menu opened in, which `popup_menu_window` and the
+/// drawn overlay both hand the press.
+fn text_context_menu_builtin_node(
+    label: String,
+    action: TextContextMenuAction,
+    model: &TextInputModel,
+    selection: &Rc<RefCell<TextSelectionSlot>>,
+) -> PopupMenuNode {
+    let model = model.clone();
+    let selection = Rc::clone(selection);
+    let semantic_text = label.clone();
+    let content = label.clone();
+    PopupMenuNode::Command {
+        label: waterui_controls::label::Label::new(semantic_text, move || {
+            AnyView::new(
+                waterui_layout::frame::Frame::new(Text::new(StyledStr::plain(content.clone())))
+                    .alignment(waterui_layout::alignment::Leading)
+                    .max_width(f32::INFINITY),
+            )
+        }),
+        plain_label: label,
+        action: SharedAction::new(move |env: Environment| {
+            let _ = execute_text_context_menu_action(&action, &model, &selection, &env);
+        }),
+        disabled: nami::Computed::constant(false),
+        shortcut: None,
+        subtitle: None,
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct TextContextMenuOverlayRow {
-    pub(crate) bounds: vello::kurbo::Rect,
-    pub(crate) entry: TextContextMenuEntry,
+    pub(crate) bounds: kurbo::Rect,
+    pub(crate) node: PopupMenuNode,
 }
 
 #[derive(Clone)]
 pub(crate) struct TextContextMenuOverlay {
-    pub(crate) bounds: vello::kurbo::Rect,
+    pub(crate) bounds: kurbo::Rect,
     pub(crate) rows: Vec<TextContextMenuOverlayRow>,
-    pub(crate) model: TextInputModel,
-    pub(crate) selection: Rc<RefCell<TextSelectionSlot>>,
+    /// Open/closed handles for the submenu popup windows this overlay opens.
+    /// Dismissal closes the whole chain.
+    pub(crate) menu_group: PopupMenuStateGroup,
+    /// The overlay's handle in `menu_group`, at index 0: the overlay is drawn,
+    /// not a window, so this sentinel stands in for the root window a
+    /// `.context_menu` chain starts with. A command row's `close_all()` marks
+    /// it `Closed`, which the next render and pointer-down read as "the menu's
+    /// command already ran — dismiss the overlay too".
+    pub(crate) dismiss_state: nami::Binding<WindowState>,
+    /// The widget theme the overlay was opened under: submenu windows draw
+    /// with the same menu metrics and surface treatment.
+    pub(crate) theme: Rc<dyn crate::engine::WidgetTheme>,
     pub(crate) env: Environment,
 }
 
@@ -195,15 +431,15 @@ pub(crate) enum ActiveTextContextMenu {
     },
     NativeWindow {
         target: InteractionKey,
-        state: nami::Binding<WindowState>,
+        group: PopupMenuStateGroup,
     },
 }
 
 impl TextInputModel {
     pub(crate) fn plain_text(&self) -> String {
         match self {
-            Self::TextField { value, .. } => value.get().to_plain().to_string(),
-            Self::SecureField { value } => value.get().expose().to_owned(),
+            Self::TextField { value, .. } => value.snapshot().to_plain().to_string(),
+            Self::SecureField { value } => value.snapshot().expose().to_owned(),
         }
     }
 
@@ -231,7 +467,7 @@ impl TextInputModel {
 
     pub(crate) fn custom_selection_menu_items(&self) -> Vec<ResolvedMenuItem> {
         match self {
-            Self::TextField { selection_menu, .. } => selection_menu.get(),
+            Self::TextField { selection_menu, .. } => selection_menu.snapshot(),
             Self::SecureField { .. } => Vec::new(),
         }
     }
@@ -636,30 +872,31 @@ pub(crate) fn selection_range_contains_index(
 }
 
 pub(crate) fn text_context_menu_size(
-    entries: &[TextContextMenuEntry],
+    nodes: &[PopupMenuNode],
     metrics: TextContextMenuMetrics,
 ) -> (f64, f64) {
-    let max_label_chars = entries
+    let max_label_chars = nodes
         .iter()
-        .filter_map(|entry| match entry {
-            TextContextMenuEntry::Command { label, .. } => Some(label.chars().count()),
-            TextContextMenuEntry::Divider => None,
+        .filter_map(|node| match node {
+            PopupMenuNode::Command { plain_label, .. }
+            | PopupMenuNode::Menu { plain_label, .. } => Some(plain_label.chars().count()),
+            PopupMenuNode::Divider => None,
         })
         .max()
         .unwrap_or(0) as f64;
     let width = (metrics.horizontal_padding * 2.0 + max_label_chars * metrics.width_per_char)
         .clamp(metrics.min_width, metrics.max_width);
-    let height = (entries.len() as f64 * metrics.row_height).max(metrics.row_height);
+    let height = (nodes.len() as f64 * metrics.row_height).max(metrics.row_height);
     (width, height)
 }
 
 pub(crate) fn text_context_menu_overlay_bounds(
-    anchor: vello::kurbo::Point,
-    entries: &[TextContextMenuEntry],
-    window_bounds: vello::kurbo::Rect,
+    anchor: kurbo::Point,
+    nodes: &[PopupMenuNode],
+    window_bounds: kurbo::Rect,
     metrics: TextContextMenuMetrics,
-) -> vello::kurbo::Rect {
-    let (width, height) = text_context_menu_size(entries, metrics);
+) -> kurbo::Rect {
+    let (width, height) = text_context_menu_size(nodes, metrics);
     let preferred_x = anchor.x;
     let preferred_y = anchor.y;
     let fallback_x = anchor.x - width;
@@ -688,14 +925,14 @@ pub(crate) fn text_context_menu_overlay_bounds(
     if y0 + height > window_bounds.y1 {
         y0 = window_bounds.y1 - height;
     }
-    vello::kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
+    kurbo::Rect::new(x0, y0, x0 + width, y0 + height)
 }
 
 pub(crate) fn execute_text_context_menu_action(
     action: &TextContextMenuAction,
     model: &TextInputModel,
     selection: &Rc<RefCell<TextSelectionSlot>>,
-    env: &Environment,
+    _env: &Environment,
 ) -> bool {
     match action {
         TextContextMenuAction::Copy => {
@@ -719,10 +956,6 @@ pub(crate) fn execute_text_context_menu_action(
         TextContextMenuAction::SelectAll => {
             let mut slot = selection.borrow_mut();
             select_all_model_text(model, &mut slot)
-        }
-        TextContextMenuAction::Custom(command) => {
-            call_action_discarding_result(&command.action, env);
-            true
         }
     }
 }
@@ -768,7 +1001,7 @@ fn refreshed_target_selection(target: &TextInputTarget) -> parley::Selection {
     selection_for_target_layout(&target.model, &target.layout, &slot)
 }
 
-impl HydrolysisRenderer {
+impl SemanticCore {
     pub(crate) fn set_text_caret_motion(&mut self, motion: TextCaretMotion) {
         self.text_editing.text_caret_motion = Some(motion);
     }
@@ -780,7 +1013,15 @@ impl HydrolysisRenderer {
     }
 
     pub(crate) fn reset_text_caret_animation(&mut self, now: Instant) {
-        let motion = self.text_caret_motion();
+        // A semantic core never installs a caret motion — the blink is
+        // presentation — so focusing a text field there clears the animation
+        // state instead of scheduling frames. `advance_text_caret_animation`
+        // and `text_caret_opacity` keep their strict contract: they only run
+        // on the rendered pump.
+        let Some(motion) = self.text_editing.text_caret_motion else {
+            self.clear_text_caret_animation();
+            return;
+        };
         self.text_editing.text_caret_fade_started_at = Some(now);
         self.text_editing.text_caret_next_frame_at = Some(
             now.checked_add(motion.frame_interval)
@@ -792,18 +1033,20 @@ impl HydrolysisRenderer {
         self.text_editing.text_caret_fade_started_at = None;
         self.text_editing.text_caret_next_frame_at = None;
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn prepare_transient_text_input_overlay(
         &mut self,
-        env: &Environment,
-        transform: vello::kurbo::Affine,
+        _env: &Environment,
+        transform: kurbo::Affine,
     ) {
         let focused = self.text_editing.focused_index();
         let menu_target = self.active_text_context_menu_target();
-        let mut scene = vello::Scene::new();
-        let theme = widget_theme(env);
+        let mut scene = Recording::new();
+        let theme = self.theme();
         {
-            let mut draw = VelloDrawContext::with_root_transform(&mut scene, transform);
+            let mut draw = SceneDrawContext::with_root_transform(&mut scene, transform);
             for (index, target) in self.text_editing.text_input_targets.iter().enumerate() {
                 if target.content_alpha <= 0.0 {
                     continue;
@@ -813,35 +1056,41 @@ impl HydrolysisRenderer {
                     continue;
                 }
                 let selection = refreshed_target_selection(target);
-                draw.push_layer(target.content_alpha, Some(&target.text_clip_bounds));
-                if selection.is_collapsed() {
-                    if focused == Some(index) {
-                        let caret_opacity = self.text_caret_opacity(self.frame_instant());
-                        if caret_opacity > 0.0 {
-                            draw.fill_rect(
-                                target.cursor_area,
-                                &theme.input_caret_brush(caret_opacity),
-                            );
-                        }
-                    }
-                } else {
-                    let selection_brush = theme.input_selection_brush();
-                    for (rect, _) in selection.geometry(&target.layout) {
-                        let highlight = vello::kurbo::Rect::new(
-                            target.text_bounds.x0 + rect.x0,
-                            target.text_bounds.y0 + rect.y0,
-                            target.text_bounds.x0 + rect.x1,
-                            target.text_bounds.y0 + rect.y1,
-                        );
-                        draw.fill_rect(highlight, &selection_brush);
-                    }
-                }
-                draw.pop_layer();
+                let selection_paint = theme.input_selection_paint();
+                let caret_opacity = (selection.is_collapsed() && focused == Some(index))
+                    .then(|| self.text_caret_opacity(self.frame_instant()));
+                let caret_paint = caret_opacity
+                    .filter(|opacity| *opacity > 0.0)
+                    .map(|opacity| theme.input_caret_paint(opacity));
+                draw.clip(target.text_clip_bounds, |draw| {
+                    draw.group(
+                        cherenkov::Group::new().opacity(target.content_alpha),
+                        |draw| {
+                            if selection.is_collapsed() {
+                                if let Some(paint) = &caret_paint {
+                                    draw.fill(target.cursor_area, paint.clone());
+                                }
+                            } else {
+                                for (rect, _) in selection.geometry(&target.layout) {
+                                    let highlight = kurbo::Rect::new(
+                                        target.text_bounds.x0 + rect.x0,
+                                        target.text_bounds.y0 + rect.y0,
+                                        target.text_bounds.x0 + rect.x1,
+                                        target.text_bounds.y0 + rect.y1,
+                                    );
+                                    draw.fill(highlight, selection_paint.clone());
+                                }
+                            }
+                        },
+                    );
+                });
             }
         }
         self.transient_scene = Some(scene);
     }
+}
 
+impl SemanticCore {
     pub(crate) fn advance_text_caret_animation(&mut self, now: Instant) -> bool {
         if !self.text_editing.has_focus() {
             return false;
@@ -909,21 +1158,128 @@ impl HydrolysisRenderer {
     /// Move focus to the text input with this stable identity, or clear it with
     /// `None`. The target need not be emitted this frame; focus simply resolves
     /// to nothing until it is.
+    /// Wires a `.focused(binding)` modifier to the single focusable target —
+    /// a text field or an input surface — registered inside the spans
+    /// (`text_start`, `embedded_start`): writes the binding onto that target,
+    /// then applies the binding's value to the focused-input key. Shared by
+    /// the rendered flush and the semantic accessibility walk.
+    pub(crate) fn wire_focused_target(
+        &mut self,
+        value: &waterui::component::focus::Focused,
+        should_focus: bool,
+        text_start: usize,
+        embedded_start: usize,
+    ) {
+        let text_count = self.text_editing.text_input_targets.len() - text_start;
+        let embedded_count = self.hit_test.embedded_input_targets.len() - embedded_start;
+        let focus_target_count = text_count + embedded_count;
+        assert!(
+            focus_target_count == 1,
+            "hydrolysis .focused() requires exactly one TextField or SecureField or input surface in the wrapped subtree, found {focus_target_count}"
+        );
+        if embedded_count == 1 {
+            let target = self
+                .hit_test
+                .embedded_input_targets
+                .get_mut(embedded_start)
+                .expect("hydrolysis focused metadata missing registered surface input target");
+            assert!(
+                target.focus_binding.is_none(),
+                "hydrolysis does not allow multiple .focused() modifiers to target the same control"
+            );
+            target.focus_binding = Some(value.0.clone());
+            let target_key = target.interaction_key.clone();
+
+            if should_focus {
+                self.set_focused_embedded_key(Some(target_key));
+            } else if self.is_focused_embedded(&target_key) {
+                self.set_focused_embedded_key(None);
+            }
+            return;
+        }
+        let target = self
+            .text_editing
+            .text_input_targets
+            .get_mut(text_start)
+            .expect("hydrolysis focused metadata missing registered text input target");
+        assert!(
+            target.focus_binding.is_none(),
+            "hydrolysis does not allow multiple .focused() modifiers to target the same control"
+        );
+        target.focus_binding = Some(value.0.clone());
+        let target_key = target.interaction_key.clone();
+
+        if should_focus {
+            self.set_focused_text_input_key(Some(target_key));
+        } else if self.text_editing.is_focused(&target_key) {
+            self.set_focused_text_input_key(None);
+        }
+    }
+
     pub(crate) fn set_focused_text_input_key(&mut self, focused: Option<InteractionKey>) -> bool {
         let previous = self.text_editing.focused_key();
-        if previous == focused {
-            return false;
+        let mut changed = false;
+        match focused.as_ref() {
+            // A field taking UI focus takes the semantic focus with it —
+            // the tree reports focus on the field's node.
+            Some(key) if previous.as_ref() != Some(key) => {
+                #[cfg(feature = "accessibility")]
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    #[cfg(feature = "accessibility")]
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            // The same field re-asserted: repair only a stale link — keyboard
+            // focus still claims the key while its node went un-emitted when
+            // the link was made. Semantic focus sitting on another node is a
+            // legitimate move, not staleness.
+            #[cfg(feature = "accessibility")]
+            Some(key)
+                if self.hit_test.keyboard_focus.as_ref() == Some(key)
+                    && self
+                        .focus_node_for_key(key)
+                        .is_some_and(|node| self.accessibility.focus != node) =>
+            {
+                let node = self.focus_node_for_key(key);
+                changed |= self.set_keyboard_focus_impl(
+                    Some(key.clone()),
+                    node,
+                    self.hit_test.keyboard_focus_visible,
+                );
+            }
+            Some(_) => {}
+            // Clearing UI focus drops the semantic focus only when the tree
+            // still rests on the cleared field. A focus move that already
+            // landed elsewhere — traversal ends editing after re-targeting
+            // semantic focus — is left alone.
+            None if previous.is_some() && self.hit_test.keyboard_focus == previous => {
+                changed |= self.set_keyboard_focus_impl(
+                    None,
+                    #[cfg(feature = "accessibility")]
+                    None,
+                    false,
+                );
+            }
+            None => {}
         }
-        let focus_binding = |key: Option<&InteractionKey>| {
-            key.and_then(|key| self.text_editing.index_of(key))
-                .and_then(|index| {
-                    self.text_editing.text_input_targets[index]
-                        .focus_binding
-                        .clone()
-                })
-        };
-        let previous_binding = focus_binding(previous.as_ref());
-        let next_binding = focus_binding(focused.as_ref());
+        if previous == focused {
+            return changed;
+        }
+        let previous_binding = self.text_editing.focused_binding.take();
+        // The outgoing target may already be truncated or unmounted, so the
+        // `.focused` binding is captured while the target is emitted and
+        // replayed from the slot — resolving it now would find nothing.
+        let next_binding = focused
+            .as_ref()
+            .and_then(|key| self.text_editing.index_of(key))
+            .and_then(|index| {
+                self.text_editing.text_input_targets[index]
+                    .focus_binding
+                    .clone()
+            });
         if let Some(binding) = previous_binding {
             binding.set(false);
         }
@@ -935,11 +1291,17 @@ impl HydrolysisRenderer {
         );
         let focused_something = focused.is_some();
         self.text_editing.store_focused_key(focused);
+        self.text_editing.focused_binding = next_binding.clone();
         if let Some(binding) = next_binding {
             binding.set(true);
         }
+        if focused_something {
+            // A field taking focus releases a surface's — the counterpart
+            // of the rule that landing on a surface ends editing.
+            let _ = self.hit_test.set_embedded_focus_index(None);
+        }
         self.text_editing.active_text_selection_drag = None;
-        self.text_editing.ime_preedit = None;
+        self.text_editing.take_ime_preedit();
         if focused_something {
             self.reset_text_caret_animation(self.frame_instant());
         } else {
@@ -954,8 +1316,29 @@ impl HydrolysisRenderer {
     pub(crate) fn dismiss_active_text_context_menu(&mut self) {
         if let Some(menu) = self.text_editing.active_text_context_menu.take() {
             match menu {
-                ActiveTextContextMenu::Overlay { .. } => self.request_refresh(),
-                ActiveTextContextMenu::NativeWindow { state, .. } => state.set(WindowState::Closed),
+                ActiveTextContextMenu::Overlay { overlay, .. } => {
+                    overlay.menu_group.close_all();
+                    if self
+                        .popup_menu
+                        .active_popup_menu_group
+                        .as_ref()
+                        .is_some_and(|group| Rc::ptr_eq(&group.0, &overlay.menu_group.0))
+                    {
+                        self.popup_menu.active_popup_menu_group = None;
+                    }
+                    self.request_refresh();
+                }
+                ActiveTextContextMenu::NativeWindow { group, .. } => {
+                    group.close_all();
+                    if self
+                        .popup_menu
+                        .active_popup_menu_group
+                        .as_ref()
+                        .is_some_and(|active| Rc::ptr_eq(&active.0, &group.0))
+                    {
+                        self.popup_menu.active_popup_menu_group = None;
+                    }
+                }
             }
         }
     }
@@ -969,22 +1352,28 @@ impl HydrolysisRenderer {
         };
         self.text_editing.index_of(key)
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn render_active_text_context_menu_overlay(
         &mut self,
         env: &Environment,
-        transform: vello::kurbo::Affine,
+        transform: kurbo::Affine,
     ) {
         let Some(ActiveTextContextMenu::Overlay { overlay, .. }) =
             self.text_editing.active_text_context_menu.clone()
         else {
             return;
         };
+        if overlay.dismiss_state.snapshot() == WindowState::Closed {
+            self.dismiss_active_text_context_menu();
+            return;
+        }
 
-        let theme = widget_theme(env);
+        let theme = self.theme();
         let metrics = theme.text_context_menu_metrics();
         {
-            let mut draw = VelloDrawContext::with_root_transform(&mut self.scene, transform);
+            let mut draw = SceneDrawContext::with_root_transform(&mut self.scene, transform);
             theme.draw_text_context_menu_panel(&mut draw, overlay.bounds);
         }
         for (index, row) in overlay.rows.iter().enumerate() {
@@ -992,23 +1381,24 @@ impl HydrolysisRenderer {
                 .rows
                 .as_slice()
                 .get(index + 1)
-                .is_some_and(|next| matches!(next.entry, TextContextMenuEntry::Divider));
+                .is_some_and(|next| matches!(next.node, PopupMenuNode::Divider));
             if index + 1 < overlay.rows.len()
-                && !matches!(row.entry, TextContextMenuEntry::Divider)
+                && !matches!(row.node, PopupMenuNode::Divider)
                 && !next_is_divider
             {
-                let separator = vello::kurbo::Rect::new(
+                let separator = kurbo::Rect::new(
                     row.bounds.x0 + metrics.separator_horizontal_inset,
                     row.bounds.y1 - metrics.separator_thickness,
                     row.bounds.x1 - metrics.separator_horizontal_inset,
                     row.bounds.y1,
                 );
-                let mut draw = VelloDrawContext::with_root_transform(&mut self.scene, transform);
+                let mut draw = SceneDrawContext::with_root_transform(&mut self.scene, transform);
                 theme.draw_text_context_menu_separator(&mut draw, separator);
             }
 
-            match &row.entry {
-                TextContextMenuEntry::Command { label, .. } => {
+            match &row.node {
+                PopupMenuNode::Command { plain_label, .. }
+                | PopupMenuNode::Menu { plain_label, .. } => {
                     let text_rect = inset_rect(
                         row.bounds,
                         metrics.horizontal_padding,
@@ -1016,25 +1406,25 @@ impl HydrolysisRenderer {
                     );
                     let ctx = RenderContext {
                         transform,
-                        hit_transform: vello::kurbo::Affine::IDENTITY,
+                        hit_transform: kurbo::Affine::IDENTITY,
                         bounds: overlay.bounds,
                     }
                     .child(
-                        vello::kurbo::Affine::translate((text_rect.x0, text_rect.y0)),
-                        vello::kurbo::Rect::new(0.0, 0.0, text_rect.width(), text_rect.height()),
+                        kurbo::Affine::translate((text_rect.x0, text_rect.y0)),
+                        kurbo::Rect::new(0.0, 0.0, text_rect.width(), text_rect.height()),
                     );
                     let (state, scene) = self.state_and_scene_mut();
                     Self::render_styled_text(
                         state,
                         scene,
                         ctx,
-                        StyledStr::plain(label.clone()),
+                        StyledStr::plain(plain_label.clone()),
                         HorizontalAlignment::Leading,
                         env,
                     );
                 }
-                TextContextMenuEntry::Divider => {
-                    let separator = vello::kurbo::Rect::new(
+                PopupMenuNode::Divider => {
+                    let separator = kurbo::Rect::new(
                         row.bounds.x0 + metrics.separator_horizontal_inset,
                         row.bounds.y0 + row.bounds.height() * 0.5
                             - metrics.separator_thickness * 0.5,
@@ -1044,22 +1434,28 @@ impl HydrolysisRenderer {
                             + metrics.separator_thickness * 0.5,
                     );
                     let mut draw =
-                        VelloDrawContext::with_root_transform(&mut self.scene, transform);
+                        SceneDrawContext::with_root_transform(&mut self.scene, transform);
                     theme.draw_text_context_menu_separator(&mut draw, separator);
                 }
             }
         }
     }
+}
 
+impl SemanticCore {
     pub(crate) fn handle_text_context_menu_overlay_pointer_down(
         &mut self,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
     ) -> bool {
         let Some(ActiveTextContextMenu::Overlay { overlay, .. }) =
             self.text_editing.active_text_context_menu.clone()
         else {
             return false;
         };
+        if overlay.dismiss_state.snapshot() == WindowState::Closed {
+            self.dismiss_active_text_context_menu();
+            return false;
+        }
         if !overlay.bounds.contains(point) {
             self.dismiss_active_text_context_menu();
             return false;
@@ -1068,21 +1464,59 @@ impl HydrolysisRenderer {
             if !row.bounds.contains(point) {
                 continue;
             }
-            match &row.entry {
-                TextContextMenuEntry::Command { action, .. } => {
-                    let changed = execute_text_context_menu_action(
-                        action,
-                        &overlay.model,
-                        &overlay.selection,
-                        &overlay.env,
-                    );
+            match &row.node {
+                PopupMenuNode::Command {
+                    action, disabled, ..
+                } => {
+                    if disabled.snapshot() {
+                        return false;
+                    }
+                    call_action_discarding_result(action, &overlay.env);
                     self.dismiss_active_text_context_menu();
-                    return changed;
+                    return true;
                 }
-                TextContextMenuEntry::Divider => return false,
+                PopupMenuNode::Divider => return false,
+                PopupMenuNode::Menu { items, .. } => {
+                    if items.is_empty() {
+                        return false;
+                    }
+                    self.open_text_context_menu_submenu(&overlay, row.bounds, items.clone());
+                    return true;
+                }
             }
         }
         true
+    }
+
+    /// Opens `items` — a selection-menu row's nested `Menu` — as a submenu
+    /// popup window anchored to the row's trailing edge, through the same
+    /// [`popup_menu_window`] path a `.context_menu` submenu takes. The window
+    /// joins the overlay's menu group at depth 1: the overlay's dismiss
+    /// sentinel holds depth 0, standing in for the root window.
+    fn open_text_context_menu_submenu(
+        &mut self,
+        overlay: &TextContextMenuOverlay,
+        row_bounds: kurbo::Rect,
+        items: Vec<PopupMenuNode>,
+    ) {
+        let env = &overlay.env;
+        let theme = Rc::clone(&overlay.theme);
+        let metrics = theme.text_context_menu_metrics();
+        let text = self.popup_menu_text_metrics(&items, metrics, env, &theme);
+        let origin = popup_window_origin(
+            LayoutPoint::new(row_bounds.x1 as f32, row_bounds.y0 as f32),
+            env,
+        );
+        let group = overlay.menu_group.clone();
+        group.truncate(1);
+        let (window, state) =
+            popup_menu_window(items, origin, group.clone(), 1, metrics, text, &theme);
+        group.push(state);
+        env.get::<PopupWindowManager>()
+            .expect("hydrolysis text selection menus require PopupWindowManager in environment")
+            .show(window, env);
+        self.popup_menu.active_popup_menu_group = Some(group);
+        self.request_refresh();
     }
 
     pub(crate) fn focused_text_target_data(
@@ -1098,9 +1532,161 @@ impl HydrolysisRenderer {
         Some((index, target.model.clone(), Rc::clone(&target.selection)))
     }
 
+    /// The focused text input's authoritative editing state for a platform
+    /// editing session (Android's `InputConnection` mirror): committed text
+    /// and selection in byte offsets, the live pre-edit, the field's input
+    /// constraints and the geometry an IME draws around the caret.
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "read by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) fn focused_editor_snapshot(&self) -> Option<FocusedEditorSnapshot> {
+        let index = self.text_editing.focused_index()?;
+        let target = &self.text_editing.text_input_targets[index];
+        let text = target.model.plain_text();
+        let slot = target.selection.borrow();
+        Some(FocusedEditorSnapshot {
+            key: target.interaction_key.clone(),
+            anchor: clamp_to_char_boundary(text.as_str(), slot.anchor),
+            focus: clamp_to_char_boundary(text.as_str(), slot.focus),
+            text,
+            preedit: self
+                .text_editing
+                .ime_preedit
+                .as_ref()
+                .map(ToString::to_string),
+            preedit_caret: self.text_editing.ime_preedit_caret,
+            password: target.model.is_secure(),
+            line_limit: target.model.line_limit(),
+            has_submit: matches!(
+                &target.model,
+                TextInputModel::TextField {
+                    on_submit: Some(_),
+                    ..
+                }
+            ),
+            bounds: target.bounds,
+            cursor_area: target.cursor_area,
+            text_bounds: target.text_bounds,
+            display_text: target.display_text.to_string(),
+            display_layout: std::sync::Arc::clone(&target.display_layout),
+        })
+    }
+
+    /// Write an editing session's projection back into the focused model in
+    /// one step: committed text, selection slot and pre-edit, in the order
+    /// [`replace_model_selection`] publishes them (selection before text so a
+    /// refresh sees the caret that belongs to the edited value). The pre-edit
+    /// routes through [`Self::handle_ime_preedit`], so a password-purpose
+    /// target still refuses marked text.
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "written by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) fn apply_editor_projection(
+        &mut self,
+        committed: &str,
+        anchor: usize,
+        focus: usize,
+        preedit: Option<(&str, Option<usize>)>,
+    ) -> bool {
+        let Some((_index, model, selection)) = self.focused_text_target_data() else {
+            return false;
+        };
+        // The projection goes through the same normalization the text-insert
+        // path applies — carriage returns never reach a model, and a
+        // single-line field never grows a newline — and the same line-limit
+        // refusal, so a platform write cannot exceed what a keypress could.
+        let committed = normalized_insert_text(committed, model.line_limit());
+        let mut changed = false;
+        {
+            let mut slot = selection.borrow_mut();
+            let anchor = clamp_to_char_boundary(committed.as_str(), anchor);
+            let focus = clamp_to_char_boundary(committed.as_str(), focus);
+            changed |= slot.anchor != anchor || slot.focus != focus || !slot.initialized;
+            slot.anchor = anchor;
+            slot.focus = focus;
+            slot.initialized = true;
+            if model.plain_text() != committed
+                && !exceeds_line_limit(committed.as_str(), model.line_limit())
+            {
+                model.set_plain_text(committed.clone());
+                changed = true;
+            }
+        }
+        let (preedit_text, preedit_caret) =
+            preedit.map_or(("", None), |(text, caret)| (text, caret));
+        changed |= self.handle_ime_preedit(preedit_text, preedit_caret);
+        if changed {
+            self.reset_text_caret_animation(self.frame_instant());
+        }
+        changed
+    }
+
+    /// A line-limited field's submit action, if its focused target declares
+    /// one — the `on_submit` an editor action (Return, `IME_ACTION_DONE`)
+    /// fires. Extracted from [`Self::handle_key`] so a platform editing
+    /// session submits identically.
+    pub(crate) fn perform_editor_submit(&mut self) -> bool {
+        let submit = self
+            .text_editing
+            .focused_target()
+            .and_then(|target| match &target.model {
+                TextInputModel::TextField {
+                    line_limit: Some(_),
+                    on_submit: Some(action),
+                    ..
+                } => Some((action.clone(), target.env.clone())),
+                _ => None,
+            });
+        let Some((action, env)) = submit else {
+            return false;
+        };
+        action.call(&env);
+        true
+    }
+
+    /// A context-menu editing action (select-all/cut/copy/paste) addressed at
+    /// the focused target — the same primitives the rendered menu executes,
+    /// for a platform `InputConnection`'s `performContextMenuAction`.
+    #[cfg_attr(
+        not(any(target_os = "android", test)),
+        allow(
+            dead_code,
+            reason = "written by the Android editing session and its tests"
+        )
+    )]
+    pub(crate) fn perform_focused_context_action(
+        &mut self,
+        action: &TextContextMenuAction,
+    ) -> bool {
+        let Some((index, model, selection)) = self.focused_text_target_data() else {
+            return false;
+        };
+        // The rendered menu never offers copy/cut on a secure field; a
+        // platform connection can send the action anyway, so the guard
+        // belongs here too — a secret never reaches the clipboard.
+        if model.is_secure()
+            && matches!(
+                action,
+                TextContextMenuAction::Copy | TextContextMenuAction::Cut
+            )
+        {
+            return false;
+        }
+        let env = self.text_editing.text_input_targets[index].env.clone();
+        execute_text_context_menu_action(action, &model, &selection, &env)
+    }
+
     pub(crate) fn text_selection_index_from_point(
         target: &TextInputTarget,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
     ) -> usize {
         let local_x = (point.x - target.text_bounds.x0) as f32;
         let local_y = (point.y - target.text_bounds.y0) as f32;
@@ -1113,7 +1699,7 @@ impl HydrolysisRenderer {
 
     pub(crate) fn text_selection_range_from_point_with_click_count(
         target: &TextInputTarget,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         click_count: u8,
     ) -> (usize, usize) {
         let local_x = (point.x - target.text_bounds.x0) as f32;
@@ -1141,7 +1727,7 @@ impl HydrolysisRenderer {
     pub(crate) fn next_text_selection_click_count(
         &mut self,
         target_index: usize,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         at: Instant,
     ) -> u8 {
         let target = self
@@ -1169,18 +1755,75 @@ impl HydrolysisRenderer {
         count
     }
 
+    /// Apply the selection for a click of `click_count` at `point`. Returns the
+    /// applied (anchor, focus) range plus whether the slot changed, so the
+    /// caller can arm [`ActiveTextSelectionDrag`] with the same range as its
+    /// anchor side.
     pub(crate) fn apply_text_selection_click_gesture(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         click_count: u8,
-    ) -> bool {
+    ) -> Option<(usize, usize, bool)> {
+        let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
+            self.text_editing.active_text_selection_drag = None;
+            return None;
+        };
+        let (anchor, focus) =
+            Self::text_selection_range_from_point_with_click_count(target, point, click_count);
+        let mut slot = target.selection.borrow_mut();
+        let changed = slot.anchor != anchor || slot.focus != focus || !slot.initialized;
+        slot.anchor = anchor;
+        slot.focus = focus;
+        slot.initialized = true;
+        Some((anchor, focus, changed))
+    }
+
+    /// Extend an in-flight selection drag to `point`. The drag remembers the
+    /// click streak that armed it: single clicks extend at caret granularity,
+    /// while a double/triple-click drag keeps the word/line it snapped to as
+    /// the anchor and extends by whole units — so the pointer release (or a
+    /// sub-pixel jiggle inside the same word) cannot collapse the gesture's
+    /// selection back to a caret. Mirrors parley's `Selection::extend_to_point`
+    /// in plain-index space.
+    pub(crate) fn update_text_selection_drag(&mut self, index: usize, point: kurbo::Point) -> bool {
+        let Some(drag) = self.text_editing.active_text_selection_drag.clone() else {
+            return false;
+        };
         let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
             self.text_editing.active_text_selection_drag = None;
             return false;
         };
-        let (anchor, focus) =
-            Self::text_selection_range_from_point_with_click_count(target, point, click_count);
+        let (anchor, focus) = if drag.click_count <= 1 {
+            (
+                drag.anchor,
+                Self::text_selection_index_from_point(target, point),
+            )
+        } else {
+            let (target_anchor, target_focus) =
+                Self::text_selection_range_from_point_with_click_count(
+                    target,
+                    point,
+                    drag.click_count,
+                );
+            // Same merge parley's `extend_selection` performs: union of the
+            // hovered unit and the armed anchor range, with the anchor kept on
+            // the side opposite the drag direction.
+            let extending_right = target_anchor >= drag.anchor;
+            let min = drag
+                .anchor
+                .min(drag.focus)
+                .min(target_anchor.min(target_focus));
+            let max = drag
+                .anchor
+                .max(drag.focus)
+                .max(target_anchor.max(target_focus));
+            if extending_right {
+                (min, max)
+            } else {
+                (max, min)
+            }
+        };
         let mut slot = target.selection.borrow_mut();
         let changed = slot.anchor != anchor || slot.focus != focus || !slot.initialized;
         slot.anchor = anchor;
@@ -1192,7 +1835,7 @@ impl HydrolysisRenderer {
     pub(crate) fn update_text_selection_from_pointer(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         extend: bool,
     ) -> bool {
         let Some(target) = self.text_editing.text_input_targets.as_slice().get(index) else {
@@ -1324,59 +1967,55 @@ impl HydrolysisRenderer {
         set_model_caret_position(&model, &mut slot, next_index)
     }
 
-    pub(crate) fn build_text_context_menu_entries(
+    /// The selection menu's rows as [`PopupMenuNode`]s: built-in editing
+    /// commands become plain command rows, the field's custom
+    /// `selection_menu` items go through the same [`popup_menu_node`]
+    /// conversion `.context_menu` items take — a nested `Menu` keeps its
+    /// structure and opens as a submenu rather than flattening or panicking.
+    pub(crate) fn build_text_context_menu_nodes(
         target: &TextInputTarget,
         env: &Environment,
-    ) -> Vec<TextContextMenuEntry> {
+    ) -> Vec<PopupMenuNode> {
         let has_selection = {
             let slot = target.selection.borrow();
             selected_text_for_model(&target.model, &slot).is_some()
         };
         let has_text = !target.model.plain_text().is_empty();
-        let mut entries = Vec::new();
+        let mut nodes = Vec::new();
+        let builtin = |key: &str, action| {
+            text_context_menu_builtin_node(
+                crate::localization::text(env, key),
+                action,
+                &target.model,
+                &target.selection,
+            )
+        };
         if has_selection && !target.model.is_secure() {
-            entries.push(TextContextMenuEntry::Command {
-                label: crate::localization::text(env, "copy"),
-                action: Box::new(TextContextMenuAction::Copy),
-            });
-            entries.push(TextContextMenuEntry::Command {
-                label: crate::localization::text(env, "cut"),
-                action: Box::new(TextContextMenuAction::Cut),
-            });
+            nodes.push(builtin("copy", TextContextMenuAction::Copy));
+            nodes.push(builtin("cut", TextContextMenuAction::Cut));
         }
-        entries.push(TextContextMenuEntry::Command {
-            label: crate::localization::text(env, "paste"),
-            action: Box::new(TextContextMenuAction::Paste),
-        });
+        nodes.push(builtin("paste", TextContextMenuAction::Paste));
         if has_text {
-            entries.push(TextContextMenuEntry::Command {
-                label: crate::localization::text(env, "select_all"),
-                action: Box::new(TextContextMenuAction::SelectAll),
-            });
+            nodes.push(builtin("select_all", TextContextMenuAction::SelectAll));
         }
         if has_selection {
-            for item in target.model.custom_selection_menu_items() {
-                match item {
-                    ResolvedMenuItem::Command(command) => {
-                        entries.push(TextContextMenuEntry::Command {
-                            label: command.label.content.get().to_plain().to_string(),
-                            action: Box::new(TextContextMenuAction::Custom(command)),
-                        });
-                    }
-                    ResolvedMenuItem::Divider => entries.push(TextContextMenuEntry::Divider),
-                    ResolvedMenuItem::Menu(_) => {
-                        panic!("hydrolysis text selection menus do not support nested menus yet")
-                    }
-                }
-            }
+            nodes.extend(
+                target
+                    .model
+                    .custom_selection_menu_items()
+                    .into_iter()
+                    .map(crate::renderer::views::popup_menu_node),
+            );
         }
-        entries
+        nodes
     }
+}
 
+impl HydrolysisRenderer {
     pub(crate) fn show_text_context_menu(
         &mut self,
         index: usize,
-        point: vello::kurbo::Point,
+        point: kurbo::Point,
         env: &Environment,
     ) -> bool {
         let Some(target) = self
@@ -1389,115 +2028,83 @@ impl HydrolysisRenderer {
             return false;
         };
         let target_key = target.interaction_key.clone();
-        let entries = Self::build_text_context_menu_entries(&target, env);
-        if entries.is_empty() {
+        // The menu opens in the registering view's environment layered over
+        // this dispatch's, so `.state(&value)` overlays reach the item
+        // actions (water-rs/hydrolysis#140).
+        let menu_env = target.env.layered_on(env);
+        let nodes = SemanticCore::build_text_context_menu_nodes(&target, &menu_env);
+        if nodes.is_empty() {
             self.dismiss_active_text_context_menu();
             return false;
         }
 
         self.dismiss_active_text_context_menu();
-        let mode = env
+        let mode = menu_env
             .get::<HydrolysisTextContextMenuMode>()
             .copied()
             .unwrap_or(HydrolysisTextContextMenuMode::NativeWindow);
 
         if mode == HydrolysisTextContextMenuMode::Overlay {
-            let metrics = widget_theme(env).text_context_menu_metrics();
+            let metrics = self.theme().text_context_menu_metrics();
             let bounds =
-                text_context_menu_overlay_bounds(point, &entries, self.window_bounds, metrics);
-            let mut rows = Vec::with_capacity(entries.len());
-            for (index, entry) in entries.into_iter().enumerate() {
+                text_context_menu_overlay_bounds(point, &nodes, self.window_bounds, metrics);
+            let mut rows = Vec::with_capacity(nodes.len());
+            for (index, node) in nodes.into_iter().enumerate() {
                 let y0 = bounds.y0 + metrics.row_height * index as f64;
                 let row_bounds =
-                    vello::kurbo::Rect::new(bounds.x0, y0, bounds.x1, y0 + metrics.row_height);
+                    kurbo::Rect::new(bounds.x0, y0, bounds.x1, y0 + metrics.row_height);
                 rows.push(TextContextMenuOverlayRow {
                     bounds: row_bounds,
-                    entry,
+                    node,
                 });
             }
+            let menu_group = PopupMenuStateGroup::new();
+            let dismiss_state = nami::Binding::container(WindowState::Normal);
+            menu_group.push(dismiss_state.clone());
             self.text_editing.active_text_context_menu = Some(ActiveTextContextMenu::Overlay {
                 target: target_key,
                 overlay: TextContextMenuOverlay {
                     bounds,
                     rows,
-                    model: target.model,
-                    selection: target.selection,
-                    env: env.clone(),
+                    menu_group,
+                    dismiss_state,
+                    theme: self.theme(),
+                    env: menu_env.clone(),
                 },
             });
             self.request_refresh();
             return true;
         }
 
-        let menu_state = nami::Binding::container(WindowState::Normal);
-        let metrics = widget_theme(env).text_context_menu_metrics();
-        let (width, height) = text_context_menu_size(&entries, metrics);
-        let origin = env
-            .get::<HydrolysisWindowOrigin>()
-            .copied()
-            .expect("hydrolysis text context menu requires HydrolysisWindowOrigin in environment");
-
-        let entries_for_popup = entries.clone();
-        let model = target.model.clone();
-        let selection = Rc::clone(&target.selection);
-        let action_env = env.clone();
-        let menu_state_for_content = menu_state.clone();
-        let popup_content = move || {
-            let mut rows = Vec::with_capacity(entries_for_popup.len());
-            for entry in entries_for_popup.clone() {
-                let state_binding = menu_state_for_content.clone();
-                let model = model.clone();
-                let selection = Rc::clone(&selection);
-                let action_env = action_env.clone();
-                match entry {
-                    TextContextMenuEntry::Command { label, action } => {
-                        let button =
-                            button(label)
-                                .style(ButtonStyle::Borderless)
-                                .action(move || {
-                                    state_binding.set(WindowState::Closed);
-                                    let _ = execute_text_context_menu_action(
-                                        &action,
-                                        &model,
-                                        &selection,
-                                        &action_env,
-                                    );
-                                });
-                        rows.push(AnyView::new(button));
-                    }
-                    TextContextMenuEntry::Divider => rows.push(AnyView::new(Divider)),
-                }
-            }
-            let menu_content: waterui_layout::stack::VStack<(Vec<AnyView>,)> =
-                rows.into_iter().collect();
-            AnyView::new(
-                menu_content
-                    .alignment(HorizontalAlignment::Leading)
-                    .spacing(0.0),
-            )
-        };
-        let mut popup = Window::new(
-            TEXT_CONTEXT_MENU_WINDOW_TITLE,
-            menu_state.clone(),
-            popup_content,
-        )
-        .style(WindowStyle::Borderless)
-        .resizable(false);
-        popup.closable = false;
-        popup.frame.set(LayoutRect::new(
-            LayoutPoint::new(origin.x + point.x as f32, origin.y + point.y as f32),
-            LayoutSize::new(width as f32, height as f32),
-        ));
-        popup.show(env);
+        // The windowed presentation mounts the nodes through the same popup
+        // path a `.context_menu` takes: `show_popup_menu_nodes` sizes the
+        // panel, builds the borderless window, and leaves submenu rows
+        // wired to open deeper popups (water-rs/hydrolysis#317).
+        let metrics = self.theme().text_context_menu_metrics();
+        let theme = self.theme();
+        self.show_popup_menu_nodes(
+            nodes,
+            LayoutPoint::new(point.x as f32, point.y as f32),
+            metrics,
+            &menu_env,
+            &theme,
+        );
+        let group = self
+            .popup_menu
+            .active_popup_menu_group
+            .clone()
+            .expect("show_popup_menu_nodes leaves the opened menu's group registered");
         self.text_editing.active_text_context_menu = Some(ActiveTextContextMenu::NativeWindow {
             target: target_key,
-            state: menu_state,
+            group,
         });
         true
     }
+}
 
+impl SemanticCore {
     pub fn handle_text_input(&mut self, text: &str) -> bool {
-        let preedit_cleared = self.text_editing.ime_preedit.take().is_some();
+        let preedit_cleared = self.text_editing.take_ime_preedit().is_some();
         if text.is_empty() {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
@@ -1521,29 +2128,40 @@ impl HydrolysisRenderer {
         changed
     }
 
-    pub fn handle_ime_preedit(&mut self, text: &str) -> bool {
-        if !self.text_editing.has_focus() {
+    pub fn handle_ime_preedit(&mut self, text: &str, caret: Option<usize>) -> bool {
+        // A password-purpose field is not IME-allowed: the platform should
+        // never mark one up, and a stray preedit must not draw extra mask
+        // glyphs that leak the composition's length.
+        let ime_allowed = self
+            .text_editing
+            .focused_target()
+            .is_some_and(|target| target.purpose != TextInputPurpose::Password);
+        if !ime_allowed {
             tracing::trace!(
                 target: "waterui::hydrolysis::input",
                 text = text,
-                "ime preedit dropped without focused text input"
+                "ime preedit dropped without an ime-allowed focused text input"
             );
             return false;
         }
-        let next = if text.is_empty() {
-            None
+        let (next, next_caret) = if text.is_empty() {
+            (None, None)
         } else {
-            Some(Str::from(text.to_owned()))
+            (Some(Str::from(text.to_owned())), caret)
         };
-        if self.text_editing.ime_preedit == next {
+        if self.text_editing.ime_preedit == next
+            && self.text_editing.ime_preedit_caret == next_caret
+        {
             return false;
         }
         self.text_editing.ime_preedit = next;
+        self.text_editing.ime_preedit_caret = next_caret;
         self.reset_text_caret_animation(self.frame_instant());
         tracing::trace!(
             target: "waterui::hydrolysis::input",
             focused = ?self.text_editing.focused_key(),
             preedit = ?self.text_editing.ime_preedit,
+            caret = ?self.text_editing.ime_preedit_caret,
             "ime preedit updated"
         );
         true
@@ -1554,7 +2172,7 @@ impl HydrolysisRenderer {
     }
 
     pub fn handle_ime_disabled(&mut self) -> bool {
-        let changed = self.text_editing.ime_preedit.take().is_some();
+        let changed = self.text_editing.take_ime_preedit().is_some();
         tracing::trace!(
             target: "waterui::hydrolysis::input",
             changed,
@@ -1569,10 +2187,132 @@ impl HydrolysisRenderer {
         modifiers: Modifiers,
         env: &Environment,
     ) -> bool {
+        // Callers without platform key data (tests, synthetic input) get a
+        // `KeyPress` rebuilt from the `KeyCode` — the winit/semantic paths
+        // carry real `logical_key`/`physical_code` and call
+        // `handle_key_press` instead.
+        let press = KeyPress {
+            key: key.to_w3c_key(),
+            code: keyboard_types::Code::Unidentified,
+            modifiers: modifiers.into(),
+            repeat: false,
+        };
+        self.handle_key_press(key, modifiers, env, &press) != KeyPressOutcome::Ignored
+    }
+
+    /// A key press with its full platform identity: the focused target's
+    /// editing first, then the `OnKeyPress` bubble chain, then an enclosing
+    /// embedded surface.
+    ///
+    /// The [`KeyPressOutcome`] distinguishes a press a handler consumed
+    /// (whose paired `KeyText` is then suppressed at dispatch) from one
+    /// forwarded to an embedded surface — delivery is not consumption: the
+    /// surface owns its key+text pair, exactly as `SurfaceInputEvent`
+    /// documents.
+    pub(crate) fn handle_key_press(
+        &mut self,
+        key: &KeyCode,
+        modifiers: Modifiers,
+        env: &Environment,
+        press: &KeyPress,
+    ) -> KeyPressOutcome {
         if self.handle_keyboard_key_down(key, modifiers, env) {
-            return true;
+            return KeyPressOutcome::Consumed;
         }
-        self.handle_key(key, modifiers)
+        if self.handle_key(key, modifiers) {
+            return KeyPressOutcome::Consumed;
+        }
+        self.bubble_key_press(press)
+    }
+
+    /// Offers an unconsumed key to the focused node's `OnKeyPress`
+    /// ancestors, nearest first, then to the topmost embedded surface
+    /// enclosing it. [`KeyPressOutcome::Consumed`] once some scope reports
+    /// [`KeyHandling::Handled`]; [`KeyPressOutcome::ForwardedToSurface`] when
+    /// a surface takes the key.
+    ///
+    /// The focused node is whatever `hit_test.keyboard_focus` names — a text
+    /// input, a focusable control's press slot, or an embedded surface; with
+    /// no focus at all the key still bubbles through the scopes enclosing
+    /// every registration of the frame.
+    fn bubble_key_press(&mut self, press: &KeyPress) -> KeyPressOutcome {
+        let focused_key = self.hit_test.keyboard_focus.clone();
+        let mut scopes: Option<Option<Rc<KeyHandlerNode>>> = None;
+        let mut bubble_center: Option<kurbo::Point> = None;
+        if let Some(target) = self.text_editing.focused_target() {
+            scopes = Some(target.key_handlers.clone());
+            bubble_center = Some(target.bounds.center());
+        } else if let Some(key) = focused_key.as_ref() {
+            if let Some(target) = self.hit_test.pointer_targets.iter().find(|target| {
+                target
+                    .press_slot
+                    .as_ref()
+                    .is_some_and(|slot| &slot.key == key)
+            }) {
+                scopes = Some(target.key_handlers.clone());
+                bubble_center = Some(target.bounds.center());
+            } else if let Some(target) = self
+                .hit_test
+                .embedded_input_targets
+                .iter()
+                .find(|target| &target.interaction_key == key)
+            {
+                scopes = Some(target.key_handlers.clone());
+                bubble_center = Some(target.to_window_rect(target.local_bounds).center());
+            } else {
+                // The semantic walk emits no targets for the key to resolve
+                // against — the chain recorded at the focus link stands in.
+                #[cfg(feature = "accessibility")]
+                {
+                    scopes = self.accessibility.focus_key_handlers.get(key).cloned();
+                }
+            }
+        }
+        // `scopes` wraps a chain head: a target with no scopes is
+        // `Some(None)`; no resolved target at all falls back to the
+        // every-registration chain.
+        let mut node = scopes.unwrap_or_else(|| self.hit_test.root_key_handlers.clone());
+        while let Some(link) = node {
+            let handler = Rc::clone(&link.scope.handler);
+            let env = link.scope.env.extending(press.clone());
+            let result = handler.borrow_mut().handle(&env);
+            if result == KeyHandling::Handled {
+                tracing::trace!(
+                    target: "waterui::hydrolysis::input",
+                    key = ?press.key,
+                    "key consumed by an on_key_press ancestor"
+                );
+                return KeyPressOutcome::Consumed;
+            }
+            node = link.parent.clone();
+        }
+        // Nothing above the focused node consumed it: the embedding surface
+        // under it (e.g. a terminal under a search overlay) gets the key next.
+        if let Some(center) = bubble_center
+            && let Some((index, _)) = self.topmost_embedded_target_at(center)
+        {
+            let embedded = self.hit_test.embedded_input_targets[index].clone();
+            embedded.sink.key(&KeyDelivery {
+                pressed: true,
+                logical: &press.key,
+                code: press.code,
+                repeat: press.repeat,
+                modifiers: Modifiers::from(press.modifiers),
+            });
+            // The release belongs to the sink that saw the press, not to
+            // whichever surface holds focus when it arrives.
+            self.hit_test.bubbled_key_sinks.push(BubbledKeySink {
+                logical: press.key.clone(),
+                code: press.code,
+                modifiers: Modifiers::from(press.modifiers),
+                sink: embedded.sink,
+            });
+            // Forwarded, not consumed: the surface owns the key+text pair
+            // and decides internally what the press meant, so its paired
+            // `TextInput` is still delivered.
+            return KeyPressOutcome::ForwardedToSurface;
+        }
+        KeyPressOutcome::Ignored
     }
 
     pub fn handle_key_release_with_env(&mut self, key: &KeyCode, env: &Environment) -> bool {
@@ -1616,14 +2356,14 @@ impl HydrolysisRenderer {
         } else {
             match key {
                 KeyCode::Named(value) if value == "Backspace" => {
-                    if self.text_editing.ime_preedit.take().is_some() {
+                    if self.text_editing.take_ime_preedit().is_some() {
                         true
                     } else {
                         self.delete_backward_in_focused_target()
                     }
                 }
                 KeyCode::Named(value) if value == "Delete" => {
-                    if self.text_editing.ime_preedit.take().is_some() {
+                    if self.text_editing.take_ime_preedit().is_some() {
                         true
                     } else {
                         self.delete_forward_in_focused_target()
@@ -1649,14 +2389,17 @@ impl HydrolysisRenderer {
                     changed
                 }
                 KeyCode::Named(value) if value == "Enter" => {
-                    // Enter inserts a newline like any other text. The model's
-                    // line limit is what decides whether it survives: a
-                    // single-line field strips it (and the edit reports no
-                    // change), a capped field refuses the edit that would
-                    // exceed the limit, and an unlimited field accepts it.
                     if self.text_editing.ime_preedit.is_some() {
                         false
+                    } else if self.perform_editor_submit() {
+                        true
                     } else {
+                        // Enter inserts a newline like any other text. The
+                        // model's line limit is what decides whether it
+                        // survives: a single-line field strips it (and the
+                        // edit reports no change, so the key bubbles), a
+                        // capped field refuses the edit that would exceed
+                        // the limit, and an unlimited field accepts it.
                         self.insert_text_into_focused_target("\n")
                     }
                 }
@@ -1697,6 +2440,7 @@ mod tests {
         TextInputModel::TextField {
             value: Binding::container(StyledStr::plain(value.to_owned())),
             line_limit,
+            on_submit: None,
             selection_menu: empty_selection_menu(),
         }
     }

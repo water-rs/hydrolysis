@@ -3,6 +3,8 @@
 //! env scope, collection, lazy stack, scene/GPU/effect, `Dynamic` host).
 
 use super::*;
+use crate::gpu_view::{ExternalFrameRuntime, GpuContentRuntime};
+use crate::platform_view::PlatformView;
 
 impl RenderNode {
     /// Build a node from a view, capturing live reactive inputs. Native leaves
@@ -11,20 +13,14 @@ impl RenderNode {
     pub(crate) fn build(
         view: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
+        renderer.state.counters.semantic_builds += 1;
         let view = match view.downcast::<Native<Color>>() {
             Ok(color) => {
                 return RenderNode::Color(ColorNode {
+                    render_id: RenderId::next(),
                     color: (*color).into_inner().resolve(env),
-                });
-            }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<Native<ResolvedColor>>() {
-            Ok(color) => {
-                return RenderNode::Color(ColorNode {
-                    color: Computed::constant((*color).into_inner()),
                 });
             }
             Err(view) => view,
@@ -33,8 +29,10 @@ impl RenderNode {
             Ok(text) => {
                 let config = (*text).into_inner();
                 return RenderNode::Text(Box::new(TextNode {
-                    #[cfg(feature = "accessibility")]
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
+                    render_id: RenderId::next(),
                     content: config.content,
                     alignment: config.paragraph_alignment,
                     line_limit: config.line_limit.map(core::num::NonZeroUsize::get),
@@ -45,10 +43,15 @@ impl RenderNode {
         let view = match view.downcast::<Native<FixedContainer>>() {
             Ok(container) => {
                 let (layout, children) = (*container).into_inner().into_inner();
+                let layout_dirty = Rc::new(Cell::new(false));
                 let signals = renderer.signals.clone();
-                let guards = layout.watch_invalidation(Rc::new(move || {
-                    signals.request_refresh();
-                }));
+                let guards = layout.watch_invalidation({
+                    let layout_dirty = Rc::clone(&layout_dirty);
+                    Rc::new(move || {
+                        layout_dirty.set(true);
+                        signals.request_refresh();
+                    })
+                });
                 #[cfg(feature = "accessibility")]
                 let accessibility_child_env = accessibility_container_child_environment(env);
                 #[cfg(feature = "accessibility")]
@@ -66,13 +69,18 @@ impl RenderNode {
                     })
                     .collect();
                 return RenderNode::Container(Box::new(ContainerNode {
-                    #[cfg(feature = "accessibility")]
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
+                    render_id: RenderId::next(),
                     layout,
                     children,
                     #[cfg(feature = "accessibility")]
                     accessibility_child_env,
                     placed: Vec::new(),
+                    #[cfg(feature = "accessibility")]
+                    resolved: Rect::from_size(Size::zero()),
+                    layout_dirty,
                     _guards: guards,
                 }));
             }
@@ -82,6 +90,17 @@ impl RenderNode {
             Ok(container) => {
                 let direction = container.as_inner().direction();
                 let (layout, children) = (*container).into_inner().into_inner();
+                // The collection's own layout inputs (stack spacing, absolute
+                // pins, …) are signals too: subscribe them through
+                // `watch_invalidation` like a FixedContainer's, so a change
+                // schedules the refresh that re-derives the collection's
+                // extents and item rects.
+                let layout_guards = {
+                    let signals = renderer.signals.clone();
+                    layout.watch_invalidation(Rc::new(move || {
+                        signals.request_refresh();
+                    }))
+                };
                 // A viewport-virtualizable stack layout (and not opting into a
                 // membership transition, which must retain every item) becomes a
                 // virtualized LazyStack: only visible rows are built/measured.
@@ -91,13 +110,25 @@ impl RenderNode {
                 if let Some(axis) =
                     lazy_stack_axis_config(layout.as_ref(), direction).filter(|_| !wants_transition)
                 {
-                    return RenderNode::build_lazy_stack(axis, children, env, renderer);
+                    return RenderNode::build_lazy_stack(
+                        axis,
+                        children,
+                        env,
+                        renderer,
+                        layout_guards,
+                    );
                 }
                 // A non-virtualizable layout (AbsoluteLayout/ZStack overlay) or a
                 // transition collection: a retained reactive collection that
                 // reconciles membership by id (recursing into each item, so inner
                 // SceneView/Dynamic reach their dedicated nodes).
-                return RenderNode::build_collection(layout, children, env, renderer);
+                return RenderNode::build_collection(
+                    layout,
+                    children,
+                    env,
+                    renderer,
+                    layout_guards,
+                );
             }
             Err(view) => view,
         };
@@ -105,6 +136,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::Opacity(Box::new(OpacityNode {
+                    render_id: RenderId::next(),
                     value,
                     child: RenderNode::build(content, env, renderer),
                 }));
@@ -115,6 +147,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::Scale(Box::new(ScaleNode {
+                    render_id: RenderId::next(),
                     value,
                     child: RenderNode::build(content, env, renderer),
                 }));
@@ -125,6 +158,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::Rotation(Box::new(RotationNode {
+                    render_id: RenderId::next(),
                     value,
                     child: RenderNode::build(content, env, renderer),
                 }));
@@ -135,6 +169,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::Offset(Box::new(OffsetNode {
+                    render_id: RenderId::next(),
                     value,
                     child: RenderNode::build(content, env, renderer),
                 }));
@@ -155,6 +190,7 @@ impl RenderNode {
                 // a11y read env every frame.
                 let child = RenderNode::build(content, &scoped_env, renderer);
                 return RenderNode::Env(Box::new(EnvNode {
+                    render_id: RenderId::next(),
                     env: scoped_env,
                     child,
                 }));
@@ -165,6 +201,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::Retain(Box::new(RetainNode {
+                    render_id: RenderId::next(),
                     _retain: value,
                     child: RenderNode::build(content, env, renderer),
                 }));
@@ -178,48 +215,6 @@ impl RenderNode {
         // (possibly reactive) content stays live instead of freezing in `Captured`.
         // The two *naming* wrappers additionally carry a scope identity, so a
         // container that no control spoke for can emit the node naming itself.
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityLabel>>() {
-            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        // `.a11y_value(..)` is naming metadata like the label: the node that
-        // represents the wrapped view owns the semantic payload — once — and a
-        // container that no control spoke for synthesizes the node carrying it.
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityValue>>() {
-            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityIdentifier>>() {
-            Ok(meta) => {
-                let IgnorableMetadata { content, value } = *meta;
-                #[cfg(feature = "accessibility")]
-                {
-                    let scoped = a11y_scoped_env(env, &ScopedAccessibilityIdentifier::new(value));
-                    let child = RenderNode::build(content, &scoped, renderer);
-                    return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
-                }
-                // An identifier names a node in the accessibility tree. Without
-                // that tree there is nothing to name, so it only unwraps.
-                #[cfg(not(feature = "accessibility"))]
-                {
-                    drop(value);
-                    return RenderNode::build(content, env, renderer);
-                }
-            }
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityRole>>() {
-            Ok(meta) => return RenderNode::build_naming_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityHidden>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityChildren>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
-            Err(view) => view,
-        };
         // Accessibility state is stored in the scoped environment as a *live*
         // `AccessibilityStateSignal` (a static state becomes a constant signal):
         // descendants capture environment clones at build time, so a resolved
@@ -232,17 +227,34 @@ impl RenderNode {
         // snapshot would freeze the subtree hidden after the signal turns
         // visible. A signal-hidden node is emitted with the accesskit hidden
         // flag instead, so it follows the signal every flush.
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityState>>() {
-            Ok(meta) => {
-                let IgnorableMetadata { content, value } = *meta;
-                let scoped = a11y_scoped_env_for_state(env, &value);
+        // Which wrapper maps to which scoping is defined once in
+        // `a11y_scoped_env_for_view` — the List-row hoist reads the same table.
+        let view = match a11y_scoped_env_for_view(view, env) {
+            Ok((content, scoped)) => {
                 let child = RenderNode::build(content, &scoped, renderer);
-                return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
+                return RenderNode::Env(Box::new(EnvNode {
+                    render_id: RenderId::next(),
+                    env: scoped,
+                    child,
+                }));
             }
             Err(view) => view,
         };
-        let view = match view.downcast::<IgnorableMetadata<AccessibilityStateSignal>>() {
-            Ok(meta) => return RenderNode::build_env_scoped(*meta, env, renderer),
+        // `.selected(...)` is strict `Metadata<Selected>` — it scopes into the
+        // environment like the a11y metadata above: the outermost interactive
+        // control binding under it claims it (`claim_selected`), and the
+        // control's `SELECTED` flag and a11y selected state read it.
+        let view = match view.downcast::<Metadata<waterui_core::interaction::Selected>>() {
+            Ok(meta) => {
+                let Metadata { content, value } = *meta;
+                let scoped = a11y_scoped_env(env, &value);
+                let child = RenderNode::build(content, &scoped, renderer);
+                return RenderNode::Env(Box::new(EnvNode {
+                    render_id: RenderId::next(),
+                    env: scoped,
+                    child,
+                }));
+            }
             Err(view) => view,
         };
         // Passthrough metadata: the dispatch handlers discard the value and just
@@ -252,26 +264,27 @@ impl RenderNode {
             Ok(meta) => return RenderNode::build(meta.content, env, renderer),
             Err(view) => view,
         };
+        // Dynamic-range metadata used to scope a preference read by the retired
+        // GPU-surface path; Cherenkov's engine owns headroom per surface, so
+        // both pass through to the content like `Secure` above.
         let view = match view.downcast::<Metadata<StandardDynamicRange>>() {
-            Ok(meta) => {
-                let mut scoped = env.clone();
-                scoped.insert(DynamicRangePreference(false));
-                let child = RenderNode::build(meta.content, &scoped, renderer);
-                return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
-            }
+            Ok(meta) => return RenderNode::build(meta.content, env, renderer),
             Err(view) => view,
         };
         let view = match view.downcast::<Metadata<HighDynamicRange>>() {
-            Ok(meta) => {
-                let mut scoped = env.clone();
-                scoped.insert(DynamicRangePreference(true));
-                let child = RenderNode::build(meta.content, &scoped, renderer);
-                return RenderNode::Env(Box::new(EnvNode { env: scoped, child }));
-            }
+            Ok(meta) => return RenderNode::build(meta.content, env, renderer),
             Err(view) => view,
         };
         let view = match view.downcast::<Metadata<IgnoreSafeArea>>() {
-            Ok(meta) => return RenderNode::build(meta.content, env, renderer),
+            Ok(meta) => {
+                let Metadata { content, value } = *meta;
+                return RenderNode::build_wrapper(
+                    WrapperEffect::IgnoreSafeArea(value.edges),
+                    content,
+                    env,
+                    renderer,
+                );
+            }
             Err(view) => view,
         };
         let view = match view.downcast::<Metadata<ContextMenu>>() {
@@ -351,6 +364,43 @@ impl RenderNode {
             }
             Err(view) => view,
         };
+        let view = match view.downcast::<Metadata<AnchoredOverlay>>() {
+            Ok(meta) => {
+                let Metadata { content, value } = *meta;
+                let AnchoredOverlay {
+                    content: overlay_content,
+                    is_presented,
+                    placed_edge,
+                    placement,
+                    dismissal,
+                } = value;
+                return RenderNode::build_wrapper(
+                    WrapperEffect::AnchoredOverlay(AnchoredOverlayEffect {
+                        content: Rc::new(RefCell::new(Some(RetainedSubview::new(overlay_content)))),
+                        is_presented,
+                        placed_edge,
+                        placement,
+                        dismissal,
+                        marker: Rc::new(()),
+                    }),
+                    content,
+                    env,
+                    renderer,
+                );
+            }
+            Err(view) => view,
+        };
+        let view = match view.downcast::<Metadata<PopupMenuSurface>>() {
+            Ok(meta) => {
+                return RenderNode::build_wrapper(
+                    WrapperEffect::PopupMenuSurface,
+                    meta.content,
+                    env,
+                    renderer,
+                );
+            }
+            Err(view) => view,
+        };
         let view = match view.downcast::<Metadata<LayoutPriority>>() {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
@@ -379,7 +429,7 @@ impl RenderNode {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
                 return RenderNode::build_wrapper(
-                    WrapperEffect::Draggable(value),
+                    WrapperEffect::Draggable(Rc::new(value)),
                     content,
                     env,
                     renderer,
@@ -402,8 +452,19 @@ impl RenderNode {
         let view = match view.downcast::<Metadata<ResolvedContextMenu>>() {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
+                let ResolvedContextMenu {
+                    items,
+                    preview,
+                    accessory,
+                    dismiss_requests,
+                } = value;
                 return RenderNode::build_wrapper(
-                    WrapperEffect::ContextMenu(value),
+                    WrapperEffect::ContextMenu(ContextMenuEffect {
+                        items,
+                        dismiss_requests,
+                        preview: Rc::new(RefCell::new(preview.map(RetainedSubview::new))),
+                        accessory: Rc::new(RefCell::new(accessory.map(RetainedSubview::new))),
+                    }),
                     content,
                     env,
                     renderer,
@@ -435,6 +496,18 @@ impl RenderNode {
             }
             Err(view) => view,
         };
+        let view = match view.downcast::<Metadata<OnKeyPress>>() {
+            Ok(meta) => {
+                let Metadata { content, value } = *meta;
+                return RenderNode::build_wrapper(
+                    WrapperEffect::OnKeyPress(Rc::new(RefCell::new(value))),
+                    content,
+                    env,
+                    renderer,
+                );
+            }
+            Err(view) => view,
+        };
         let view = match view.downcast::<Metadata<GestureObserver>>() {
             Ok(meta) => {
                 let Metadata { content, value } = *meta;
@@ -450,6 +523,7 @@ impl RenderNode {
                     #[cfg(feature = "accessibility")]
                     default_a11y_label: renderer.accessibility_label_from_view(&content, env),
                     gesture_group_identity: gesture_group_identity(&content),
+                    gesture_target: Cell::new(None),
                 };
                 return RenderNode::build_wrapper(
                     WrapperEffect::GestureObserver(effect),
@@ -481,18 +555,28 @@ impl RenderNode {
         };
         let view = match view.downcast::<Native<ScrollView>>() {
             Ok(scroll) => {
-                let (axis, content, controller) = (*scroll).into_inner().into_inner();
+                let ScrollViewParts {
+                    axis,
+                    content,
+                    controller,
+                    offset,
+                    ..
+                } = (*scroll).into_inner().into_inner();
                 let content = normalize_layout_view(content, env);
                 return RenderNode::Scroll(Box::new(ScrollNode {
-                    #[cfg(feature = "accessibility")]
+                    memo_gate: Cell::default(),
+                    memo_slots: RefCell::default(),
                     accessibility_identity: Rc::new(()),
+                    render_id: RenderId::next(),
                     axis,
                     child: RenderNode::build(content, env, renderer),
                     controller,
+                    offset,
                     applied_scroll_generation: Cell::new(0),
-                    handle: None,
+                    handle: RefCell::new(None),
                     content_size: Size::zero(),
                     viewport: Size::zero(),
+                    non_scrolling_minimum: Cell::new(None),
                     env: env.clone(),
                 }));
             }
@@ -509,22 +593,31 @@ impl RenderNode {
         // new content and a per-frame re-flush re-binds the *same* runtime. Holding
         // the runtime in a frame-ordered slot instead lets the ordering drift out of
         // step with the tree and hand a leaf another leaf's runtime.
-        let view = match view.downcast::<Native<GpuSurface>>() {
-            Ok(surface) => {
-                return RenderNode::build_gpu_surface((*surface).into_inner(), env, renderer);
+        let view = match view.downcast::<Native<GpuContentView>>() {
+            Ok(view) => {
+                return RenderNode::build_gpu_content((*view).into_inner());
             }
             Err(view) => view,
         };
-        let view = match view.downcast::<Native<ViewEffectErased>>() {
-            Ok(effect) => {
-                return RenderNode::build_view_effect((*effect).into_inner(), env, renderer);
+        let view = match view.downcast::<Native<ExternalFrameView>>() {
+            Ok(view) => {
+                return RenderNode::build_external_frame((*view).into_inner());
             }
             Err(view) => view,
         };
-        let view = match view.downcast::<Metadata<AppliedFilter>>() {
-            Ok(meta) => {
-                let Metadata { content, value } = *meta;
-                return RenderNode::build_applied_filter(value, content, env, renderer);
+        // A platform-view embedding leaf: it records its frame onto the host's
+        // `PlatformViewSink` each flush; mounting the real native child is the
+        // host's work. No sink means this runner cannot embed — the leaf
+        // panics at build naming the missing piece.
+        let view = match view.downcast::<Native<PlatformView>>() {
+            Ok(platform_view) => {
+                return RenderNode::build_platform_view((*platform_view).into_inner(), env);
+            }
+            Err(view) => view,
+        };
+        let view = match view.downcast::<Native<FilteredView>>() {
+            Ok(filtered) => {
+                return RenderNode::build_filtered((*filtered).into_inner(), env, renderer);
             }
             Err(view) => view,
         };
@@ -540,12 +633,12 @@ impl RenderNode {
         // instead of freezing in a one-shot `Captured` bake.
         let view = match view.downcast::<Native<ButtonConfig>>() {
             Ok(button) => {
-                return RenderNode::build_button((*button).into_inner(), env, renderer);
+                return RenderNode::build_button((*button).into_inner(), env);
             }
             Err(view) => view,
         };
         let view = match view.downcast::<Native<ResolvedMenu>>() {
-            Ok(menu) => return RenderNode::build_menu((*menu).into_inner(), env, renderer),
+            Ok(menu) => return RenderNode::build_menu((*menu).into_inner(), env),
             Err(view) => view,
         };
         let view = match view.downcast::<Native<ToggleConfig>>() {
@@ -582,7 +675,7 @@ impl RenderNode {
         };
         let view = match view.downcast::<Native<PickerConfig>>() {
             Ok(picker) => {
-                return RenderNode::build_picker((*picker).into_inner(), env);
+                return RenderNode::build_picker((*picker).into_inner(), env, renderer);
             }
             Err(view) => view,
         };
@@ -614,7 +707,7 @@ impl RenderNode {
             Ok(icon) => unsupported_system_icon(icon.as_inner()),
             Err(view) => view,
         };
-        let view = match view.downcast::<Native<ResolvedGradient>>() {
+        let view = match view.downcast::<Native<waterui_graphics::Gradient>>() {
             Ok(gradient) => return RenderNode::build_gradient((*gradient).into_inner(), env),
             Err(view) => view,
         };
@@ -627,7 +720,7 @@ impl RenderNode {
             Err(view) => view,
         };
         let view = match view.downcast::<Native<MapConfig>>() {
-            Ok(map) => return RenderNode::build_map((*map).into_inner(), env, renderer),
+            Ok(_) => unsupported_map(),
             Err(view) => view,
         };
         // This backend bridges the platform's own web engine, and it only wins
@@ -702,19 +795,52 @@ impl RenderNode {
 
     /// Build a transparent wrapper node: capture the per-flush effect and recurse
     /// into the child so reactive descendants reach their own dedicated nodes.
+    ///
+    /// A handler-carrying effect (hover/`on_tap`/gesture, drop destination,
+    /// context menu, anchored overlay, lifecycle hook — the ones capturing `env`
+    /// for a callback) stores the environment its *content* resolves in, not the
+    /// env at the wrapper itself: `.state(&s)` between the view and the handler
+    /// is part of the handler's environment, so `v.state(&s).on_x(h)` and
+    /// `v.on_x(h).state(&s)` dispatch identically (water-rs/waterui#1292). The
+    /// stored env is also handed to the child at flush/measure — a peeled `Env`
+    /// or handler child carries that same env on its own node, and an unpeeled
+    /// first node means the env is unchanged, so the child sees no new scope.
     fn build_wrapper(
         effect: WrapperEffect,
         content: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
+        let child = RenderNode::build(content, env, renderer);
+        let env = if effect.captures_environment() {
+            Self::resolved_handler_env(&child, env).clone()
+        } else {
+            env.clone()
+        };
         RenderNode::Wrapper(Box::new(WrapperNode {
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
+            render_id: RenderId::next(),
             effect,
-            env: env.clone(),
-            child: RenderNode::build(content, env, renderer),
+            env,
+            child,
         }))
+    }
+
+    /// The environment a metadata-carried callback captures: the one its
+    /// modified view resolves in. Walks down the child's leading env-only
+    /// wrappers — `Env` nodes (`With`/`Metadata<Environment>` installs and
+    /// env-scoped metadata) and handler wrappers of the same modifier chain —
+    /// until the first node that is neither. Resolving on the *built* node
+    /// means each `With` was already expanded exactly once into the `Env` node
+    /// that carries its scoped env.
+    fn resolved_handler_env<'a>(node: &'a RenderNode, env: &'a Environment) -> &'a Environment {
+        match node {
+            RenderNode::Env(node) => Self::resolved_handler_env(&node.child, &node.env),
+            RenderNode::Wrapper(node) if node.effect.captures_environment() => {
+                Self::resolved_handler_env(&node.child, &node.env)
+            }
+            _ => env,
+        }
     }
 
     /// Build a node-owned lifecycle hook wrapper. An appear hook is retained until
@@ -722,12 +848,18 @@ impl RenderNode {
     /// before the callback can update them. A disappear hook is retained in the
     /// effect and fired from its `Drop` when the node leaves the retained tree. No
     /// frame-diff slot cursor — structural presence/removal drives both events.
+    ///
+    /// The hook's environment is the one the content resolves in — the same
+    /// resolution `build_wrapper` applies to the other handler effects — so a
+    /// `.state(&s)` between the view and `.on_appear` reaches the hook.
     fn build_lifecycle(
         hook: LifeCycleHook,
         content: AnyView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
+        let child = RenderNode::build(content, env, renderer);
+        let env = Self::resolved_handler_env(&child, env).clone();
         let effect = match hook.lifecycle() {
             LifeCycle::Appear => LifeCycleEffect {
                 appear: Cell::new(Some(DeferredLifeCycleHook::new(hook, env.clone()))),
@@ -739,41 +871,13 @@ impl RenderNode {
             },
             _ => panic!("hydrolysis lifecycle variant is not supported"),
         };
-        RenderNode::build_wrapper(WrapperEffect::LifeCycle(effect), content, env, renderer)
-    }
-
-    /// Build an environment-scoping `Env` node from an [`IgnorableMetadata`] whose
-    /// only effect is `env.insert(value)` (the accessibility metadata wrappers): the
-    /// extended environment travels with the node so it is read at every flush, and
-    /// the wrapped content recurses so reactive descendants stay live.
-    fn build_env_scoped<T: MetadataKey + Clone + 'static>(
-        meta: IgnorableMetadata<T>,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
-        let IgnorableMetadata { content, value } = meta;
-        let scoped = a11y_scoped_env(env, &value);
-        let child = RenderNode::build(content, &scoped, renderer);
-        RenderNode::Env(Box::new(EnvNode { env: scoped, child }))
-    }
-
-    /// Build the `Env` node for naming metadata (`.a11y_label()` / `.a11y_role()`).
-    ///
-    /// Same scoping as [`RenderNode::build_env_scoped`], plus the scope identity
-    /// that lets the node representing this view claim the name — see
-    /// [`a11y_naming_scoped_env`].
-    fn build_naming_scoped<T: MetadataKey + Clone + 'static>(
-        meta: IgnorableMetadata<T>,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
-        let IgnorableMetadata { content, value } = meta;
-        #[cfg(feature = "accessibility")]
-        let scoped = a11y_naming_scoped_env(env, &value);
-        #[cfg(not(feature = "accessibility"))]
-        let scoped = a11y_scoped_env(env, &value);
-        let child = RenderNode::build(content, &scoped, renderer);
-        RenderNode::Env(Box::new(EnvNode { env: scoped, child }))
+        RenderNode::Wrapper(Box::new(WrapperNode {
+            accessibility_identity: Rc::new(()),
+            render_id: RenderId::next(),
+            effect: WrapperEffect::LifeCycle(effect),
+            env,
+            child,
+        }))
     }
 
     /// Build a retained reactive collection (non-virtualized): materialize every
@@ -783,16 +887,32 @@ impl RenderNode {
         layout: Box<dyn Layout>,
         views: AnyViews<AnyView>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
+        layout_guards: Vec<BoxWatcherGuard>,
     ) -> RenderNode {
         let dirty = Rc::new(Cell::new(false));
         let dirty_key = Rc::new(());
         let key = Rc::as_ptr(&dirty_key) as usize;
         let signals = renderer.signals.clone();
+        let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let replaced_for_watch = Rc::clone(&replaced_ids);
+        // The node retains one immutable row set per applied event: the
+        // watcher swaps in the snapshot each notification carried — captured
+        // from the exact data that emitted it — so reconcile never re-reads
+        // the live source while applying an older change.
+        let applied = Rc::new(RefCell::new(views.snapshot()));
+        let applied_for_watch = Rc::clone(&applied);
         let guard = views.watch(.., {
             let dirty = Rc::clone(&dirty);
-            move |_changed| {
+            move |ctx, change| {
                 dirty.set(true);
+                let event_snapshot = ctx.into_value();
+                collect_replaced_ids(
+                    &event_snapshot,
+                    &change,
+                    &mut replaced_for_watch.borrow_mut(),
+                );
+                *applied_for_watch.borrow_mut() = event_snapshot;
                 signals.mark_collection_dirty(key, 0);
             }
         });
@@ -806,15 +926,18 @@ impl RenderNode {
         let accessibility_container_env = item_env.as_ref().map(|_| env.clone());
         #[cfg(feature = "accessibility")]
         let env = item_env.as_ref().unwrap_or(env);
-        let len = views.len().get();
         // The initial membership renders at rest — only items added or removed
-        // by a *later* change animate (`reconcile` marks phases).
-        let entries = (0..len)
+        // by a *later* change animate (`reconcile` marks phases). Every entry
+        // is built from the one snapshot, so ids and views stay coherent even
+        // if a nested build mutates the source mid-materialization.
+        let snapshot = applied.borrow().clone();
+        let entries = snapshot
+            .range()
             .map(|index| {
-                let id = views
+                let id = snapshot
                     .get_id(index)
                     .unwrap_or_else(|| panic!("hydrolysis collection: item {index} has no id"));
-                let view = views
+                let view = snapshot
                     .get_view(index)
                     .unwrap_or_else(|| panic!("hydrolysis collection: item {index} missing"));
                 CollectionEntry::stable(
@@ -825,19 +948,25 @@ impl RenderNode {
             .collect();
         let transition = collection_transition_runtime(env, layout.as_ref());
         RenderNode::Collection(Box::new(CollectionNode {
+            memo_gate: Cell::default(),
+            memo_slots: RefCell::default(),
+            render_id: RenderId::next(),
             layout,
-            views,
+            snapshot: applied,
             env: env.clone(),
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
             #[cfg(feature = "accessibility")]
             accessibility_container_env,
             entries,
             placed: Vec::new(),
+            #[cfg(feature = "accessibility")]
+            resolved: Rect::from_size(Size::zero()),
             transition,
             dirty,
+            replaced_ids,
             _dirty_key: dirty_key,
             _guard: guard,
+            _layout_guards: layout_guards,
         }))
     }
 
@@ -848,17 +977,35 @@ impl RenderNode {
         axis: LazyStackAxisConfig,
         views: AnyViews<AnyView>,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
+        layout_guards: Vec<BoxWatcherGuard>,
     ) -> RenderNode {
         let dirty_key = Rc::new(());
         let dirty = Rc::new(Cell::new(true));
         let key = Rc::as_ptr(&dirty_key) as usize;
         let signals = renderer.signals.clone();
         let dirty_for_watch = Rc::clone(&dirty);
-        let guard = views.watch(.., move |_changed| {
-            // Membership changed: request a fine-grained refresh; the flush re-reads
-            // the collection length/items and re-resolves the visible window.
+        let replaced_ids = Rc::new(RefCell::new(std::collections::HashSet::new()));
+        let replaced_for_watch = Rc::clone(&replaced_ids);
+        // The node retains one immutable row set per applied event: the
+        // watcher swaps in the snapshot each notification carried, so the
+        // window re-resolution, extent index, and materialization all read
+        // the same coherent membership rather than the live source.
+        let snapshot = Rc::new(RefCell::new(views.snapshot()));
+        let snapshot_for_watch = Rc::clone(&snapshot);
+        let guard = views.watch(.., move |ctx, change| {
+            // Membership changed: request a fine-grained refresh; the flush
+            // re-resolves the visible window over the event's own snapshot.
+            // The reported replaced positions accumulate their ids so the
+            // patch invalidates exactly those rows.
             dirty_for_watch.set(true);
+            let event_snapshot = ctx.into_value();
+            collect_replaced_ids(
+                &event_snapshot,
+                &change,
+                &mut replaced_for_watch.borrow_mut(),
+            );
+            *snapshot_for_watch.borrow_mut() = event_snapshot;
             signals.mark_collection_dirty(key, 0);
         });
         let signals = renderer.signals.clone();
@@ -872,28 +1019,35 @@ impl RenderNode {
         #[cfg(feature = "accessibility")]
         let env = item_env.as_ref().unwrap_or(env);
         RenderNode::LazyStack(Box::new(LazyStackNode {
+            memo_gate: Cell::default(),
+            memo_slots: RefCell::default(),
             axis,
-            views,
+            snapshot,
             env: env.clone(),
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
+            render_id: RenderId::next(),
             #[cfg(feature = "accessibility")]
             accessibility_container_env,
             extent_index: RefCell::new(VirtualExtentIndex::default()),
             item_cache: RefCell::new(VisibleSubviewCache::new()),
             visible_range: RefCell::new(0..0),
+            visible_span: Cell::new(None),
             estimate: Cell::new(0.0),
+            estimate_sample: Cell::new(None),
+            floor_sample: Cell::new(None),
             dirty,
+            replaced_ids,
             _dirty_key: dirty_key,
             _guard: guard,
             _direction_guard: direction_guard,
+            _layout_guards: layout_guards,
         }))
     }
 
     /// Build a self-drawn scene node owning its `SceneContent` (no effect slot).
     fn build_scene_view_node(
         scene_view: Native<SceneView>,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let mut content = scene_view.into_inner().into_content();
         let signals = renderer.signals.clone();
@@ -901,64 +1055,52 @@ impl RenderNode {
             signals.request_refresh();
         })));
         RenderNode::SceneView(Box::new(SceneViewNode {
-            #[cfg(feature = "accessibility")]
             accessibility_identity: Rc::new(()),
-            content: RefCell::new(content),
+            render_id: RenderId::next(),
+            content: Rc::new(RefCell::new(content)),
         }))
     }
 
-    /// Build an embedded `GpuSurface` node owning its
-    /// [`EmbeddedGpuSurfaceRuntime`] directly. The runtime is shared with the
-    /// renderer's node-surface registry so its off-thread redraw handle is polled
-    /// even on frames that do not re-flush the tree.
-    fn build_gpu_surface(
-        surface: GpuSurface,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
-        let runtime = Rc::new(RefCell::new(EmbeddedGpuSurfaceRuntime::new(surface, env)));
-        renderer.register_node_gpu_surface(Rc::clone(&runtime));
-        RenderNode::GpuSurface(Box::new(GpuSurfaceNode {
-            #[cfg(feature = "accessibility")]
+    /// Build a `GpuContentView` node owning its [`GpuContentRuntime`] — the
+    /// view keeps its UI-side hooks (input, frame pump, ime caret, a11y); the
+    /// producer inside is taken exactly once, when the node's first
+    /// `GpuContentLayer` installs it on the window's engine.
+    fn build_gpu_content(view: GpuContentView) -> RenderNode {
+        RenderNode::GpuContent(Box::new(GpuContentNode {
             accessibility_identity: Rc::new(()),
-            runtime,
+            render_id: RenderId::next(),
+            runtime: Rc::new(RefCell::new(GpuContentRuntime::new(view))),
         }))
     }
 
-    /// Build a `ViewEffect` node owning its [`ViewEffectRuntime`] and building its
-    /// captured content as a persistent child [`RenderNode`] (recursed into, not
-    /// baked), so reactive descendants inside the effect stay live.
-    fn build_view_effect(
-        mut effect: ViewEffectErased,
-        env: &Environment,
-        renderer: &mut HydrolysisRenderer,
-    ) -> RenderNode {
-        let content = effect.take_content();
-        let child = RenderNode::build(normalize_layout_view(content, env), env, renderer);
-        let runtime = Rc::new(RefCell::new(ViewEffectRuntime::new(effect)));
-        renderer.register_node_view_effect(Rc::clone(&runtime));
-        RenderNode::ViewEffect(Box::new(ViewEffectNode {
-            runtime,
-            child: RefCell::new(child),
-            laid_out: Cell::new(Size::zero()),
-            env: env.clone(),
+    /// Build an `ExternalFrameView` node owning its [`ExternalFrameRuntime`] —
+    /// the view keeps its UI-side hooks (measure, a11y); the compositor starts
+    /// the stream's source the first time a persistent mount installs it.
+    fn build_external_frame(view: ExternalFrameView) -> RenderNode {
+        RenderNode::ExternalFrame(Box::new(ExternalFrameNode {
+            accessibility_identity: Rc::new(()),
+            render_id: RenderId::next(),
+            runtime: Rc::new(RefCell::new(ExternalFrameRuntime::new(view))),
         }))
     }
 
-    /// Build an `AppliedFilter` node owning its [`AppliedFilterRuntime`]
-    /// (input/output textures) and building its wrapped content as a persistent
-    /// child [`RenderNode`]. The runtime is registered with the renderer so
-    /// animated filters refresh on redraw-only frames.
-    fn build_applied_filter(
-        filter: AppliedFilter,
-        content: AnyView,
+    /// Build a `FilteredView` node owning its [`FilteredRuntime`] and building
+    /// its wrapped content as a persistent child [`RenderNode`], so reactive
+    /// descendants inside the filtered subtree stay live.
+    fn build_filtered(
+        filtered: FilteredView,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
-        let runtime = Rc::new(RefCell::new(AppliedFilterRuntime::new(filter)));
-        renderer.register_node_applied_filter(Rc::clone(&runtime));
+        let FilteredView {
+            content,
+            effect,
+            guards,
+        } = filtered;
+        let runtime = Rc::new(RefCell::new(FilteredRuntime::new(effect, guards)));
         let child = RenderNode::build(normalize_layout_view(content, env), env, renderer);
-        RenderNode::AppliedFilter(Box::new(AppliedFilterNode {
+        RenderNode::Filtered(Box::new(FilteredNode {
+            render_id: RenderId::next(),
             runtime,
             child,
             env: env.clone(),
@@ -970,7 +1112,7 @@ impl RenderNode {
     fn build_dynamic_host(
         dynamic: waterui_core::dynamic::Dynamic,
         env: &Environment,
-        renderer: &mut HydrolysisRenderer,
+        renderer: &mut SemanticCore,
     ) -> RenderNode {
         let identity = dynamic.identity();
         let pending: Rc<RefCell<Option<AnyView>>> = Rc::new(RefCell::new(None));
@@ -996,11 +1138,20 @@ impl RenderNode {
             Some(content) => RenderNode::build(content, env, renderer),
             None => RenderNode::build(AnyView::new(()), env, renderer),
         };
+        let child = Rc::new(RefCell::new(child));
+        // The dispatch measure (`measure_dynamic`) reaches this child through
+        // the identity registry once the `Dynamic` has connected.
+        renderer
+            .state
+            .measurement
+            .register_dynamic_node(identity, &child);
         RenderNode::Dynamic(Box::new(DynamicHostNode {
+            render_id: RenderId::next(),
             source,
             pending,
             env: env.clone(),
             child,
+            layout_dirty: Cell::new(false),
         }))
     }
 }

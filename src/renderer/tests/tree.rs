@@ -1,14 +1,15 @@
 //! Phase 1 unit tests for the persistent retained render tree.
 
-use super::{test_environment, test_renderer};
-use crate::renderer::{ContainerNode, RenderContext, RenderNode, TextNode};
+use super::{MinimalTestTheme, test_environment, test_renderer};
+use crate::renderer::{ContainerNode, RenderContext, RenderId, RenderNode, TextNode};
+use core::cell::{Cell, RefCell};
+use kurbo::{Affine, Rect};
 use nami::Computed;
-#[cfg(feature = "accessibility")]
+use nami::Signal as _;
 use std::rc::Rc;
-use vello::kurbo::{Affine, Rect};
 use waterui::ViewExt as _;
 use waterui_controls::button::button;
-use waterui_core::layout::{HorizontalAlignment, Size};
+use waterui_core::layout::{HorizontalAlignment, ProposalSize, Size};
 use waterui_core::{AnyView, SignalExt as _};
 use waterui_testing::TestArtifacts;
 
@@ -27,8 +28,10 @@ use waterui_text::styled::StyledStr;
 
 fn text_node(content: &'static str) -> RenderNode {
     RenderNode::Text(Box::new(TextNode {
-        #[cfg(feature = "accessibility")]
+        memo_gate: Cell::default(),
+        memo_slots: RefCell::default(),
         accessibility_identity: Rc::new(()),
+        render_id: RenderId::next(),
         content: Computed::constant(StyledStr::plain(content)),
         alignment: Computed::constant(HorizontalAlignment::Leading),
         line_limit: None,
@@ -41,8 +44,10 @@ fn render_node_container_lays_out_and_flushes_text() {
     let mut renderer = test_renderer();
 
     let mut node = RenderNode::Container(Box::new(ContainerNode {
-        #[cfg(feature = "accessibility")]
+        memo_gate: Cell::default(),
+        memo_slots: RefCell::default(),
         accessibility_identity: Rc::new(()),
+        render_id: RenderId::next(),
         layout: Box::new(VStackLayout {
             alignment: HorizontalAlignment::Center,
             spacing: Computed::constant(8.0),
@@ -51,6 +56,9 @@ fn render_node_container_lays_out_and_flushes_text() {
         #[cfg(feature = "accessibility")]
         accessibility_child_env: None,
         placed: Vec::new(),
+        #[cfg(feature = "accessibility")]
+        resolved: waterui_core::layout::Rect::from_size(Size::zero()),
+        layout_dirty: Rc::new(Cell::new(false)),
         _guards: Vec::new(),
     }));
 
@@ -59,7 +67,12 @@ fn render_node_container_lays_out_and_flushes_text() {
 
     renderer.reset_scene();
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
 
     match &node {
         RenderNode::Container(container) => {
@@ -94,8 +107,10 @@ fn geometry_static_flush_reuses_cached_placement() {
     let mut renderer = test_renderer();
 
     let mut node = RenderNode::Container(Box::new(ContainerNode {
-        #[cfg(feature = "accessibility")]
+        memo_gate: Cell::default(),
+        memo_slots: RefCell::default(),
         accessibility_identity: Rc::new(()),
+        render_id: RenderId::next(),
         layout: Box::new(VStackLayout {
             alignment: HorizontalAlignment::Center,
             spacing: Computed::constant(8.0),
@@ -104,6 +119,9 @@ fn geometry_static_flush_reuses_cached_placement() {
         #[cfg(feature = "accessibility")]
         accessibility_child_env: None,
         placed: Vec::new(),
+        #[cfg(feature = "accessibility")]
+        resolved: waterui_core::layout::Rect::from_size(Size::zero()),
+        layout_dirty: Rc::new(Cell::new(false)),
         _guards: Vec::new(),
     }));
 
@@ -111,7 +129,12 @@ fn geometry_static_flush_reuses_cached_placement() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 120.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let placed_after_layout = match &node {
         RenderNode::Container(container) => container.placed.clone(),
         _ => panic!("expected a container node"),
@@ -155,7 +178,12 @@ fn opacity_wrapper_builds_and_flushes_via_dsl() {
     let bounds = Rect::new(0.0, 0.0, 200.0, 80.0);
 
     renderer.begin_rebuild_frame();
-    node.layout(&mut renderer, &env, window);
+    node.layout(
+        &mut renderer,
+        &env,
+        ProposalSize::new(Some(window.width), Some(window.height)),
+        window,
+    );
     let ctx = RenderContext::with_transforms(bounds, Affine::IDENTITY, Affine::IDENTITY);
     node.flush(&mut renderer, ctx, &env);
     assert!(
@@ -203,13 +231,13 @@ fn flush_window_tree_reuses_retained_tree() {
 
     // A geometry-static frame re-flushes the retained tree without rebuilding it.
     // `flush_window_tree` does full frame management (reset + flush + move the
-    // scene into the compositor's layer stack), so verify a Vello layer resulted.
+    // scene into the compositor's layer stack), so verify a scene segment resulted.
     let flushed = renderer.flush_window_tree(&env, bounds, Affine::IDENTITY, Affine::IDENTITY);
     assert!(flushed, "a retained tree must be present to flush");
-    let vello_layers = renderer.render_layer_stats().vello_scene_layers;
+    let scene_layers = renderer.render_layer_stats().scene_segment_layers;
     assert!(
-        vello_layers > 0,
-        "re-flushing the retained tree must produce a Vello scene layer"
+        scene_layers > 0,
+        "re-flushing the retained tree must produce a scene segment layer"
     );
 }
 
@@ -234,7 +262,8 @@ fn widget_reactive_label_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -281,7 +310,8 @@ fn reactive_size_change_reflows_via_refresh_not_rebuild() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 320, 80);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 320, 80, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -330,7 +360,8 @@ fn widget_reactive_value_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -378,7 +409,8 @@ fn text_field_value_display_stays_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 240, 120, MinimalTestTheme::default());
     let start = Instant::now();
     let before = rt
         .pump_at(true, start)
@@ -428,7 +460,8 @@ fn render_tree_live_path_processes_watch_switch() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 120, MinimalTestTheme::default());
 
     let start = Instant::now();
     let first = rt.pump_at(false, start);
@@ -485,7 +518,8 @@ fn body_dispatched_once_then_every_frame_refreshes() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 200, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 200, 160, MinimalTestTheme::default());
     let start = Instant::now();
 
     assert!(
@@ -543,7 +577,8 @@ fn render_tree_chart_switch_snapshot() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -619,7 +654,8 @@ fn render_tree_scene_view_switch_snapshot() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -683,7 +719,8 @@ fn render_tree_scroll_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -745,7 +782,8 @@ fn scroll_offset_persists_across_refresh() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
     let start = Instant::now();
 
     let unscrolled = rt
@@ -804,7 +842,8 @@ fn render_tree_collection_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let snapshot = rt
         .pump_at(true, std::time::Instant::now())
@@ -856,7 +895,8 @@ fn wrapper_keeps_reactive_descendant_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -921,7 +961,8 @@ fn gesture_wrapper_keeps_reactive_descendant_live() {
         })
     };
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 160, 160, MinimalTestTheme::default());
 
     let start = Instant::now();
     let before = rt
@@ -985,7 +1026,8 @@ fn render_tree_grid_snapshot() {
 
     let builder = AnyViewBuilder::<AnyView>::new(screen);
     let env = test_environment();
-    let mut rt = crate::HeadlessRuntime::new_for_tests(env, builder, 440, 920);
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 440, 920, MinimalTestTheme::default());
 
     let snapshot = rt
         .pump_at(true, std::time::Instant::now())
@@ -1088,7 +1130,7 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     renderer.prepare_window_tree(view, &env);
 
     assert_eq!(
-        opacity.get(),
+        opacity.snapshot(),
         0.0,
         "the entrance target must remain hidden until the child first flushes"
     );
@@ -1109,7 +1151,7 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
     renderer.finish_rebuild_frame();
 
     assert_eq!(
-        opacity.get(),
+        opacity.snapshot(),
         1.0,
         "on_appear must update the entrance target after the initial sample"
     );
@@ -1120,11 +1162,10 @@ fn lifecycle_appear_updates_animate_after_initial_signal_binding() {
 }
 
 /// A GPU filter (`.blur(...)`) is built and flushed through the retained tree as a
-/// node-owned `AppliedFilter`, not the old dispatch capture/replay path. The node
-/// owns its `AppliedFilterRuntime` (textures) and registers it in the renderer's
-/// retained-filter registry at build; a re-flush of the geometry-static tree keeps
-/// the same runtime alive (it is pruned only when its node is dropped), so the
-/// filter survives across frames without a cursor-bound effect slot.
+/// node-owned filtered mount, not the old dispatch capture/replay path. The node
+/// owns its `FilteredRuntime`; a re-flush of the geometry-static tree keeps the
+/// same runtime alive (it is pruned only when its node is dropped), so the filter
+/// mount survives across frames without a cursor-bound effect slot.
 #[test]
 fn applied_filter_renders_through_retained_tree() {
     fn blurred_box() -> AnyView {
@@ -1150,19 +1191,577 @@ fn applied_filter_renders_through_retained_tree() {
     );
     renderer.finish_rebuild_frame();
 
-    assert!(
-        !renderer.node_applied_filters.is_empty(),
-        "a .blur() view must build a node-owned AppliedFilter on the retained tree \
-         (registered at build), not fall through to the dispatch/capture path"
+    let flushed = renderer.flush_window_tree(&env, bounds, Affine::IDENTITY, Affine::IDENTITY);
+    assert!(flushed, "the retained tree must re-flush");
+    assert_eq!(
+        renderer.render_layer_stats().filtered_layers,
+        1,
+        "a .blur() view must mount a node-owned filtered layer on the retained tree, \
+         not fall through to a dispatch/capture path"
     );
 
     // A geometry-static re-flush keeps the node — and thus its filter runtime —
     // alive (pruned only on node drop, by Rc strong count).
     let flushed = renderer.flush_window_tree(&env, bounds, Affine::IDENTITY, Affine::IDENTITY);
-    assert!(flushed, "the retained tree must re-flush");
-    assert!(
-        !renderer.node_applied_filters.is_empty(),
-        "the node-owned filter runtime must survive a geometry-static re-flush \
-         (the retained AppliedFilter node keeps owning it across frames)"
+    assert!(flushed, "the retained tree must re-flush a second time");
+    assert_eq!(
+        renderer.render_layer_stats().filtered_layers,
+        1,
+        "the node-owned filter mount must survive a geometry-static re-flush \
+         (the retained FilteredView node keeps owning it across frames)"
     );
+}
+
+/// Contiguous runs of rows inside `rect` that contain a pixel differing from
+/// the region's modal colour — the text bands a control draws inside it. Rows
+/// separated by fewer than 6 blank rows merge, so a glyph's disconnected piece
+/// (the dot of an 'i') cannot split its own text line into two bands.
+fn text_ink_bands(snapshot: &crate::HeadlessSnapshot, rect: accesskit::Rect) -> Vec<(f64, f64)> {
+    use std::collections::HashMap;
+    let x0 = rect.x0.floor().max(0.0) as usize;
+    let x1 = (rect.x1.ceil() as usize).min(snapshot.width as usize);
+    let y0 = rect.y0.floor().max(0.0) as usize;
+    let y1 = (rect.y1.ceil() as usize).min(snapshot.height as usize);
+    let pixel = |x: usize, y: usize| {
+        let i = (y * snapshot.width as usize + x) * 4;
+        &snapshot.rgba8[i..i + 4]
+    };
+    let mut counts: HashMap<[u8; 4], usize> = HashMap::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            *counts.entry(pixel(x, y).try_into().unwrap()).or_default() += 1;
+        }
+    }
+    let bg = counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .expect("the field region is non-empty")
+        .0;
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    for y in y0..y1 {
+        if !(x0..x1).any(|x| pixel(x, y) != bg.as_slice()) {
+            continue;
+        }
+        match bands.last_mut() {
+            Some((_, end)) if y as f64 - *end < 6.0 => *end = y as f64 + 1.0,
+            _ => bands.push((y as f64, y as f64 + 1.0)),
+        }
+    }
+    bands
+}
+
+/// The menu picker's field label is drawn: its ink band sits directly above the
+/// selected value's, both inside the picker's field (the ComboBox's bounds).
+/// A hidden label draws nothing and takes no space — the value band alone
+/// remains — while the accessibility node keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn menu_picker_draws_its_label_above_the_value() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let menu = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Menu);
+            let menu = if hide_label { menu.hide_label() } else { menu };
+            AnyView::new(vstack((menu,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            320,
+            120,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    fn field_bounds(update: &accesskit::TreeUpdate) -> accesskit::Rect {
+        update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::ComboBox && node.label() == Some("Size"))
+            .and_then(|(_, node)| node.bounds())
+            .expect("the menu picker's field node must carry bounds")
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let field = field_bounds(&update);
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, field);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a labelled menu picker draws two text bands inside its field — label above value, got {bands:?}"
+    );
+    let (label_band, value_band) = (bands[0], bands[1]);
+    assert!(
+        label_band.1 <= value_band.0,
+        "the label band {label_band:?} must sit above the value band {value_band:?}"
+    );
+    assert!(
+        label_band.0 >= field.y0 && value_band.1 <= field.y1,
+        "both text bands must lie inside the field {field:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let field = field_bounds(&update);
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, field);
+    assert_eq!(
+        bands.len(),
+        1,
+        "a hidden label draws nothing — only the value band remains, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the picker's single node exactly once"
+    );
+}
+
+/// The radio picker's group label is drawn: its ink band sits above the first
+/// option row inside the group's bounds. A hidden label draws nothing and
+/// takes no space — the option bands alone remain — while the group node
+/// keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn radio_picker_draws_its_label_above_the_option_rows() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let group = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Radio);
+            let group = if hide_label {
+                group.hide_label()
+            } else {
+                group
+            };
+            AnyView::new(vstack((group,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            320,
+            200,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the radio picker's group node must carry bounds");
+    let first_row = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .reduce(|a, b| if a.y0 <= b.y0 { a } else { b })
+        .expect("radio option nodes must carry bounds");
+    let first_option_y = first_row.y0;
+    let labelled_first_row_height = first_row.y1 - first_row.y0;
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        3,
+        "a labelled radio picker draws three text bands — heading above two option labels, got {bands:?}"
+    );
+    assert!(
+        bands[0].1 <= first_option_y,
+        "the heading band {:?} must sit above the first option row at y0={first_option_y}",
+        bands[0]
+    );
+    assert!(
+        bands[0].0 >= group.y0 && bands[2].1 <= group.y1,
+        "all text bands must lie inside the group {group:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the radio picker's group node must carry bounds");
+    let hidden_first_row_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .reduce(|a, b| if a.y0 <= b.y0 { a } else { b })
+        .map(|rect| rect.y1 - rect.y0)
+        .expect("radio option nodes must carry bounds");
+    assert_eq!(
+        labelled_first_row_height, hidden_first_row_height,
+        "the labelled first row must keep exactly the unlabelled row's height"
+    );
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a hidden label draws nothing — only the two option bands remain, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the group's single node exactly once"
+    );
+}
+
+/// The segmented picker's group label is drawn: its ink band sits above the
+/// segment row inside the group's bounds. A hidden label draws nothing and
+/// takes no space — the segment-label band alone remains — while the group
+/// node keeps the label exactly once.
+#[cfg(feature = "accessibility")]
+#[test]
+fn segmented_picker_draws_its_label_above_the_segment_row() {
+    use accesskit::Role;
+    use std::time::Instant;
+    use waterui::reactive::binding;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_form::picker::{PickerStyle, picker};
+    use waterui_layout::stack::vstack;
+    use waterui_text::text;
+
+    fn mount_labelled(hide_label: bool) -> crate::HeadlessRuntime {
+        let selection = binding(0i32);
+        let builder = AnyViewBuilder::<AnyView>::new(move || {
+            let group = picker(
+                "Size",
+                vec![text("Small").tag(0i32), text("Large").tag(1i32)],
+                &selection,
+            )
+            .style(PickerStyle::Segmented);
+            let group = if hide_label {
+                group.hide_label()
+            } else {
+                group
+            };
+            AnyView::new(vstack((group,)))
+        });
+        crate::HeadlessRuntime::new_for_tests(
+            test_environment(),
+            builder,
+            360,
+            120,
+            MinimalTestTheme::default(),
+        )
+    }
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the labelled picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the segmented picker's group node must carry bounds");
+    let segment_y = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        2,
+        "a labelled segmented picker draws two text bands — heading above the segment labels' row, got {bands:?}"
+    );
+    assert!(
+        bands[0].1 <= segment_y,
+        "the heading band {:?} must sit above the segment row at y0={segment_y}",
+        bands[0]
+    );
+    assert!(
+        bands[0].0 >= group.y0 && bands[1].1 <= group.y1,
+        "both text bands must lie inside the group {group:?}"
+    );
+
+    let mut hidden = mount_labelled(true);
+    let result = hidden.pump_at(true, Instant::now());
+    let update = result
+        .tree_update
+        .expect("the hidden-label picker must publish a tree");
+    let group = update
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Group && node.label() == Some("Size"))
+        .and_then(|(_, node)| node.bounds())
+        .expect("the segmented picker's group node must carry bounds");
+    let hidden_segment_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y1 - rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    let snapshot = result.snapshot.expect("a snapshot must be captured");
+    let bands = text_ink_bands(&snapshot, group);
+    assert_eq!(
+        bands.len(),
+        1,
+        "a hidden label draws nothing — only the segment labels' band remains, got {bands:?}"
+    );
+    assert_eq!(
+        update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some("Size"))
+            .count(),
+        1,
+        "a hidden label still names the group's single node exactly once"
+    );
+
+    let mut labelled = mount_labelled(false);
+    let result = labelled.pump_at(true, Instant::now());
+    let update = result.tree_update.expect("a tree");
+    let labelled_segment_height = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::RadioButton)
+        .filter_map(|(_, node)| node.bounds())
+        .map(|rect| rect.y1 - rect.y0)
+        .reduce(f64::min)
+        .expect("segment nodes must carry bounds");
+    assert_eq!(
+        labelled_segment_height, hidden_segment_height,
+        "the labelled segment row must keep exactly the unlabelled row's height"
+    );
+}
+
+/// A signal whose `get()` writes `label` — so the write lands inside the
+/// frame's leaf reads (measure/flush), after that frame's `tree.patch`, while
+/// its `when` structural patch still sits in `pending`. `watch` never invokes
+/// `get()`, so nothing fires early inside `set()` the way a `Map`'s `f` does.
+#[derive(Clone)]
+struct MidFlushWrite {
+    armed: Rc<Cell<u8>>,
+    label: nami::Binding<Option<waterui_core::Str>>,
+}
+
+impl nami::Signal for MidFlushWrite {
+    type Output = waterui_core::Str;
+    type Guard = ();
+
+    fn snapshot(&self) -> Self::Output {
+        // Fire the write once per arming: a `snapshot()` that re-set `label` on
+        // every read would keep rewriting `pending` every frame — the mount
+        // would never land while the churn continued.
+        let armed = self.armed.replace(0);
+        match armed {
+            1 => self.label.set(None),
+            2 => self.label.set(Some(waterui_core::Str::from("HELLO"))),
+            _ => {}
+        }
+        waterui_core::Str::from_static("probe")
+    }
+
+    fn watch(&self, _watcher: impl Fn(nami::watcher::Context<Self::Output>) + 'static) {}
+}
+
+/// Issue #155 (`water-rs/hydrolysis`): `when` + `text` over one signal tear —
+/// a `set()` flips the leaf's signal inside the same turn, while the `when`
+/// structural patch (`Dynamic` pending view) lands later. Any frame presented
+/// between the two points shows a mounted-but-empty subtree. Every presented
+/// frame must be internally consistent: the subtree is either absent or shows
+/// the leaf's current content.
+#[test]
+fn when_subtree_and_shared_signal_text_present_one_frame_state() {
+    use core::time::Duration;
+    use std::time::Instant;
+    use waterui::graphics::color::Srgb;
+    use waterui::reactive::binding;
+    use waterui::widget::condition::when;
+    use waterui_core::Str;
+    use waterui_core::handler::AnyViewBuilder;
+    use waterui_text::text;
+
+    // The issue's pair: `when` mounts the subtree on `is_some`; the leaf inside
+    // it reads `unwrap_or_default` — both derive from the same `Binding`.
+    let label = binding(Some(Str::from("HELLO")));
+    // `armed` flags the write `MidFlushWrite::get` performs inside the flush;
+    // `drive` only raises `patch_requested` so the pump runs a refresh frame.
+    let armed = Rc::new(Cell::new(0u8));
+    let drive = binding::<u32>(0u32);
+    let builder = {
+        let label = label.clone();
+        let armed = Rc::clone(&armed);
+        let drive = drive.clone();
+        AnyViewBuilder::<AnyView>::new(move || {
+            let leaf = label.clone();
+            let label2 = label.clone();
+            let label3 = label.clone();
+            // Read into the view so `drive.set` schedules a refresh pump; the
+            // mapped text is always empty so it adds no glyph ink to counts.
+            let drive_text = drive.clone();
+            AnyView::new(vstack((
+                // Read first in flush order: its `get()` writes `label` while
+                // this frame's `tree.patch` is already past.
+                text(
+                    MidFlushWrite {
+                        armed: Rc::clone(&armed),
+                        label: label3,
+                    }
+                    .computed(),
+                ),
+                when(label2.is_some(), move || {
+                    text(leaf.map(|v| v.unwrap_or_default()).computed())
+                        .padding()
+                        .background(Srgb::new_u8(0x22, 0x22, 0xEE))
+                }),
+                text(drive_text.map(|_| Str::from_static("")).computed()),
+            )))
+        })
+    };
+    let env = test_environment();
+    let mut rt =
+        crate::HeadlessRuntime::new_for_tests(env, builder, 320, 160, MinimalTestTheme::default());
+
+    // Pill ink = saturated blue background fill; glyph ink = dark default
+    // foreground. A mounted subtree paints pill pixels; a mounted subtree
+    // showing the current text paints pill AND glyph pixels at the "HELLO"
+    // level; a mounted-but-empty subtree paints pill pixels with only the
+    // probe's glyph pixels.
+    let classify = |snapshot: &crate::HeadlessSnapshot| -> (usize, usize) {
+        let mut pill = 0usize;
+        let mut ink = 0usize;
+        let (pixels, _) = snapshot.rgba8.as_chunks::<4>();
+        for px in pixels {
+            let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+            if a > 0 && b > 170 && r < 100 && g < 100 {
+                pill += 1;
+            } else if a > 0 && r < 90 && g < 90 && b < 100 {
+                ink += 1;
+            }
+        }
+        (pill, ink)
+    };
+
+    let start = Instant::now();
+    // Let the initial build settle; the first presented frame mounts the
+    // subtree with "HELLO".
+    let baseline = rt.pump_at(true, start);
+    let (pill, ink) = classify(&baseline.snapshot.expect("baseline frame"));
+    eprintln!("baseline: pill={pill} ink={ink}");
+    assert!(pill > 0 && ink > 0, "baseline must show subtree + HELLO");
+
+    let mut frames = Vec::new();
+    // Some -> None through an ordinary between-pump `set()`.
+    label.set(None);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(16 * (i as u64 + 1)));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("plain None frame {i}: pill={pill} ink={ink}");
+            frames.push(("plain", false, i, pill, ink));
+        }
+    }
+    // Remount, then arm the mid-flush write — `MidFlushWrite::get` runs
+    // `label.set(None)` inside `tree.flush`, after this frame's `tree.patch`.
+    label.set(Some(Str::from("HELLO")));
+    let _ = rt.pump_at(true, start + Duration::from_millis(64));
+    armed.set(1);
+    drive.set(1u32);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(80 + 16 * i as u64));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("midflush None frame {i}: pill={pill} ink={ink}");
+            frames.push(("midflush", false, i, pill, ink));
+        }
+    }
+    armed.set(2);
+    drive.set(2u32);
+    for i in 0..3u32 {
+        let outcome = rt.pump_at(true, start + Duration::from_millis(128 + 16 * i as u64));
+        if let Some(snapshot) = outcome.snapshot {
+            let (pill, ink) = classify(&snapshot);
+            eprintln!("midflush Some frame {i}: pill={pill} ink={ink}");
+            frames.push(("midflush", true, i, pill, ink));
+        }
+    }
+
+    for (edge, label_is_some, i, pill, ink) in &frames {
+        if *label_is_some {
+            // `label` is Some: the subtree may be absent (its mount not yet
+            // applied) but a mounted subtree must show HELLO — pill ink with
+            // only the probe's glyph pixels is a mounted-but-empty tear.
+            // Measured: probe-only ink ≈ 76, mounted-with-HELLO ink ≈ 125
+            // (the Cherenkov rasterizer's glyph coverage is tighter than the
+            // pre-cutover threshold of 150 assumed).
+            assert!(
+                *pill == 0 || *ink >= 100,
+                "issue #155 torn frame on {edge}->Some (frame {i}): mounted subtree \
+                 (pill={pill}) presented without the current text (ink={ink})"
+            );
+        } else {
+            // `label` is None: any mounted subtree at all is the tear — an
+            // unmount delivered mid-flush must not still present the subtree.
+            assert_eq!(
+                *pill, 0,
+                "issue #155 torn frame on {edge}->None (frame {i}): subtree still \
+                 mounted (pill={pill}, ink={ink}) after its content left"
+            );
+        }
+    }
 }

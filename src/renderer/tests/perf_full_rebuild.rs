@@ -15,7 +15,7 @@
 //!
 //! Rows come in two shapes with the **same primitive count** — a `text` variant
 //! (2 glyph runs/row) and a `shapes` variant (2 rect fills/row) — to separate the
-//! Vello **encode** cost from the text **measurement** cost. `scene_dispatch` is
+//! Recording **encode** cost from the text **measurement** cost. `scene_dispatch` is
 //! the timed phase (dispatch + layout/measure + scene encode); it is CPU-only and
 //! reproduces on any machine. `build_content` (root-builder re-run) is reported
 //! too and is harness-inflated; in a real app's static tree it is near-zero.
@@ -28,12 +28,13 @@ use waterui::shape::{Circle, RoundedRectangle, ShapeExt as _};
 use waterui_core::handler::AnyViewBuilder;
 use waterui_core::{AnyView, Binding, Computed};
 
-use super::test_environment;
+use super::{MinimalTestTheme, test_environment};
 use crate::HeadlessRuntime;
 use crate::platform::{InputEvent, OffscreenGpuContext};
+use crate::renderer::Recording;
 
-use vello::kurbo::Affine;
-use vello::peniko::{Brush, Color, Fill};
+use kurbo::Affine;
+use peniko::{Brush, Color, Fill};
 use waterui_core::layout::{
     HorizontalAlignment, Layout, ProposalSize, Rect as LayoutRect, Size, StretchAxis, SubView,
     VerticalAlignment, ViewDimensions,
@@ -152,6 +153,7 @@ fn measure_rebuild(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> 
             builder,
             WINDOW_W,
             WINDOW_H,
+            MinimalTestTheme::default(),
         );
         let result = rt.pump_at(false, Instant::now());
         assert!(
@@ -170,8 +172,14 @@ fn measure_rebuild(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> 
 fn measure_replay(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> (Stats, u32) {
     let builder = AnyViewBuilder::<AnyView>::new(move || replay_screen(cards, with_text));
     let env = test_environment();
-    let mut rt =
-        HeadlessRuntime::new_for_tests_on_context(gpu.clone(), env, builder, WINDOW_W, WINDOW_H);
+    let mut rt = HeadlessRuntime::new_for_tests_on_context(
+        gpu.clone(),
+        env,
+        builder,
+        WINDOW_W,
+        WINDOW_H,
+        MinimalTestTheme::default(),
+    );
 
     let start = Instant::now();
     let _ = rt.pump_at(false, start); // initial rebuild establishes the retained frame
@@ -204,25 +212,25 @@ fn measure_replay(gpu: &OffscreenGpuContext, cards: usize, with_text: bool) -> (
     (percentiles(dispatch, build), rebuilt_frames)
 }
 
-/// Pure Vello CPU scene-encode floor: the per-frame cost a persistent retained
+/// Pure CPU scene-encode floor: the per-frame cost a persistent retained
 /// reactive tree (Flutter-RenderObject / scene-graph style) would actually pay,
 /// once `body()`/dispatch/a11y-build/target-registration are amortized to
 /// once-and-on-Dynamic-change. No renderer, no dispatch — just encoding the row
-/// primitives into a fresh `vello::Scene` every frame.
+/// primitives into a fresh `Recording` every frame.
 #[test]
-fn pure_vello_encode_floor() {
-    use vello::kurbo::{Circle as KurboCircle, Rect, RoundedRect};
+fn pure_recording_encode_floor() {
+    use kurbo::{Circle as KurboCircle, Rect, RoundedRect};
 
     let white = Brush::Solid(Color::new([1.0, 1.0, 1.0, 1.0]));
     let blue = Brush::Solid(Color::new([0.23, 0.51, 0.96, 1.0]));
     let gray = Brush::Solid(Color::new([0.90, 0.90, 0.92, 1.0]));
 
-    eprintln!("\n=== Pure Vello CPU scene-encode floor (release) ===");
+    eprintln!("\n=== Pure CPU scene-encode floor (release) ===");
     eprintln!(
         "(the per-frame cost a retained reactive tree pays: layout aside, just re-emit draw ops)"
     );
     for &rows in &[40usize, 80, 160, 320] {
-        let mut scene = vello::Scene::new();
+        let mut scene = Recording::new();
         let mut samples = Vec::with_capacity(SAMPLE_FRAMES);
         for f in 0..(WARMUP_FRAMES + SAMPLE_FRAMES) {
             scene.reset();
@@ -269,12 +277,9 @@ fn pure_vello_encode_floor() {
 
 /// Report-only, and deliberately out of the gating test run.
 ///
-/// It builds a fresh runtime per sample — 278 of them — and each one builds its
-/// own `vello::Renderer`, which compiles roughly thirty compute pipelines. On a
-/// runner whose only adapter is a software rasterizer that is some eight
-/// thousand JIT-compiled shaders, and the machine runs out of memory before the
-/// probe finishes. The numbers it prints are read by a person deciding an
-/// architecture question, not asserted by CI, so it is run on demand:
+/// It builds a fresh runtime per sample — 278 of them. The numbers it prints
+/// are read by a person deciding an architecture question, not asserted by CI,
+/// so it is run on demand:
 ///
 /// ```text
 /// cargo nextest run -p hydrolysis --run-ignored all \
@@ -340,7 +345,7 @@ fn full_rebuild_vs_retained_replay_cost() {
 // This stands in for the future `RenderNode` tree to measure the ONE cost not
 // isolated by the probes above: per-frame **layout + encode** on a tree that is
 // built once and only re-flushed (no `body()`/dispatch/a11y/target churn). It is
-// pure `vello::Scene` + the real `Layout` implementations — no renderer — so the
+// pure `Recording` + the real `Layout` implementations — no renderer — so the
 // numbers are the irreducible per-frame cost the persistent-tree architecture
 // pays. The gate: a 160-row screen must flush well under the 120Hz budget.
 // ---------------------------------------------------------------------------
@@ -420,29 +425,25 @@ impl ProtoNode {
         {
             let subs: Vec<MeasuredSub> = children.iter().map(|c| c.measured(proposal)).collect();
             let refs: Vec<&dyn SubView> = subs.iter().map(|s| s as &dyn SubView).collect();
-            let rects = layout.place(LayoutRect::from_size(size), &refs);
+            let placements = layout.place(LayoutRect::from_size(size), proposal, &refs);
             drop(refs);
-            for (child, rect) in children.iter_mut().zip(rects.iter()) {
-                child.layout(
-                    ProposalSize::new(Some(rect.width()), Some(rect.height())),
-                    *rect.size(),
-                );
+            for (child, placement) in children.iter_mut().zip(&placements) {
+                child.layout(placement.proposal, *placement.frame.size());
             }
-            *placed = rects;
+            *placed = placements
+                .into_iter()
+                .map(|placement| placement.frame)
+                .collect();
         }
     }
 
     /// Re-encode this subtree into the scene using cached placements — the
     /// per-frame cost of a geometry-static frame.
-    fn flush(&self, scene: &mut vello::Scene, transform: Affine, size: Size) {
+    fn flush(&self, scene: &mut Recording, transform: Affine, size: Size) {
         match self {
             ProtoNode::Color { brush, .. } => {
-                let rect = vello::kurbo::Rect::new(
-                    0.0,
-                    0.0,
-                    f64::from(size.width),
-                    f64::from(size.height),
-                );
+                let rect =
+                    kurbo::Rect::new(0.0, 0.0, f64::from(size.width), f64::from(size.height));
                 scene.fill(Fill::NonZero, transform, brush, None, &rect);
             }
             ProtoNode::Container {
@@ -507,7 +508,7 @@ fn prototype_flush_layout_cost() {
     );
     for &rows in &[40usize, 160, 320] {
         let mut tree = build_proto_screen(rows);
-        let mut scene = vello::Scene::new();
+        let mut scene = Recording::new();
         tree.layout(proposal, window);
         for _ in 0..WARMUP_FRAMES {
             scene.reset();
@@ -540,7 +541,7 @@ fn prototype_flush_layout_cost() {
     // Gate: the 120fps common-case frame (geometry static — animation, scroll,
     // re-present) must re-flush a large screen (160 dense rows) well under budget.
     let mut tree = build_proto_screen(160);
-    let mut scene = vello::Scene::new();
+    let mut scene = Recording::new();
     tree.layout(proposal, window);
     for _ in 0..WARMUP_FRAMES {
         scene.reset();

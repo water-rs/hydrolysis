@@ -11,9 +11,9 @@ use web_sys::{
 };
 
 use super::{
-    CursorStyle, InputEvent, KeyCode, KeyState, Modifiers, PlatformWindow, PointerButton,
-    PointerKind, SurfaceError, SurfaceFrame, SurfaceProvider, TextInputPurpose, TextInputState,
-    WindowState, WuiWindow, select_hydrolysis_surface_format,
+    CursorStyle, GpuSurfaceWindow, InputEvent, KeyCode, KeyState, Modifiers, PlatformWindow,
+    PointerButton, PointerKind, SurfaceError, SurfaceFrame, SurfaceProvider, TextInputPurpose,
+    TextInputState, WindowState, WuiWindow, select_hydrolysis_surface_format,
 };
 
 #[derive(Clone, Copy)]
@@ -24,11 +24,15 @@ struct PendingResize {
 }
 
 pub struct BrowserSurface {
-    _instance: wgpu::Instance,
+    instance: wgpu::Instance,
+    /// Identity of this device creation chain for the engine pool.
+    context_id: u64,
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Reports this device lost; taken when the device was opened.
+    device_loss: crate::platform::DeviceLoss,
     config: wgpu::SurfaceConfiguration,
 }
 
@@ -51,6 +55,7 @@ impl BrowserSurface {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect(
@@ -64,11 +69,20 @@ impl BrowserSurface {
             })
             .await
             .expect("hydrolysis web surface: failed to request WebGPU device");
+        let context_id = super::next_gpu_context_id();
+        let shared_device = cherenkov_gpu::interop::SharedDevice {
+            instance: instance.clone(),
+            adapter: adapter.clone(),
+            device: device.clone(),
+            queue: queue.clone(),
+        };
+        let device_loss = crate::platform::DeviceLoss::observe(shared_device, context_id);
 
         let caps = surface.get_capabilities(&adapter);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: select_hydrolysis_surface_format(&caps),
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
             height: height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
@@ -79,11 +93,13 @@ impl BrowserSurface {
         surface.configure(&device, &config);
 
         Self {
-            _instance: instance,
+            instance,
+            context_id,
             surface,
             adapter,
             device,
             queue,
+            device_loss,
             config,
         }
     }
@@ -102,6 +118,10 @@ impl SurfaceProvider for BrowserSurface {
         &self.queue
     }
 
+    fn device_loss(&self) -> &crate::platform::DeviceLoss {
+        &self.device_loss
+    }
+
     fn acquire(&mut self) -> Result<SurfaceFrame, SurfaceError> {
         let output = super::acquire_surface_texture(&self.surface)?;
         let view = output
@@ -112,11 +132,11 @@ impl SurfaceProvider for BrowserSurface {
 
     fn present(&mut self, frame: SurfaceFrame) {
         match frame {
-            SurfaceFrame::Browser { output, .. } => output.present(),
+            SurfaceFrame::Browser { output, .. } => self.queue.present(output),
             SurfaceFrame::Offscreen { .. } => {
                 panic!("hydrolysis web surface received an offscreen frame")
             }
-            #[cfg(feature = "winit")]
+            #[cfg(hydrolysis_winit)]
             SurfaceFrame::Window { .. } => {
                 panic!("hydrolysis web surface received a native window frame")
             }
@@ -136,6 +156,19 @@ impl SurfaceProvider for BrowserSurface {
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
     }
+
+    fn gpu_context_id(&self) -> u64 {
+        self.context_id
+    }
+
+    fn shared_device(&self) -> cherenkov_gpu::interop::SharedDevice {
+        cherenkov_gpu::interop::SharedDevice {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+        }
+    }
 }
 
 pub struct BrowserWindow {
@@ -146,9 +179,19 @@ pub struct BrowserWindow {
     surface: BrowserSurface,
     pending_events: Rc<RefCell<Vec<InputEvent>>>,
     redraw_requested: Rc<Cell<bool>>,
+    /// The canvas's `IntersectionObserver` report: `true` while the
+    /// browser counts it off-screen — scrolled out of view, or
+    /// `display:none`'d by an app-driven minimized window state.
+    offscreen: Rc<Cell<bool>>,
     scale_factor: Rc<Cell<f64>>,
     pending_resize: Rc<Cell<Option<PendingResize>>>,
     current_cursor_style: CursorStyle,
+    /// Held for its lifetime: the observer keeps reporting only while
+    /// both halves are alive.
+    _intersection_observer: (
+        web_sys::IntersectionObserver,
+        Closure<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>,
+    ),
     _listeners: Vec<Closure<dyn FnMut(Event)>>,
 }
 
@@ -162,7 +205,7 @@ impl core::fmt::Debug for BrowserWindow {
 }
 
 impl BrowserWindow {
-    pub async fn new(schedule_frame: Rc<dyn Fn()>) -> Self {
+    pub async fn new(schedule_frame: Rc<dyn Fn()>, occlusion_wake: Rc<dyn Fn()>) -> Self {
         let browser_window =
             web_sys::window().expect("hydrolysis web platform: browser window unavailable");
         let document = browser_window
@@ -186,7 +229,7 @@ impl BrowserWindow {
         let surface =
             BrowserSurface::new(canvas.clone(), initial_resize.width, initial_resize.height).await;
 
-        let listeners = register_listeners(
+        let mut listeners = register_listeners(
             &browser_window,
             &canvas,
             &ime_input,
@@ -194,8 +237,38 @@ impl BrowserWindow {
             redraw_requested.clone(),
             scale_factor.clone(),
             pending_resize.clone(),
-            schedule_frame,
+            schedule_frame.clone(),
         );
+        // A hidden page's rAF callback never fires, so the wake also
+        // pulls the occlusion report into the pump synchronously — the
+        // hide must be learned here, or the pump could never log it.
+        listeners.push(add_event_listener(document.as_ref(), "visibilitychange", {
+            let occlusion_wake = occlusion_wake.clone();
+            move |_event| occlusion_wake()
+        }));
+        // `document.hidden` covers a backgrounded tab; what it cannot see
+        // is the page visible while its canvas is not — scrolled out of
+        // view, or `display:none`'d by the app's own minimized state. The
+        // IntersectionObserver is the public API that reports it.
+        let offscreen = Rc::new(Cell::new(false));
+        let intersection_observer = {
+            let offscreen = offscreen.clone();
+            let callback: Closure<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)> =
+                Closure::wrap(Box::new(
+                    move |entries: js_sys::Array, _observer: web_sys::IntersectionObserver| {
+                        for entry in entries.iter() {
+                            let entry =
+                                entry.unchecked_into::<web_sys::IntersectionObserverEntry>();
+                            offscreen.set(!entry.is_intersecting());
+                        }
+                        occlusion_wake();
+                    },
+                ));
+            let observer = web_sys::IntersectionObserver::new(callback.as_ref().unchecked_ref())
+                .expect("hydrolysis web platform: failed to create IntersectionObserver");
+            observer.observe(&canvas);
+            (observer, callback)
+        };
 
         Self {
             browser_window,
@@ -205,11 +278,26 @@ impl BrowserWindow {
             surface,
             pending_events,
             redraw_requested,
+            offscreen,
             scale_factor,
             pending_resize,
             current_cursor_style: CursorStyle::Arrow,
+            _intersection_observer: intersection_observer,
             _listeners: listeners,
         }
+    }
+
+    /// Tells the page that the first frame is on the canvas, as a bubbling
+    /// `waterui:first-frame` event: the page's launch screen listens for it and
+    /// stands down.
+    pub(crate) fn announce_first_frame(&self) {
+        let init = web_sys::CustomEventInit::new();
+        init.set_bubbles(true);
+        let event = web_sys::CustomEvent::new_with_event_init_dict("waterui:first-frame", &init)
+            .expect("hydrolysis web platform: failed to build the first-frame event");
+        self.canvas
+            .dispatch_event(&event)
+            .expect("hydrolysis web platform: failed to dispatch the first-frame event");
     }
 
     pub fn take_redraw_request(&self) -> bool {
@@ -218,15 +306,16 @@ impl BrowserWindow {
 }
 
 impl PlatformWindow for BrowserWindow {
-    fn surface(&mut self) -> &mut dyn SurfaceProvider {
-        &mut self.surface
+    fn content_size(&self) -> (u32, u32) {
+        // The canvas's backing store is exactly the drawable content area.
+        self.surface.size()
     }
 
     fn apply_properties(&mut self, window: &WuiWindow) {
         self.document
-            .set_title(window.display_title().get().as_str());
+            .set_title(window.display_title().snapshot().as_str());
 
-        match window.state.get() {
+        match window.state.snapshot() {
             WindowState::Normal => {
                 self.canvas
                     .style()
@@ -243,10 +332,13 @@ impl PlatformWindow for BrowserWindow {
             WindowState::Fullscreen => {
                 panic!("hydrolysis web platform does not support fullscreen window state yet")
             }
+            WindowState::Maximized => {
+                panic!("hydrolysis web platform does not support maximized window state yet")
+            }
         }
 
         if self.canvas.client_width() == 0 || self.canvas.client_height() == 0 {
-            let frame = window.frame.get();
+            let frame = window.frame.snapshot();
             self.canvas
                 .style()
                 .set_property("width", &format!("{}px", frame.width().max(1.0)))
@@ -268,6 +360,14 @@ impl PlatformWindow for BrowserWindow {
             self.surface.resize(resize.width, resize.height);
         }
         core::mem::take(&mut self.pending_events.borrow_mut())
+    }
+
+    /// The page's own report: `document.hidden` covers a backgrounded
+    /// tab or window, and the IntersectionObserver cell covers the
+    /// canvas scrolled out of view or `display:none`'d by an app-driven
+    /// minimized state.
+    fn is_occluded(&self) -> bool {
+        self.document.hidden() || self.offscreen.get()
     }
 
     fn request_redraw(&self) {
@@ -317,6 +417,12 @@ impl PlatformWindow for BrowserWindow {
             .style()
             .set_property("cursor", map_cursor_style(style))
             .expect("hydrolysis web platform: failed to update cursor style");
+    }
+}
+
+impl GpuSurfaceWindow for BrowserWindow {
+    fn surface(&mut self) -> &mut dyn SurfaceProvider {
+        &mut self.surface
     }
 }
 

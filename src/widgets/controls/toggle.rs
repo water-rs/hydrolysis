@@ -1,8 +1,8 @@
 #[cfg(feature = "accessibility")]
 use crate::renderer::AccessibilityActionTarget;
 use crate::renderer::{
-    HydroNativeView, HydroState, HydrolysisRenderer, InteractionKey, RenderContext,
-    WidgetRenderContext, measure_label_intrinsic, transformed_rect,
+    HydroNativeView, HydroState, InteractionKey, RenderContext, WidgetRenderContext,
+    measure_label_intrinsic, transformed_rect,
 };
 #[cfg(feature = "accessibility")]
 use accesskit::{
@@ -18,7 +18,7 @@ use waterui_core::{AnyView, Environment, Native};
 
 use crate::renderer::RetainedSubview;
 use crate::renderer::local_interaction_state;
-use crate::widgets::util::{widget_disabled, widget_theme};
+use crate::widgets::util::{label_beside_control_bounds, widget_disabled};
 
 /// The retained render state of a toggle: the cloneable [`ToggleConfig`] drives the
 /// control + accessibility, and its main label is held as a [`RetainedSubview`]
@@ -38,7 +38,11 @@ impl ToggleRenderState {
 
     /// Eagerly build the label sub-view (the measure path has only
     /// `&mut HydroState`, no renderer, so it must be built before then).
-    pub(crate) fn prebuild(&mut self, renderer: &mut HydrolysisRenderer, env: &Environment) {
+    pub(crate) fn prebuild(
+        &mut self,
+        renderer: &mut crate::renderer::SemanticCore,
+        env: &Environment,
+    ) {
         self.label_view.ensure_built(renderer, env);
     }
 }
@@ -48,19 +52,21 @@ impl HydroNativeView for Native<ToggleConfig> {
         state: &mut crate::renderer::HydroState,
         view: &Self,
         env: &Environment,
+        theme: &Rc<dyn crate::engine::WidgetTheme>,
     ) -> LayoutSize {
-        measure_toggle_intrinsic(view.as_inner(), state, env)
+        measure_toggle_intrinsic(view.as_inner(), state, env, theme)
     }
 }
 
-/// Emits a toggle's accessibility node from its config. Shared by the dispatch
-/// path ([`Native<ToggleConfig>::accessibility`]) and the retained `Widget`-node
-/// path so both produce the same a11y tree.
+/// Emits a toggle's accessibility node from its config. Shared by the rendered
+/// `Widget`-node flush (which passes its [`RenderContext`]) and the semantic
+/// emission walk (which passes `None` — a semantic node carries no bounds).
 pub(crate) fn toggle_accessibility(
-    renderer: &mut HydrolysisRenderer,
-    ctx: RenderContext,
+    renderer: &mut crate::renderer::SemanticCore,
+    ctx: Option<RenderContext>,
     toggle: &ToggleConfig,
     env: &Environment,
+    focus_keys: &[crate::renderer::InteractionKey],
 ) {
     #[cfg(feature = "accessibility")]
     {
@@ -95,12 +101,15 @@ pub(crate) fn toggle_accessibility(
                 binding: toggle.toggle.clone(),
             })
         };
-        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
+        if let Some(node_id) = renderer.register_accessibility_leaf(ctx, node, env, action_target) {
+            for key in focus_keys {
+                renderer.register_accessibility_focus_link(key, node_id);
+            }
+        }
     }
     #[cfg(not(feature = "accessibility"))]
     {
-        let _ = (renderer, ctx, toggle, env);
+        let _ = (renderer, ctx, toggle, env, focus_keys);
     }
 }
 
@@ -111,10 +120,10 @@ pub(crate) fn measure_toggle_node(
     _proposal: ProposalSize,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> ViewDimensions {
-    let theme = widget_theme(env);
     let metrics = theme.toggle_metrics(render_state.config.style);
-    let label_size = render_state.label_view.measure_built(state, env);
+    let label_size = render_state.label_view.measure_built(state, env, theme);
     let label_width = f64::from(label_size.width);
     let width = if label_width > 0.0 {
         label_width + metrics.label_spacing + metrics.width
@@ -137,7 +146,13 @@ pub(crate) fn render_toggle_node(
         .is_some_and(waterui::accessibility::AccessibilityHidden::is_hidden);
     if !hidden {
         let render_ctx = ctx.render_context();
-        toggle_accessibility(ctx.renderer_mut(), render_ctx, &state.borrow().config, env);
+        toggle_accessibility(
+            ctx.renderer_mut(),
+            Some(render_ctx),
+            &state.borrow().config,
+            env,
+            &[crate::renderer::InteractionKey::for_rc(state, 0)],
+        );
     }
     render_toggle_parts(ctx, state, env);
 }
@@ -149,7 +164,7 @@ pub(crate) fn render_toggle_parts(
 ) {
     let visual_interaction_key = InteractionKey::for_rc(state, 0);
     let activation_interaction_key = InteractionKey::for_rc(state, 1);
-    let theme = widget_theme(env);
+    let theme = ctx.theme();
     let mut state = state.borrow_mut();
     let style = state.config.style;
     let metrics = theme.toggle_metrics(style);
@@ -168,20 +183,27 @@ pub(crate) fn render_toggle_parts(
     if label_bounds.width() > 0.0 {
         // A disabled control dims its label to the theme's disabled-content
         // alpha (Material: on-surface at 38% for default-colored labels).
-        if disabled {
-            ctx.push_layer_rect(theme.disabled_content_alpha(), label_bounds);
-        }
         // The label's semantics are merged into the toggle's own node by
         // `toggle_accessibility`, so the sub-view flushes visual-only.
-        let render_ctx = ctx.render_context();
-        let label_view = &mut state.label_view;
-        ctx.renderer_mut()
-            .with_suppressed_accessibility(|renderer| {
-                label_view.flush_in_rect(renderer, render_ctx, env, label_bounds);
-            });
-        if disabled {
-            ctx.pop_layer();
-        }
+        ctx.with_clip_rect_scope_if(
+            disabled,
+            theme.disabled_content_alpha(),
+            label_bounds,
+            |ctx| {
+                let render_ctx = ctx.render_context();
+                let label_view = &mut state.label_view;
+                ctx.renderer_mut()
+                    .with_suppressed_accessibility(|renderer| {
+                        label_view.flush_in_rect(
+                            renderer,
+                            render_ctx,
+                            env,
+                            ProposalSize::UNSPECIFIED,
+                            label_bounds,
+                        );
+                    });
+            },
+        );
     }
 
     // Reading the toggle value through `resolve_toggle_progress` watches the
@@ -266,13 +288,13 @@ pub(crate) fn render_toggle_parts(
 fn toggle_binding_action(
     binding: nami::Binding<bool>,
     visual_interaction_key: InteractionKey,
-) -> impl FnMut(&mut HydrolysisRenderer, vello::kurbo::Point, &Environment) -> bool {
+) -> impl FnMut(&mut crate::renderer::SemanticCore, kurbo::Point, &Environment) -> bool {
     move |renderer, _point, _env| {
         // A pointer press on the non-focusable label target temporarily owns an
         // interaction-only key. Restore semantic keyboard focus to the switch
         // itself when the label activates it.
         renderer.set_keyboard_focus(Some(visual_interaction_key.clone()), false);
-        binding.set(!binding.get());
+        binding.toggle();
         true
     }
 }
@@ -281,10 +303,10 @@ pub(crate) fn measure_toggle_intrinsic(
     toggle: &ToggleConfig,
     state: &mut HydroState,
     env: &Environment,
+    theme: &Rc<dyn crate::engine::WidgetTheme>,
 ) -> LayoutSize {
-    let theme = widget_theme(env);
     let metrics = theme.toggle_metrics(toggle.style);
-    let label_size = measure_label_intrinsic(&toggle.label, state, env);
+    let label_size = measure_label_intrinsic(&toggle.label, state, env, theme);
     let label_width = f64::from(label_size.width);
     let width = if label_width > 0.0 {
         label_width + metrics.label_spacing + metrics.width
@@ -296,11 +318,11 @@ pub(crate) fn measure_toggle_intrinsic(
 }
 
 fn toggle_control_and_label_bounds(
-    bounds: vello::kurbo::Rect,
+    bounds: kurbo::Rect,
     style: ToggleStyle,
     metrics: waterui_backend_core::widget::ToggleMetrics,
     label_size: LayoutSize,
-) -> (vello::kurbo::Rect, vello::kurbo::Rect) {
+) -> (kurbo::Rect, kurbo::Rect) {
     let control_y0 = bounds.y0 + ((bounds.height() - metrics.height) / 2.0).max(0.0);
     let control_y1 = control_y0 + metrics.height;
     let has_label = label_size.width > 0.0 || label_size.height > 0.0;
@@ -308,6 +330,7 @@ fn toggle_control_and_label_bounds(
         ToggleStyle::Checkbox => {
             let control_x0 = bounds.x0;
             let control_x1 = control_x0 + metrics.width;
+            let control = kurbo::Rect::new(control_x0, control_y0, control_x1, control_y1);
             let label_x0 = if has_label {
                 (control_x1 + metrics.label_spacing).min(bounds.x1)
             } else {
@@ -315,43 +338,67 @@ fn toggle_control_and_label_bounds(
             };
             let max_label_width = (bounds.x1 - label_x0).max(0.0);
             let label_width = f64::from(label_size.width).min(max_label_width);
-            let label_height = f64::from(label_size.height).min(bounds.height());
-            let label_y0 = bounds.y0 + (bounds.height() - label_height) * 0.5;
             (
-                vello::kurbo::Rect::new(control_x0, control_y0, control_x1, control_y1),
-                vello::kurbo::Rect::new(
+                control,
+                label_beside_control_bounds(
                     label_x0,
-                    label_y0,
                     label_x0 + label_width,
-                    label_y0 + label_height,
+                    bounds,
+                    control,
+                    f64::from(label_size.height),
                 ),
             )
         }
         ToggleStyle::Automatic | ToggleStyle::Switch => {
             let control_x0 = (bounds.x1 - metrics.width).max(bounds.x0);
+            let control = kurbo::Rect::new(
+                control_x0,
+                control_y0,
+                control_x0 + metrics.width,
+                control_y1,
+            );
             let label_x1 = if has_label {
                 (control_x0 - metrics.label_spacing).max(bounds.x0)
             } else {
                 bounds.x0
             };
             (
-                vello::kurbo::Rect::new(
-                    control_x0,
-                    control_y0,
-                    control_x0 + metrics.width,
-                    control_y1,
+                control,
+                label_beside_control_bounds(
+                    bounds.x0,
+                    label_x1,
+                    bounds,
+                    control,
+                    f64::from(label_size.height),
                 ),
-                vello::kurbo::Rect::new(bounds.x0, bounds.y0, label_x1, bounds.y1),
             )
         }
         _ => panic!("hydrolysis ToggleStyle variant is not implemented"),
     }
 }
 
+/// Emits a retained toggle's accessibility node for the semantic walk — the
+/// same node `toggle_accessibility` registers, with no bounds. The label
+/// sub-view flushes visual-only, so there is nothing else to emit.
+#[cfg(feature = "accessibility")]
+pub(crate) fn emit_toggle_accessibility(
+    renderer: &mut crate::renderer::SemanticCore,
+    state: &Rc<RefCell<ToggleRenderState>>,
+    env: &Environment,
+) {
+    toggle_accessibility(
+        renderer,
+        None,
+        &state.borrow().config,
+        env,
+        &[crate::renderer::InteractionKey::for_rc(state, 0)],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::toggle_control_and_label_bounds;
-    use vello::kurbo::Rect;
+    use kurbo::Rect;
     use waterui_backend_core::widget::ToggleMetrics;
     use waterui_controls::toggle::ToggleStyle;
     use waterui_core::layout::Size;
@@ -381,6 +428,30 @@ mod tests {
         );
 
         assert_eq!(control, Rect::new(268.0, 24.0, 320.0, 56.0));
-        assert_eq!(label, Rect::new(16.0, 20.0, 260.0, 60.0));
+        assert_eq!(label, Rect::new(16.0, 32.0, 260.0, 48.0));
+    }
+
+    #[test]
+    fn label_shares_the_control_centre_line() {
+        let metrics = ToggleMetrics::new(52.0, 32.0, 8.0);
+        let bounds = Rect::new(16.0, 20.0, 320.0, 60.0);
+        for style in [
+            ToggleStyle::Automatic,
+            ToggleStyle::Switch,
+            ToggleStyle::Checkbox,
+        ] {
+            let metrics = match style {
+                ToggleStyle::Checkbox => ToggleMetrics::new(18.0, 18.0, 8.0),
+                _ => metrics,
+            };
+            let (control, label) =
+                toggle_control_and_label_bounds(bounds, style, metrics, Size::new(64.0, 16.0));
+            assert!(
+                (label.center().y - control.center().y).abs() < 1e-9,
+                "{style:?}: label centre {} != control centre {}",
+                label.center().y,
+                control.center().y,
+            );
+        }
     }
 }

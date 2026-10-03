@@ -7,6 +7,7 @@ use waterui::app::App;
 use waterui::prelude::*;
 use waterui::reactive::binding;
 use waterui::shape::{RoundedRectangle, ShapeExt};
+use waterui::window::{Window, WindowState};
 use waterui_controls::{slider::slider, stepper::stepper};
 
 fn main_view() -> impl View {
@@ -17,7 +18,7 @@ fn main_view() -> impl View {
     scroll(
         vstack((
             text("Hydrolysis Wayland Smoke").size(28.0),
-            text("Direct self-drawn window via winit + Vello").size(16.0),
+            text("Direct self-drawn window via winit + Cherenkov").size(16.0),
             RoundedRectangle::new(0.2)
                 .fill(Color::srgb_hex("#2563EB"))
                 .size(560.0, 180.0),
@@ -37,13 +38,15 @@ fn main_view() -> impl View {
     .foreground(Color::srgb_hex("#0F172A"))
 }
 
-fn app() -> App {
-    // Widgets read their fonts and colors out of the environment, and a bare
-    // `Environment` has neither, so every text view panics on the first frame.
-    // The generated projects install this too.
-    let mut env = Environment::new();
-    hydrolysis_m3::install_defaults(&mut env);
-    App::new(main_view, env).title("Hydrolysis Wayland Smoke")
+fn app(env: Environment) -> App {
+    App::new_with_windows(
+        [Window::new(
+            "Hydrolysis Wayland Smoke",
+            binding(WindowState::Normal),
+            main_view,
+        )],
+        env,
+    )
 }
 
 fn smoke_lifetime() -> Duration {
@@ -63,5 +66,10 @@ fn main() {
         std::process::exit(0);
     });
 
-    run(app());
+    // `run` installs the style's tokens (fonts, colors) over the framework
+    // defaults before the first frame; the app-level environment carries none.
+    run(
+        app(Environment::new()),
+        hydrolysis_m3::Material3::defaults(),
+    );
 }

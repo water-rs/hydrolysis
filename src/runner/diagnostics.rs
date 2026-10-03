@@ -3,15 +3,14 @@
 use super::*;
 
 pub(super) const DEFAULT_RENDER_DIAG_INTERVAL_MS: u64 = 1_000;
-pub(super) const DEFAULT_RENDER_DIAG_SLOW_FRAME_MS: u64 = 16;
 
 #[derive(Clone, Copy)]
 pub(super) struct RenderDiagnosticsConfig {
     pub(super) enabled: bool,
     pub(super) interval: Duration,
     /// Explicit slow-frame threshold from the env var, when the operator sets one.
-    /// `None` means "derive from the display refresh rate" (one frame budget), with the
-    /// 16ms constant used only as the no-monitor fallback.
+    /// `None` means "derive from the display refresh rate" (one frame budget), with
+    /// [`crate::TARGET_FRAME_INTERVAL`] as the no-monitor fallback.
     pub(super) slow_frame_threshold_override: Option<Duration>,
 }
 
@@ -23,14 +22,11 @@ impl RenderDiagnosticsConfig {
             "WATERUI_HYDROLYSIS_RENDER_DIAG_INTERVAL_MS",
             DEFAULT_RENDER_DIAG_INTERVAL_MS,
         );
-        let slow_frame_threshold_override =
-            std::env::var_os("WATERUI_HYDROLYSIS_RENDER_DIAG_SLOW_FRAME_MS").map(|_| {
-                Duration::from_millis(parse_positive_u64_env(
-                    "hydrolysis runner",
-                    "WATERUI_HYDROLYSIS_RENDER_DIAG_SLOW_FRAME_MS",
-                    DEFAULT_RENDER_DIAG_SLOW_FRAME_MS,
-                ))
-            });
+        let slow_frame_threshold_override = parse_optional_positive_u64_env(
+            "hydrolysis runner",
+            "WATERUI_HYDROLYSIS_RENDER_DIAG_SLOW_FRAME_MS",
+        )
+        .map(Duration::from_millis);
 
         Self {
             enabled,
@@ -50,9 +46,7 @@ pub(super) struct RenderPhaseSample {
     pub(super) present: Duration,
     pub(super) total: Duration,
     pub(super) rebuild_iterations: u32,
-    pub(super) applied_filter_count: u32,
-    pub(super) applied_filter_capture_us: u64,
-    pub(super) applied_filter_effect_us: u64,
+    pub(super) filtered_layers: u32,
     pub(super) rebuilt: bool,
 }
 
@@ -70,9 +64,7 @@ pub(super) struct RenderPhaseTotals {
     pub(super) render: Duration,
     pub(super) present: Duration,
     pub(super) total: Duration,
-    pub(super) applied_filter_count: u64,
-    pub(super) applied_filter_capture: Duration,
-    pub(super) applied_filter_effect: Duration,
+    pub(super) filtered_layers: u64,
 }
 
 pub(super) struct RenderDiagnostics {
@@ -89,7 +81,7 @@ impl RenderDiagnostics {
         Self {
             slow_frame_threshold: config
                 .slow_frame_threshold_override
-                .unwrap_or_else(|| Duration::from_millis(DEFAULT_RENDER_DIAG_SLOW_FRAME_MS)),
+                .unwrap_or(crate::TARGET_FRAME_INTERVAL),
             config,
             report_started_at: Instant::now(),
             totals: RenderPhaseTotals::default(),
@@ -141,14 +133,11 @@ impl RenderDiagnostics {
         self.totals.render += sample.render;
         self.totals.present += sample.present;
         self.totals.total += sample.total;
-        self.totals.applied_filter_count = self
+        self.totals.filtered_layers = self
             .totals
-            .applied_filter_count
-            .checked_add(u64::from(sample.applied_filter_count))
-            .expect("hydrolysis runner: render diagnostics applied filter counter overflow");
-        self.totals.applied_filter_capture +=
-            Duration::from_micros(sample.applied_filter_capture_us);
-        self.totals.applied_filter_effect += Duration::from_micros(sample.applied_filter_effect_us);
+            .filtered_layers
+            .checked_add(u64::from(sample.filtered_layers))
+            .expect("hydrolysis runner: render diagnostics filtered layer counter overflow");
 
         if sample.total >= self.slow_frame_threshold {
             self.totals.slow_frames = self
@@ -168,11 +157,7 @@ impl RenderDiagnostics {
                 render_ms = duration_ms(sample.render),
                 present_ms = duration_ms(sample.present),
                 rebuild_iterations = sample.rebuild_iterations,
-                applied_filter_count = sample.applied_filter_count,
-                applied_filter_capture_ms =
-                    duration_ms(Duration::from_micros(sample.applied_filter_capture_us)),
-                applied_filter_effect_ms =
-                    duration_ms(Duration::from_micros(sample.applied_filter_effect_us)),
+                filtered_layers = sample.filtered_layers,
                 "Hydrolysis slow frame detected"
             );
         }
@@ -200,11 +185,7 @@ impl RenderDiagnostics {
         let avg_acquire_ms = duration_ms(self.totals.acquire) / frame_count;
         let avg_render_ms = duration_ms(self.totals.render) / frame_count;
         let avg_present_ms = duration_ms(self.totals.present) / frame_count;
-        let avg_applied_filter_count = self.totals.applied_filter_count as f64 / frame_count;
-        let avg_applied_filter_capture_ms =
-            duration_ms(self.totals.applied_filter_capture) / frame_count;
-        let avg_applied_filter_effect_ms =
-            duration_ms(self.totals.applied_filter_effect) / frame_count;
+        let avg_filtered_layers = self.totals.filtered_layers as f64 / frame_count;
         let rebuild_ratio = self.totals.rebuild_frames as f64 / frame_count;
         let avg_rebuild_iterations = self.totals.rebuild_iterations as f64 / frame_count;
         let fps = self.totals.frames as f64 / elapsed.as_secs_f64();
@@ -226,9 +207,7 @@ impl RenderDiagnostics {
             avg_acquire_ms,
             avg_render_ms,
             avg_present_ms,
-            avg_applied_filter_count,
-            avg_applied_filter_capture_ms,
-            avg_applied_filter_effect_ms,
+            avg_filtered_layers,
             slow_frames = self.totals.slow_frames,
             slow_frame_threshold_ms = duration_ms(self.slow_frame_threshold),
             "Hydrolysis render diagnostics"

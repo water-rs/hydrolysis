@@ -2,6 +2,7 @@
 //! and accessibility metadata wrappers around content views.
 
 use super::*;
+use cherenkov::Draw as _;
 
 impl HydrolysisRenderer {
     /// Apply a clip-shape layer around the given content render. Shared by the
@@ -19,31 +20,34 @@ impl HydrolysisRenderer {
         // non-square rect makes every circular corner elliptical.
         let clip_path = shape_kind_path(value.kind(), ctx.bounds)
             .unwrap_or_else(|| path_commands_to_path(value.commands(), ctx.bounds));
+        let transforms = LayerTransforms {
+            paint: ctx.transform,
+            hit: ctx.hit_transform,
+        };
         if let Some(regular_clip) = kind_clip_shape(value.kind(), ctx.bounds)
             .or_else(|| regular_clip_shape(value.commands(), ctx.bounds))
         {
             match regular_clip {
                 RegularClipShape::Rect(rect) => {
-                    renderer.push_layer_rect(1.0, ctx.transform, rect);
+                    renderer.with_clip_rect_scope(1.0, transforms, rect, render_content);
                 }
                 RegularClipShape::RoundedRect {
                     rect,
                     corner_width,
                     corner_height,
-                } => renderer.push_layer_rounded_rect(
+                } => renderer.with_clip_rounded_rect_scope(
                     1.0,
-                    ctx.transform,
+                    transforms,
                     clip_path,
                     rect,
                     corner_width,
                     corner_height,
+                    render_content,
                 ),
             }
         } else {
-            renderer.push_layer_path(1.0, ctx.transform, clip_path);
+            renderer.with_clip_path_scope(1.0, transforms, clip_path, render_content);
         }
-        render_content(renderer);
-        renderer.pop_layer();
     }
 
     /// Render the given content then stroke the border over it, mirroring the
@@ -63,78 +67,62 @@ impl HydrolysisRenderer {
             return;
         }
 
-        let brush = resolved_color_to_peniko(border.color.resolve(env).get());
+        let paint = || Paint::Solid(border.color.resolve(env).snapshot());
         let width = f64::from(border.width);
 
         if border.edges.all() && border.corner_radius > 0.0 {
             let rounded =
-                vello::kurbo::RoundedRect::from_rect(ctx.bounds, f64::from(border.corner_radius));
-            let stroke = vello::kurbo::Stroke::new(width);
+                kurbo::RoundedRect::from_rect(ctx.bounds, f64::from(border.corner_radius));
+            let stroke = kurbo::Stroke::new(width);
             renderer
                 .scene
-                .stroke(&stroke, ctx.transform, brush, None, &rounded);
+                .stroke_paint(&stroke, ctx.transform, paint(), &rounded);
             return;
         }
 
         if border.edges.top {
-            let top = vello::kurbo::Rect::new(
+            let top = kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y0,
                 ctx.bounds.x1,
                 ctx.bounds.y0 + width,
             );
-            renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
-                ctx.transform,
-                brush,
-                None,
-                &top,
-            );
+            renderer
+                .scene
+                .fill_paint(peniko::Fill::NonZero, ctx.transform, paint(), &top);
         }
         if border.edges.bottom {
-            let bottom = vello::kurbo::Rect::new(
+            let bottom = kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y1 - width,
                 ctx.bounds.x1,
                 ctx.bounds.y1,
             );
-            renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
-                ctx.transform,
-                brush,
-                None,
-                &bottom,
-            );
+            renderer
+                .scene
+                .fill_paint(peniko::Fill::NonZero, ctx.transform, paint(), &bottom);
         }
         if border.edges.leading {
-            let leading = vello::kurbo::Rect::new(
+            let leading = kurbo::Rect::new(
                 ctx.bounds.x0,
                 ctx.bounds.y0,
                 ctx.bounds.x0 + width,
                 ctx.bounds.y1,
             );
-            renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
-                ctx.transform,
-                brush,
-                None,
-                &leading,
-            );
+            renderer
+                .scene
+                .fill_paint(peniko::Fill::NonZero, ctx.transform, paint(), &leading);
         }
         if border.edges.trailing {
-            let trailing = vello::kurbo::Rect::new(
+            let trailing = kurbo::Rect::new(
                 ctx.bounds.x1 - width,
                 ctx.bounds.y0,
                 ctx.bounds.x1,
                 ctx.bounds.y1,
             );
-            renderer.scene.fill(
-                vello::peniko::Fill::NonZero,
-                ctx.transform,
-                brush,
-                None,
-                &trailing,
-            );
+            renderer
+                .scene
+                .fill_paint(peniko::Fill::NonZero, ctx.transform, paint(), &trailing);
         }
     }
 
@@ -151,29 +139,115 @@ impl HydrolysisRenderer {
         let blur = f64::from(shadow.radius.max(0.0));
         let offset_x = f64::from(shadow.offset.x);
         let offset_y = f64::from(shadow.offset.y);
-        let shadow_rect = vello::kurbo::Rect::new(
+        let shadow_rect = kurbo::Rect::new(
             ctx.bounds.x0 + offset_x,
             ctx.bounds.y0 + offset_y,
             ctx.bounds.x1 + offset_x,
             ctx.bounds.y1 + offset_y,
         );
-        let shadow_color = resolved_color_to_peniko(shadow.color.resolve(env).get());
+        let shadow_color = shadow.color.resolve(env).snapshot();
 
-        renderer.scene.draw_blurred_rounded_rect(
-            ctx.transform,
-            shadow_rect,
-            shadow_color,
-            blur,
-            blur,
-        );
+        // The silhouette states the caster's shape. `kind_clip_shape` — the
+        // same resolver a clip uses to decide between the uniform rounded-rect
+        // fast path and the general path route — answers whether the shadow can
+        // feed the engine's blurred-rounded-rect primitive directly.
+        let silhouette = &shadow.silhouette;
+        let uniform_radius = match kind_clip_shape(silhouette.kind(), shadow_rect) {
+            Some(RegularClipShape::RoundedRect { corner_width, .. }) => Some(corner_width),
+            Some(RegularClipShape::Rect(_)) => Some(0.0),
+            None => None,
+        };
+        match uniform_radius {
+            Some(corner_radius) => renderer.scene.blurred_rounded_rect(
+                ctx.transform,
+                shadow_rect,
+                shadow_color,
+                corner_radius,
+                blur,
+            ),
+            None => Self::draw_blurred_silhouette(
+                renderer,
+                ctx.transform,
+                silhouette,
+                shadow_rect,
+                shadow_color,
+                blur,
+            ),
+        }
         render_content(renderer);
     }
 
-    /// Render the wrapped content, then bind the single text input it registered to
-    /// the `.focused(binding)` binding and reconcile focus state. Shared by the
+    /// Draw a non-rounded-rect silhouette's blurred shadow into `rect` — the
+    /// general route for silhouettes `kind_clip_shape` cannot express as a
+    /// uniform rounded rect (ellipse, non-square circle, uneven corners,
+    /// custom path). The engine rasterizes and caches the blur; Hydrolysis
+    /// keeps no pixmap cache of its own.
+    fn draw_blurred_silhouette(
+        renderer: &mut HydrolysisRenderer,
+        transform: kurbo::Affine,
+        silhouette: &ClipShape,
+        rect: kurbo::Rect,
+        color: WorkingColor,
+        blur: f64,
+    ) {
+        // The same resolution `apply_clip_shape` performs — structured kind
+        // first, unit-space commands only for a custom path — but against the
+        // rect normalized to the origin: the rect's own position is applied
+        // at draw time.
+        let local_rect = kurbo::Rect::new(0.0, 0.0, rect.width(), rect.height());
+        let local_path = shape_kind_path(silhouette.kind(), local_rect)
+            .unwrap_or_else(|| path_commands_to_path(silhouette.commands(), local_rect));
+        let placement = transform * kurbo::Affine::translate((rect.x0, rect.y0));
+
+        if blur <= 0.0 {
+            renderer.scene.fill_paint(
+                peniko::Fill::NonZero,
+                placement,
+                Paint::Solid(color),
+                &local_path,
+            );
+            return;
+        }
+
+        // `blur` is already in device pixels; the engine scales `sigma` by
+        // the transform's axis length, so the path arrives pre-transformed
+        // and the op transform is identity.
+        renderer.scene.shadow(
+            kurbo::Affine::IDENTITY,
+            &(placement * &local_path),
+            blur,
+            color,
+        );
+    }
+
+    /// Draw the theme's context-menu panel behind the wrapped menu rows,
+    /// then render the content over it. This is the popup-window menu's
+    /// surface ([`WrapperEffect::PopupMenuSurface`]): on Material 3 themes it
+    /// is `md.comp.menu.container.color` (`surface-container`), the extra-small
+    /// 4 dp `md.sys.shape.corner.extra-small` shape and
+    /// `md.comp.menu.container.elevation` level 2 — drawn by the theme's
+    /// `draw_text_context_menu_panel`. The window leaves the panel's shadow
+    /// room inside its own bounds via `POPUP_MENU_PANEL_MARGIN`.
+    pub(super) fn apply_popup_menu_surface(
+        renderer: &mut HydrolysisRenderer,
+        ctx: RenderContext,
+        render_content: impl FnOnce(&mut HydrolysisRenderer),
+    ) {
+        {
+            let theme = renderer.theme();
+            let mut draw =
+                SceneDrawContext::with_root_transform(&mut renderer.scene, ctx.transform);
+            theme.draw_text_context_menu_panel(&mut draw, ctx.bounds);
+        }
+        render_content(renderer);
+    }
+
+    /// Render the wrapped content, then bind the single focusable target — a
+    /// text input or an input surface — it registered to the
+    /// `.focused(binding)` binding and reconcile focus state. Shared by the
     /// dispatch handler and the retained `Wrapper` node ([`WrapperEffect::Focused`]):
     /// the binding is read through `read_signal` so a change schedules a frame, and
-    /// the target bookkeeping counts inputs registered during the content render, so
+    /// the target bookkeeping counts targets registered during the content render, so
     /// it works identically whether the content is dispatched or node-flushed.
     pub(super) fn apply_focused(
         renderer: &mut HydrolysisRenderer,
@@ -181,31 +255,26 @@ impl HydrolysisRenderer {
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let should_focus = renderer.read_signal(&value.0);
-        let start = renderer.text_editing.text_input_targets.len();
+        let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
         render_content(renderer);
-        let end = renderer.text_editing.text_input_targets.len();
-        let focus_target_count = end - start;
-        assert!(
-            focus_target_count == 1,
-            "hydrolysis .focused() requires exactly one TextField or SecureField in the wrapped subtree, found {focus_target_count}"
-        );
-        let target = renderer
-            .text_editing
-            .text_input_targets
-            .get_mut(start)
-            .expect("hydrolysis focused metadata missing registered text input target");
-        assert!(
-            target.focus_binding.is_none(),
-            "hydrolysis does not allow multiple .focused() modifiers to target the same control"
-        );
-        target.focus_binding = Some(value.0.clone());
-        let target_key = target.interaction_key.clone();
+        renderer.wire_focused_target(value, should_focus, text_start, embedded_start);
+    }
 
-        if should_focus {
-            renderer.set_focused_text_input_key(Some(target_key));
-        } else if renderer.text_editing.is_focused(&target_key) {
-            renderer.set_focused_text_input_key(None);
-        }
+    /// The semantic counterpart of [`Self::apply_focused`]: the same focus
+    /// wiring over the text-input and surface targets the semantic walk
+    /// registered, with no renderer in hand.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn apply_focused_semantic(
+        renderer: &mut SemanticCore,
+        value: &Focused,
+        render_content: impl FnOnce(&mut SemanticCore),
+    ) {
+        let should_focus = renderer.read_signal(&value.0);
+        let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
+        render_content(renderer);
+        renderer.wire_focused_target(value, should_focus, text_start, embedded_start);
     }
 
     /// Render the given content and, when hit-testing is disabled, truncate every
@@ -222,10 +291,12 @@ impl HydrolysisRenderer {
         let enabled = renderer.read_signal(&value.enabled);
         let pointer_start = renderer.hit_test.pointer_targets.len();
         let gesture_start = renderer.gesture_engine.target_count();
+        let gesture_region_start = renderer.hit_test.gesture_regions.len();
         let cursor_start = renderer.hit_test.cursor_targets.len();
         let hover_start = renderer.hit_test.hover_targets.len();
         let scroll_start = renderer.hit_test.scroll_targets.len();
         let text_start = renderer.text_editing.text_input_targets.len();
+        let embedded_start = renderer.hit_test.embedded_input_targets.len();
 
         render_content(renderer);
 
@@ -236,6 +307,10 @@ impl HydrolysisRenderer {
         renderer.hit_test.pointer_targets.truncate(pointer_start);
         renderer.ensure_active_pointer_drag_target_is_live();
         renderer.gesture_engine.truncate_targets(gesture_start);
+        renderer
+            .hit_test
+            .gesture_regions
+            .truncate(gesture_region_start);
         renderer.hit_test.cursor_targets.truncate(cursor_start);
         let removed_hover: Vec<_> = renderer.hit_test.hover_targets[hover_start..]
             .iter()
@@ -263,6 +338,21 @@ impl HydrolysisRenderer {
         if focus_was_dropped {
             renderer.set_focused_text_input_key(None);
         }
+        // The same goes for an input surface under the modifier: a surface
+        // that is no longer hittable must not keep keyboard focus.
+        let embedded_focus_was_dropped = renderer.hit_test.embedded_input_targets[embedded_start..]
+            .iter()
+            .any(|target| renderer.is_focused_embedded(&target.interaction_key));
+        renderer
+            .hit_test
+            .embedded_input_targets
+            .truncate(embedded_start);
+        if embedded_focus_was_dropped {
+            // The hidden surface releases focus now; the end of the frame
+            // relocates it to the next focusable.
+            renderer.hit_test.focus_dropped_this_frame = true;
+            renderer.set_focused_embedded_key(None);
+        }
     }
 
     /// Register the cursor hit-target, then render the given content. Shared by
@@ -277,6 +367,25 @@ impl HydrolysisRenderer {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
         renderer.register_cursor_target(bounds, style);
         render_content(renderer);
+    }
+
+    /// The `Click` → `Activate` wiring of a tap gesture's accessibility node:
+    /// invoke the gesture's own action with the same layered environment the
+    /// pointer path uses (`captured_env.layered_on(runtime_env)`).
+    #[cfg(feature = "accessibility")]
+    fn tap_accessibility_activation(
+        env: &Environment,
+        action: &Rc<RefCell<BoxedAction<()>>>,
+    ) -> AccessibilityActivation {
+        let captured_env = env.clone();
+        let action = Rc::clone(action);
+        Rc::new(RefCell::new(
+            move |_renderer: &mut crate::renderer::SemanticCore, runtime_env: &Environment| {
+                let action_env = captured_env.layered_on(runtime_env);
+                action.borrow_mut()(&action_env);
+                true
+            },
+        ))
     }
 
     /// Register the gesture target (and, for a tappable view with a role, its
@@ -295,38 +404,94 @@ impl HydrolysisRenderer {
         ctx: RenderContext,
         env: &Environment,
         effect: &GestureObserverEffect,
-        render_content: impl FnOnce(&mut HydrolysisRenderer),
+        render_content: impl FnOnce(&mut HydrolysisRenderer, &Environment),
     ) {
+        // The action environment contract (water-rs/hydrolysis#177,
+        // water-rs/waterui#1292): the handler resolves against `env` as seen
+        // here — the environment the observer's *content* resolves in — layered
+        // over the runtime env at dispatch. The caller already resolved the
+        // content's leading `.state(&v)`/handler layers, so a `.state` install
+        // reaches the handler whether it sits before or after `.gesture` in the
+        // modifier chain. Every dispatch arm — a11y Activate, `layered_action`,
+        // the press slot, keyboard activation, hover — applies this same
+        // `captured_env.layered_on(runtime_env)` rule.
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
         let disabled = env
             .get::<waterui_core::interaction::Disabled>()
             .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
         #[cfg(feature = "accessibility")]
-        if matches!(effect.gesture, Gesture::Tap(_)) && env.get::<AccessibilityRole>().is_some() {
-            let mut node = AccessibilityNode::new(
-                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
-            );
-            if let Some(label) =
-                renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+        let mut claimed_naming_node = None;
+        #[cfg(feature = "accessibility")]
+        if matches!(effect.gesture, Gesture::Tap(_)) {
+            if env.get::<AccessibilityRole>().is_some()
+                && !renderer.accessibility_scope_is_claimed(env)
             {
-                node.set_label(label);
+                let mut node = AccessibilityNode::new(
+                    renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+                );
+                if let Some(label) =
+                    renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+                {
+                    node.set_label(label);
+                }
+                if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+                    node.set_value(value);
+                }
+                node.add_action(AccessibilityAction::Focus);
+                if renderer.control_selected(env, &InteractionKey::for_rc(&effect.action, 0)) {
+                    node.set_selected(true);
+                }
+                let action_target = if disabled {
+                    node.set_disabled();
+                    None
+                } else {
+                    node.add_action(AccessibilityAction::Click);
+                    // Direct semantic activation: invoke the gesture's own
+                    // action with the same layered environment the pointer
+                    // path uses.
+                    Some(AccessibilityActionTarget::Activate {
+                        action: Self::tap_accessibility_activation(env, &effect.action),
+                    })
+                };
+                claimed_naming_node =
+                    renderer.register_accessibility_node(node, bounds, env, action_target);
+            } else if !disabled && let Some(scope) = env.get::<ScopedAccessibilitySemantics>() {
+                // The scope names this view's representative — registering a
+                // second node would emit a silenced duplicate — so the tap
+                // delegates its activation to the scope instead, which the
+                // representative drains when its subtree has been walked. An
+                // unclaimed scope (a `List` row's, whose node the row
+                // registers itself) receives the same donation. The donation
+                // carries the gesture's own hit region and clip — the
+                // interaction owner whose geometry the activation-point
+                // query projects (water-rs/waterui#1323 §5).
+                scope.delegate_activation(
+                    Self::tap_accessibility_activation(env, &effect.action),
+                    Some(NodePlacement {
+                        bounds,
+                        clip: renderer.hit_test.hit_clip_stack.last().copied(),
+                    }),
+                );
             }
-            if let Some(value) = renderer.resolve_accessibility_value(env, None) {
-                node.set_value(value);
-            }
-            node.add_action(AccessibilityAction::Focus);
-            let action_target = if disabled {
-                node.set_disabled();
-                None
-            } else {
-                node.add_action(AccessibilityAction::Click);
-                let activation_point = accessibility_activation_point(bounds);
-                Some(AccessibilityActionTarget::PointerPrimaryClick {
-                    point: activation_point,
-                })
-            };
-            let _ = renderer.register_accessibility_node(node, bounds, env, action_target);
         }
+        // A gesture node that claimed the naming scope represents the wrapped
+        // view: its content walks under the same shielded environment a naming
+        // container hands its children, so a leaf cannot repeat the claim's
+        // role and label as a second node.
+        #[cfg(feature = "accessibility")]
+        let content_env = if claimed_naming_node.is_some() {
+            accessibility_container_child_environment(env).unwrap_or_else(|| env.clone())
+        } else {
+            env.clone()
+        };
+        #[cfg(feature = "accessibility")]
+        let content_env = &content_env;
+        #[cfg(not(feature = "accessibility"))]
+        let content_env = env;
+        #[cfg(feature = "accessibility")]
+        let scope_claimed = claimed_naming_node.is_some();
+        #[cfg(not(feature = "accessibility"))]
+        let scope_claimed = false;
         let group_id = renderer.gesture_group_id_for_identity(effect.gesture_group_identity);
         let captured_env = env.clone();
         let action = Rc::clone(&effect.action);
@@ -341,22 +506,49 @@ impl HydrolysisRenderer {
                 .cloned()
         {
             let interaction_key = InteractionKey::for_rc(&effect.action, 0);
-            let (interaction, press_slot, _) =
-                renderer.bind_control_interaction_target(interaction_key, bounds, env, disabled);
-            Self::render_gesture_content(renderer, env, render_content);
-
-            let color_signal = style.state_layer_color.resolve(env);
-            let color = resolved_color_to_peniko(renderer.read_signal(&color_signal));
-            let interaction = local_interaction_state(interaction, ctx.hit_transform);
-            let theme = crate::widgets::util::widget_theme(env);
-            let mut draw = renderer.draw_context(ctx);
-            theme.draw_interaction_state_layer(
-                &mut draw,
-                style.state_layer_bounds(ctx.bounds),
-                style.state_layer_radii,
-                color,
-                interaction,
+            let (interaction, press_slot, _) = renderer.bind_control_interaction_target(
+                interaction_key.clone(),
+                bounds,
+                env,
+                disabled,
             );
+            Self::render_gesture_content(renderer, env, content_env, scope_claimed, render_content);
+            #[cfg(feature = "accessibility")]
+            if let Some(node_id) = claimed_naming_node {
+                // The node advertises `Focus`; without this link Tab can land
+                // on it semantically while the interaction machinery never
+                // sees the key — FOCUSED would never reach
+                // `.interaction_state` reports or the focus ring.
+                renderer.register_accessibility_focus_link(&interaction_key, node_id);
+                renderer.drain_claim_scope(node_id, env);
+            }
+
+            let state = renderer.reported_interaction_state(&interaction_key);
+            let color_signal = style.state_layer_color.resolve(env);
+            let color = renderer.read_signal(&color_signal);
+            let interaction = local_interaction_state(interaction, ctx.hit_transform);
+            {
+                let theme = renderer.theme();
+                let layer_bounds = style.state_layer_bounds(ctx.bounds);
+                let radii = *style.state_layer_radii.resolve(state);
+                let ring =
+                    interaction_focus_ring(renderer, env, layer_bounds, radii, &style, state);
+                let mut draw = renderer.draw_context(ctx);
+                theme.draw_interaction_state_layer(
+                    &mut draw,
+                    layer_bounds,
+                    radii,
+                    color,
+                    interaction,
+                );
+                if let Some((ring_bounds, ring_radii, color, width)) = ring {
+                    draw.stroke(
+                        kurbo::RoundedRect::from_rect(ring_bounds, ring_radii),
+                        kurbo::Stroke::new(width),
+                        color,
+                    );
+                }
+            }
 
             if !disabled {
                 renderer.register_interactive_pointer_target_with_keyboard(
@@ -372,28 +564,106 @@ impl HydrolysisRenderer {
             return;
         }
 
-        renderer.register_gesture_target(bounds, group_id, effect.gesture.clone(), layered_action);
-        Self::render_gesture_content(renderer, env, render_content);
+        if let Some(target) = effect.gesture_target.take() {
+            renderer.register_retained_gesture_target(&target, bounds, group_id);
+            effect.gesture_target.set(Some(target));
+        } else {
+            effect.gesture_target.set(renderer.register_gesture_target(
+                bounds,
+                group_id,
+                effect.gesture.clone(),
+                layered_action,
+            ));
+        }
+        Self::render_gesture_content(renderer, env, content_env, scope_claimed, render_content);
+        #[cfg(feature = "accessibility")]
+        if let Some(node_id) = claimed_naming_node {
+            renderer.drain_claim_scope(node_id, env);
+        }
     }
 
     fn render_gesture_content(
         renderer: &mut HydrolysisRenderer,
         env: &Environment,
-        render_content: impl FnOnce(&mut HydrolysisRenderer),
+        content_env: &Environment,
+        scope_claimed: bool,
+        render_content: impl FnOnce(&mut HydrolysisRenderer, &Environment),
     ) {
         #[cfg(not(feature = "accessibility"))]
-        let _ = env;
+        let _ = (env, content_env, scope_claimed);
+        // `ExcludeDescendants` belongs to the element that claims this naming
+        // scope — the claim registers its node above and suppresses its own
+        // descendants here. An observer that registers no node (a long-press,
+        // or a silenced tap) must not consume the flag: doing so suppresses
+        // the inner element the flag actually names (water-rs/hydrolysis#266).
         #[cfg(feature = "accessibility")]
-        if env
-            .get::<AccessibilityChildren>()
-            .is_some_and(AccessibilityChildren::excludes_descendants)
+        if scope_claimed
+            && env
+                .get::<AccessibilityChildren>()
+                .is_some_and(AccessibilityChildren::excludes_descendants)
         {
             renderer.push_accessibility_suppression();
-            render_content(renderer);
+            render_content(renderer, content_env);
             renderer.pop_accessibility_suppression();
             return;
         }
-        render_content(renderer);
+        render_content(renderer, content_env);
+    }
+
+    /// The semantic counterpart of [`Self::apply_gesture_observer`]: the tap's
+    /// own accessibility node — role, label, `Click` → [`AccessibilityActionTarget::Activate`],
+    /// or `disabled` — with no bounds, no pointer or gesture targets, and no
+    /// interaction state layer. Returns the node when the gesture claimed the
+    /// naming scope; the caller then walks the content under the shielded
+    /// environment and drains the claim's scope onto it.
+    #[cfg(feature = "accessibility")]
+    pub(super) fn emit_gesture_observer_accessibility(
+        renderer: &mut SemanticCore,
+        env: &Environment,
+        effect: &GestureObserverEffect,
+    ) -> Option<AccessibilityNodeId> {
+        let disabled = env
+            .get::<waterui_core::interaction::Disabled>()
+            .is_some_and(|disabled| renderer.read_signal(disabled.signal()));
+        if !matches!(effect.gesture, Gesture::Tap(_)) {
+            return None;
+        }
+        if env.get::<AccessibilityRole>().is_some() && !renderer.accessibility_scope_is_claimed(env)
+        {
+            let mut node = AccessibilityNode::new(
+                renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Button),
+            );
+            if let Some(label) =
+                renderer.resolve_accessibility_label(env, effect.default_a11y_label.clone())
+            {
+                node.set_label(label);
+            }
+            node.add_action(AccessibilityAction::Focus);
+            if renderer.control_selected(env, &InteractionKey::for_rc(&effect.action, 0)) {
+                node.set_selected(true);
+            }
+            let action_target = if disabled {
+                node.set_disabled();
+                None
+            } else {
+                node.add_action(AccessibilityAction::Click);
+                Some(AccessibilityActionTarget::Activate {
+                    action: Self::tap_accessibility_activation(env, &effect.action),
+                })
+            };
+            return renderer.register_accessibility_node_semantic(node, env, action_target);
+        }
+        if !disabled && let Some(scope) = env.get::<ScopedAccessibilitySemantics>() {
+            // Claimed or not, the scope's representative drains the donation
+            // when its subtree ends — the same contract the rendered arm of
+            // `apply_gesture_observer` holds. The semantic walk has no
+            // geometry, so the donation carries no interaction region either.
+            scope.delegate_activation(
+                Self::tap_accessibility_activation(env, &effect.action),
+                None,
+            );
+        }
+        None
     }
 
     /// Register the hover-enter/move/exit target for `handler`, then render the
@@ -448,30 +718,74 @@ impl HydrolysisRenderer {
 
     /// Register the context-menu hit-target, then render the given content. Shared
     /// by the dispatch handler and the retained `Wrapper` node. The node owns the
-    /// [`ResolvedContextMenu`] by reference, so the menu items are cloned for
-    /// registration.
+    /// [`ContextMenuEffect`] by reference, so the menu items are cloned for
+    /// registration and the preview/accessory slots travel with the target for
+    /// the open presentation to mount. The node's environment travels with the
+    /// target so the popup opens inside it (water-rs/hydrolysis#140).
     pub(super) fn apply_context_menu(
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
-        value: &ResolvedContextMenu,
+        env: &Environment,
+        value: &ContextMenuEffect,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        renderer.register_context_menu_target(bounds, value.items.clone());
+        renderer.register_context_menu_target(
+            bounds,
+            value.items.clone(),
+            env,
+            value.dismiss_requests.clone(),
+            Rc::clone(&value.preview),
+            Rc::clone(&value.accessory),
+        );
+        render_content(renderer);
+    }
+
+    /// Register the anchor's live bounds and the overlay's handles for the
+    /// post-flush render pass, then render the anchor content. Shared by the
+    /// dispatch handler and the retained `Wrapper` node. The binding is read
+    /// through [`HydrolysisRenderer::read_signal`], so a value change
+    /// schedules the refresh that opens or closes the overlay; re-registering
+    /// every frame is also what lets the render pass follow an anchor that
+    /// moved or detect one that left the tree.
+    pub(super) fn apply_anchored_overlay(
+        renderer: &mut HydrolysisRenderer,
+        ctx: RenderContext,
+        env: &Environment,
+        value: &AnchoredOverlayEffect,
+        render_content: impl FnOnce(&mut HydrolysisRenderer),
+    ) {
+        let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
+        let presented = renderer.read_signal(&value.is_presented);
+        renderer
+            .popup_menu
+            .anchored_overlays
+            .push(RegisteredAnchoredOverlay {
+                anchor: bounds,
+                placement: value.placement,
+                dismissal: value.dismissal,
+                presented,
+                is_presented: value.is_presented.clone(),
+                placed_edge: value.placed_edge.clone(),
+                env: env.clone(),
+                content: Rc::clone(&value.content),
+                marker: Rc::clone(&value.marker),
+            });
         render_content(renderer);
     }
 
     /// Register the draggable hit-target, then render the given content. Shared by
     /// the dispatch handler and the retained `Wrapper` node. The node owns the
-    /// [`Draggable`] by reference, so the data provider is cloned for registration.
+    /// [`Draggable`] in an `Rc`, so the registration clones the handle and the
+    /// payload reads live at the moment the drag begins.
     pub(super) fn apply_draggable(
         renderer: &mut HydrolysisRenderer,
         ctx: RenderContext,
-        value: &Draggable,
+        value: &Rc<Draggable>,
         render_content: impl FnOnce(&mut HydrolysisRenderer),
     ) {
         let bounds = transformed_rect(ctx.hit_transform, ctx.bounds);
-        renderer.register_draggable_target(bounds, value.data.clone());
+        renderer.register_draggable_target(bounds, Rc::clone(value));
         render_content(renderer);
     }
 
@@ -494,9 +808,9 @@ impl HydrolysisRenderer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RegularClipShape {
-    Rect(vello::kurbo::Rect),
+    Rect(kurbo::Rect),
     RoundedRect {
-        rect: vello::kurbo::Rect,
+        rect: kurbo::Rect,
         corner_width: f64,
         corner_height: f64,
     },
@@ -506,19 +820,23 @@ enum RegularClipShape {
 ///
 /// A normalized radius resolves against the shorter side, so corners stay
 /// circular and a fully-rounded shape is a stadium rather than an ellipse.
-fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
+fn kind_clip_shape(kind: ShapeKind, bounds: kurbo::Rect) -> Option<RegularClipShape> {
     let min_side = bounds.width().min(bounds.height()).max(0.0);
-    let uniform = |radius: f32| {
-        let corner = f64::from(radius.clamp(0.0, 0.5)) * min_side;
+    let rounded = |corner: f64| {
         Some(RegularClipShape::RoundedRect {
             rect: bounds,
             corner_width: corner,
             corner_height: corner,
         })
     };
+    let uniform = |radius: f32| rounded(f64::from(radius.clamp(0.0, 0.5)) * min_side);
+    // A fixed radius is already a length in points; only the
+    // half-shorter-side ceiling applies.
+    let fixed = |radius: f32| rounded(f64::from(radius.max(0.0)).min(min_side / 2.0));
     match kind {
         ShapeKind::Rect => Some(RegularClipShape::Rect(bounds)),
         ShapeKind::RoundedRect { corner_radius } => uniform(corner_radius),
+        ShapeKind::FixedRoundedRect { corner_radius } => fixed(corner_radius),
         ShapeKind::Capsule => uniform(0.5),
         // A circle is *inscribed* in the bounds, so only a square one is a
         // rounded rect: elsewhere `uniform(0.5)` describes a stadium filling
@@ -531,6 +849,7 @@ fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<Regula
         ShapeKind::Circle
         | ShapeKind::Ellipse
         | ShapeKind::UnevenRoundedRect { .. }
+        | ShapeKind::FixedUnevenRoundedRect { .. }
         | ShapeKind::CustomPath => None,
     }
 }
@@ -538,7 +857,7 @@ fn kind_clip_shape(kind: ShapeKind, bounds: vello::kurbo::Rect) -> Option<Regula
 #[cfg(test)]
 mod clip_shape_tests {
     use super::{RegularClipShape, ShapeKind, kind_clip_shape};
-    use vello::kurbo::Rect;
+    use kurbo::Rect;
 
     /// A square circle is exactly a rounded rect whose corner is half the
     /// side, so the fast clip is allowed to take it.
@@ -581,16 +900,66 @@ mod clip_shape_tests {
             Some(RegularClipShape::RoundedRect { .. })
         ));
     }
+
+    /// A fixed radius is a length in points: 12 stays 12 on a wide bar, and
+    /// only the half-shorter-side ceiling cuts it down.
+    #[test]
+    fn a_fixed_radius_clips_at_its_own_length_up_to_the_ceiling() {
+        let wide = Rect::new(0.0, 0.0, 200.0, 50.0);
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 12.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 12.0).abs() < f64::EPSILON
+                && (corner_height - 12.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            kind_clip_shape(
+                ShapeKind::FixedRoundedRect {
+                    corner_radius: 40.0
+                },
+                wide
+            ),
+            Some(RegularClipShape::RoundedRect {
+                corner_width,
+                corner_height,
+                ..
+            }) if (corner_width - 25.0).abs() < f64::EPSILON
+                && (corner_height - 25.0).abs() < f64::EPSILON
+        ));
+    }
+
+    /// Per-corner radii cannot be a uniform `RoundedRect` clip.
+    #[test]
+    fn a_fixed_uneven_kind_stays_on_the_path_mask() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert!(
+            kind_clip_shape(
+                ShapeKind::FixedUnevenRoundedRect {
+                    top_left: 0.0,
+                    top_right: 16.0,
+                    bottom_left: 0.0,
+                    bottom_right: 16.0,
+                },
+                bounds
+            )
+            .is_none()
+        );
+    }
 }
 
-fn regular_clip_shape(
-    commands: &[PathCommand],
-    bounds: vello::kurbo::Rect,
-) -> Option<RegularClipShape> {
+fn regular_clip_shape(commands: &[PathCommand], bounds: kurbo::Rect) -> Option<RegularClipShape> {
     regular_rect(commands, bounds).or_else(|| regular_rounded_rect(commands, bounds))
 }
 
-fn regular_rect(commands: &[PathCommand], bounds: vello::kurbo::Rect) -> Option<RegularClipShape> {
+fn regular_rect(commands: &[PathCommand], bounds: kurbo::Rect) -> Option<RegularClipShape> {
     let [
         PathCommand::MoveTo { x: x0, y: y0 },
         PathCommand::LineTo { x: x1, y: top_y },
@@ -618,10 +987,7 @@ fn regular_rect(commands: &[PathCommand], bounds: vello::kurbo::Rect) -> Option<
 }
 
 #[allow(clippy::too_many_lines)]
-fn regular_rounded_rect(
-    commands: &[PathCommand],
-    bounds: vello::kurbo::Rect,
-) -> Option<RegularClipShape> {
+fn regular_rounded_rect(commands: &[PathCommand], bounds: kurbo::Rect) -> Option<RegularClipShape> {
     let [
         PathCommand::MoveTo { x: start_x, y: y0 },
         PathCommand::LineTo {
@@ -732,14 +1098,8 @@ fn regular_rounded_rect(
     })
 }
 
-fn resolve_normalized_rect(
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    bounds: vello::kurbo::Rect,
-) -> vello::kurbo::Rect {
-    vello::kurbo::Rect::new(
+fn resolve_normalized_rect(x0: f32, y0: f32, x1: f32, y1: f32, bounds: kurbo::Rect) -> kurbo::Rect {
+    kurbo::Rect::new(
         f64::from(x0) * bounds.width(),
         f64::from(y0) * bounds.height(),
         f64::from(x1) * bounds.width(),
@@ -761,7 +1121,7 @@ mod regular_clip_tests {
 
     use super::*;
 
-    const BOUNDS: vello::kurbo::Rect = vello::kurbo::Rect::new(0.0, 0.0, 200.0, 100.0);
+    const BOUNDS: kurbo::Rect = kurbo::Rect::new(0.0, 0.0, 200.0, 100.0);
 
     #[test]
     fn recognizes_axis_aligned_rectangle() {

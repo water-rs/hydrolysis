@@ -1,6 +1,11 @@
 //! Pump-based headless runtime for tests, snapshots and offscreen rendering.
 
 use super::*;
+#[cfg(feature = "frame-profile")]
+use crate::platform::SurfaceProvider as _;
+use crate::renderer::MenuShortcutRegistry;
+#[cfg(feature = "accessibility")]
+use crate::renderer::accessibility::AccessibilityActivationPointError;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -8,6 +13,14 @@ pub(super) struct HeadlessPlatformWindow {
     inner: OffscreenWindow,
     pending_events: VecDeque<InputEvent>,
     redraw_requested: Cell<bool>,
+    /// The occlusion report tests drive through [`Self::set_occluded`] —
+    /// the default `false` a headless window behaves with in production.
+    occluded: Cell<bool>,
+    /// The pointer position the host knows right now — tracked from the
+    /// positional events it dispatched, or set directly when the test's host
+    /// knows a position it delivered no event for (an OS drag suppresses
+    /// cursor events on some platforms).
+    pointer_position: Option<(f32, f32)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,6 +45,8 @@ impl HeadlessPlatformWindow {
             inner: OffscreenWindow::on_context(gpu, width, height, format),
             pending_events: VecDeque::new(),
             redraw_requested: Cell::new(false),
+            occluded: Cell::new(false),
+            pointer_position: None,
         }
     }
 
@@ -40,6 +55,9 @@ impl HeadlessPlatformWindow {
     }
 
     pub(super) fn push_event(&mut self, event: InputEvent) {
+        if let Some((x, y)) = event_position(&event) {
+            self.pointer_position = Some((x, y));
+        }
         self.pending_events.push_back(event);
     }
 
@@ -54,8 +72,8 @@ impl HeadlessPlatformWindow {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PlatformWindow for HeadlessPlatformWindow {
-    fn surface(&mut self) -> &mut dyn crate::platform::SurfaceProvider {
-        self.inner.surface()
+    fn content_size(&self) -> (u32, u32) {
+        self.inner.content_size()
     }
 
     fn apply_properties(&mut self, window: &Window) {
@@ -78,8 +96,16 @@ impl PlatformWindow for HeadlessPlatformWindow {
         self.pending_events.drain(..).collect()
     }
 
+    fn pointer_position(&self) -> Option<(f32, f32)> {
+        self.pointer_position
+    }
+
     fn request_redraw(&self) {
         self.redraw_requested.set(true);
+    }
+
+    fn is_occluded(&self) -> bool {
+        self.occluded.get()
     }
 
     fn scale_factor(&self) -> f64 {
@@ -95,8 +121,21 @@ impl PlatformWindow for HeadlessPlatformWindow {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl crate::platform::GpuSurfaceWindow for HeadlessPlatformWindow {
+    fn surface(&mut self) -> &mut dyn crate::platform::SurfaceProvider {
+        crate::platform::GpuSurfaceWindow::surface(&mut self.inner)
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 impl HeadlessPlatformWindow {
+    /// The occlusion report the next [`RuntimeWindow::sync_occlusion`] pulls
+    /// — a test's stand-in for the window-system visibility signal.
+    pub(super) fn set_occluded(&self, occluded: bool) {
+        self.occluded.set(occluded);
+    }
+
     /// The last (min, max) content-size limits the runner applied, for tests.
     pub(super) fn applied_size_limits(
         &self,
@@ -109,104 +148,14 @@ impl HeadlessPlatformWindow {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Debug)]
-pub(crate) struct HeadlessMainThreadExecutor {
-    runnable_tx: mpsc::Sender<Runnable>,
-    runnable_rx: Rc<mpsc::Receiver<Runnable>>,
-    /// Queued-but-not-yet-run runnable count. Incremented before send and
-    /// decremented after each run, so `has_pending` over-reports around the
-    /// hand-off instant — the safe direction for a settledness probe. Atomic
-    /// because wakers clone the sender onto arbitrary threads.
-    pending: Arc<AtomicUsize>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-thread_local! {
-    /// One executor per thread, shared by every headless runtime on it.
-    ///
-    /// `try_init_local_executor` installs a single executor per thread and the
-    /// first install wins, so per-runtime executors would strand every task a
-    /// second runtime spawns on the same thread (perf repetitions,
-    /// multi-measure benches, any test mounting twice) in the first runtime's
-    /// queue — never drained, and dropped only during thread-local teardown,
-    /// where dropping a future whose destructor touches other thread-locals
-    /// aborts the process.
-    static THREAD_EXECUTOR: HeadlessMainThreadExecutor = HeadlessMainThreadExecutor::new();
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl HeadlessMainThreadExecutor {
-    fn new() -> Self {
-        let (runnable_tx, runnable_rx) = mpsc::channel();
-        Self {
-            runnable_tx,
-            runnable_rx: Rc::new(runnable_rx),
-            pending: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    /// The executor shared by every headless runtime on this thread.
-    pub(crate) fn thread_shared() -> Self {
-        THREAD_EXECUTOR.with(Clone::clone)
-    }
-
-    /// Runs every runnable currently queued, returning whether any ran.
-    ///
-    /// The offscreen runner must call this while rendering: a `GpuView`'s
-    /// `setup` is an async future spawned onto this executor, so a frame
-    /// rendered without draining would run `render` against a renderer that has
-    /// not built its pipelines yet and would emit nothing.
-    pub(super) fn drain(&self) -> bool {
-        let mut ran = false;
-        loop {
-            let Ok(runnable) = self.runnable_rx.try_recv() else {
-                return ran;
-            };
-            ran = true;
-            runnable.run();
-            self.pending.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    /// Whether any spawned work is queued and waiting for the next drain.
-    pub(super) fn has_pending(&self) -> bool {
-        self.pending.load(Ordering::SeqCst) > 0
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl LocalExecutor for HeadlessMainThreadExecutor {
-    type Task<T: 'static> = AsyncTask<T>;
-
-    fn spawn_local<Fut>(&self, fut: Fut) -> Self::Task<Fut::Output>
-    where
-        Fut: std::future::Future + 'static,
-    {
-        let runnable_tx = self.runnable_tx.clone();
-        let pending = Arc::clone(&self.pending);
-        let (runnable, task) = executor_core::async_task::spawn_local(fut, move |runnable| {
-            pending.fetch_add(1, Ordering::SeqCst);
-            if let Err(unsent) = runnable_tx.send(runnable) {
-                pending.fetch_sub(1, Ordering::SeqCst);
-                // Teardown race: a waker held by another thread (decoder,
-                // audio, dispatch callback) fired after the runtime dropped
-                // the receiver. The task can never run again, and dropping a
-                // `spawn_local` runnable off its spawning thread panics by
-                // design (async-task's thread check), so leak it instead —
-                // bounded to shutdown, reclaimed at process exit.
-                std::mem::forget(unsent);
-            }
-        });
-        runnable.schedule();
-        task
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct HeadlessPumpResult {
     pub rebuilt: bool,
     pub profile: FrameProfile,
+    /// The frame's CPU/GPU stage split under `frame-profile`: GPU stages stay
+    /// `None` on a device without `TIMESTAMP_QUERY`.
+    #[cfg(feature = "frame-profile")]
+    pub stages: crate::renderer::FrameStageTimes,
     #[cfg(feature = "accessibility")]
     pub tree_update: Option<AccessibilityTreeUpdate>,
     pub snapshot: Option<HeadlessSnapshot>,
@@ -220,6 +169,9 @@ pub struct HeadlessRuntime {
     runtime: RuntimeWindow<HeadlessPlatformWindow>,
     pending_window_queue: Rc<RefCell<Vec<Window>>>,
     popup_windows: Vec<RuntimeWindow<HeadlessPlatformWindow>>,
+    /// The style the runtime was launched with, kept so popup windows'
+    /// renderers measure and encode with the same widget theme.
+    theme: Rc<dyn crate::engine::WidgetTheme>,
     /// Every window this runtime opens renders on this one device: the main
     /// window, and each popup it later vends. Requesting a device per window
     /// made a runtime that opens a popup pay for two.
@@ -254,15 +206,18 @@ impl Drop for ReclaimGpuOnDrop {
     }
 }
 
-/// Drains the thread-shared executor when the owning runtime drops.
+/// The window headless constructors wrap a content builder in: the same
+/// default background as platform windows (the theme `Background` slot), so
+/// offscreen captures match what `water run` renders from the very first
+/// frame.
 #[cfg(not(target_arch = "wasm32"))]
-struct DrainExecutorOnDrop(HeadlessMainThreadExecutor);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for DrainExecutorOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.drain();
-    }
+fn default_window(content: AnyViewBuilder<AnyView>) -> Window {
+    let content_builder = content.clone();
+    Window::new(
+        "",
+        waterui_core::binding(waterui::window::WindowState::Normal),
+        move || content_builder.build(),
+    )
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -273,14 +228,45 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             pollster::block_on(OffscreenGpuContext::new()),
             env,
-            content,
+            default_window(content),
             width,
             height,
-            native_resource_fonts,
+            style,
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
+        )
+    }
+
+    /// Same as [`Self::new`] around a caller-built [`Window`] — the mount the
+    /// window runner performs.
+    ///
+    /// `Self::new` mounts a synthetic default window, so the application's own
+    /// `Window` — its `frame`, `state`, `min_size`/`max_size`, title, and
+    /// background — is the runtime's: the viewport writes `Window::frame` at
+    /// mount and on every `Moved`/`Resized` event land on the app's binding,
+    /// and content reading the app's frame binding (a responsive layout, a
+    /// `when()` keyed on width, a size derived from the window) agrees with the
+    /// window runner for the same tree.
+    #[must_use]
+    pub fn new_with_window(
+        env: Environment,
+        window: Window,
+        width: u32,
+        height: u32,
+        style: impl crate::Style,
+    ) -> Self {
+        Self::on_gpu_context(
+            pollster::block_on(OffscreenGpuContext::new()),
+            env,
+            window,
+            width,
+            height,
+            style,
+            |env| native_resource_fonts(waterui_core::ResourceContext::from_environment(env)),
         )
     }
 
@@ -308,14 +294,72 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             OffscreenGpuContext::new_for_tests_blocking(),
             env,
-            content,
+            default_window(content),
             width,
             height,
-            super::fonts::deterministic_test_fonts,
+            style,
+            |_| super::fonts::deterministic_test_fonts(),
+        )
+    }
+
+    /// Same as [`Self::new_for_tests`] around a caller-built [`Window`], so a
+    /// test can exercise window-level properties a plain content builder
+    /// cannot express — a translucent [`Window::background`], for one.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn new_for_tests_with_window(
+        env: Environment,
+        window: Window,
+        width: u32,
+        height: u32,
+        style: impl crate::Style,
+    ) -> Self {
+        Self::on_gpu_context(
+            OffscreenGpuContext::new_for_tests_blocking(),
+            env,
+            window,
+            width,
+            height,
+            style,
+            |_| super::fonts::deterministic_test_fonts(),
+        )
+    }
+
+    /// Same as [`Self::new_for_tests`] but loads the fonts the windowed
+    /// runners use — the system font collection plus the staged fonts
+    /// directory — via [`native_resource_fonts`] instead of the bundled
+    /// deterministic set.
+    ///
+    /// Text-measurement fidelity tests belong here: the deterministic fonts
+    /// shape snugly, so a measure-versus-paint divergence that only appears on
+    /// the real font stack (different advances, fallback runs, hinting) is
+    /// invisible to [`Self::new_for_tests`].
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn new_for_tests_native_fonts(
+        env: Environment,
+        content: AnyViewBuilder<AnyView>,
+        width: u32,
+        height: u32,
+        style: impl crate::Style,
+    ) -> Self {
+        Self::on_gpu_context(
+            OffscreenGpuContext::new_for_tests_blocking(),
+            env,
+            default_window(content),
+            width,
+            height,
+            style,
+            |env| {
+                super::fonts::native_test_fonts(waterui_core::ResourceContext::from_environment(
+                    env,
+                ))
+            },
         )
     }
 
@@ -336,43 +380,49 @@ impl HeadlessRuntime {
         content: AnyViewBuilder<AnyView>,
         width: u32,
         height: u32,
+        style: impl crate::Style,
     ) -> Self {
         Self::on_gpu_context(
             gpu,
             env,
-            content,
+            default_window(content),
             width,
             height,
-            super::fonts::deterministic_test_fonts,
+            style,
+            |_| super::fonts::deterministic_test_fonts(),
         )
     }
 
     fn on_gpu_context(
         gpu: OffscreenGpuContext,
         env: Environment,
-        content: AnyViewBuilder<AnyView>,
+        window: Window,
         width: u32,
         height: u32,
-        build_fonts: fn() -> parley::FontContext,
+        style: impl crate::Style,
+        build_fonts: fn(&Environment) -> parley::FontContext,
     ) -> Self {
         let inspector = init_main_thread_executors();
         let inspector_probe = inspector
             .as_ref()
             .map(waterui::inspector::InspectorRuntime::runtime_probe);
-        let mut env = env.extending(waterui_graphics::SceneViewMergeToParent);
+        let mut env = env.extending(waterui_graphics::scene_view::SceneViewMergeToParent);
+        waterui_core::install_application_resources(&mut env);
         waterui::inspector::install(&mut env, inspector);
         let pending_window_queue = Rc::new(RefCell::new(Vec::new()));
         install_native_component_hooks(&mut env);
         install_headless_window_managers(&mut env, Rc::clone(&pending_window_queue));
         env.insert(HydrolysisTextContextMenuMode::Overlay);
+        crate::theme::install_theme_tokens(&mut env, Some(&style));
+        let theme: Rc<dyn crate::engine::WidgetTheme> = Rc::new(style);
         env.insert(waterui_core::ViewRenderer::new(
-            crate::view_renderer::HydrolysisViewRenderer::default(),
+            crate::view_renderer::HydrolysisViewRenderer::new(Rc::clone(&theme)),
         ));
         // The application's fonts, built once. Every window's renderer is
         // seeded from this collection, and a self-drawn component that typesets
         // text itself reads it out of the environment instead of enumerating
         // the system's fonts for itself.
-        let fonts = FontCollection::new(build_fonts());
+        let fonts = FontCollection::new(build_fonts(&env));
         fonts.clone().install(&mut env);
 
         // Headless binaries (preview, tests) have no platform runner to install
@@ -382,20 +432,14 @@ impl HeadlessRuntime {
             .with_writer(std::io::stderr)
             .try_init();
         let local_executor = HeadlessMainThreadExecutor::thread_shared();
+        // A headless host paces frames itself, so the executor budgets at the
+        // headless rate.
         let _ = try_init_local_executor(waterui::task::monitored_local_executor_with_probes(
             local_executor.clone(),
+            waterui::task::RefreshRate::HEADLESS,
             inspector_probe,
         ));
 
-        // The headless window uses the same default background as platform
-        // windows (the theme `Background` slot), so offscreen captures match
-        // what `water run` renders from the very first frame.
-        let content_builder = content.clone();
-        let window = Window::new(
-            "",
-            waterui_core::binding(waterui::window::WindowState::Normal),
-            move || content_builder.build(),
-        );
         window.frame.set(waterui_core::layout::Rect::new(
             waterui_core::layout::Point::zero(),
             waterui_core::layout::Size::new(width.max(1) as f32, height.max(1) as f32),
@@ -410,9 +454,14 @@ impl HeadlessRuntime {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&theme))
         };
-        super::seed_renderer(&mut renderer, &fonts);
+        super::seed_core(&mut renderer, &fonts);
+        renderer.set_window_id(
+            env.get::<MenuShortcutRegistry>()
+                .expect("install_headless_window_managers seeds MenuShortcutRegistry")
+                .mint_window_id(),
+        );
 
         Self {
             env,
@@ -428,8 +477,9 @@ impl HeadlessRuntime {
             ),
             pending_window_queue,
             popup_windows: Vec::new(),
+            theme,
             fonts,
-            _executor_teardown: DrainExecutorOnDrop(local_executor.clone()),
+            _executor_teardown: DrainExecutorOnDrop::new(local_executor.clone()),
             _gpu_reclaim: ReclaimGpuOnDrop(gpu.clone()),
             gpu,
             local_executor,
@@ -437,7 +487,7 @@ impl HeadlessRuntime {
     }
 
     fn create_popup_runtime(&self, window: Window) -> RuntimeWindow<HeadlessPlatformWindow> {
-        let frame = window.frame.get();
+        let frame = crate::platform::validated_window_frame(window.frame.snapshot());
         let width = frame.width().max(1.0) as u32;
         let height = frame.height().max(1.0) as u32;
         let mut platform = HeadlessPlatformWindow::on_context(
@@ -449,9 +499,15 @@ impl HeadlessRuntime {
         platform.apply_properties(&window);
         let mut renderer = {
             let surface = platform.surface();
-            HydrolysisRenderer::new(surface.adapter(), surface.device())
+            HydrolysisRenderer::new(surface.adapter(), surface.device(), Rc::clone(&self.theme))
         };
-        super::seed_renderer(&mut renderer, &self.fonts);
+        super::seed_core(&mut renderer, &self.fonts);
+        renderer.set_window_id(
+            self.env
+                .get::<MenuShortcutRegistry>()
+                .expect("install_headless_window_managers seeds MenuShortcutRegistry")
+                .mint_window_id(),
+        );
         RuntimeWindow::new(
             window,
             platform,
@@ -462,62 +518,6 @@ impl HeadlessRuntime {
                 slow_frame_threshold_override: None,
             },
         )
-    }
-
-    /// The accessibility tree of every window this application has open.
-    ///
-    /// A popup — a context menu, a picker — is its own window with its own
-    /// renderer, and so its own tree. Reporting only the main window's tree
-    /// means a menu is invisible to anything reading the accessibility tree,
-    /// which is how context menus came to have no test coverage at all: the
-    /// items are there, and nothing could see them.
-    ///
-    /// Each popup's ids are shifted into their own range, because every
-    /// renderer numbers its nodes from the same origin, and its root is
-    /// attached to the main root so the result is one tree.
-    #[cfg(feature = "accessibility")]
-    fn take_merged_accessibility_tree_update(&mut self) -> Option<AccessibilityTreeUpdate> {
-        use accesskit::NodeId as AccessibilityNodeId;
-
-        /// Node ids are unique per renderer, so each window gets its own range.
-        const WINDOW_ID_STRIDE: u64 = 1 << 32;
-        const ROOT: AccessibilityNodeId = AccessibilityNodeId(0);
-
-        let mut merged = self.runtime.renderer.take_accessibility_tree_update()?;
-        if self.popup_windows.is_empty() {
-            return Some(merged);
-        }
-
-        let mut root_children = merged
-            .nodes
-            .iter()
-            .find(|(id, _)| *id == ROOT)
-            .map_or_else(Vec::new, |(_, node)| node.children().to_vec());
-
-        for (index, popup) in self.popup_windows.iter_mut().enumerate() {
-            let Some(update) = popup.renderer.take_accessibility_tree_update() else {
-                continue;
-            };
-            let offset = (index as u64 + 1) * WINDOW_ID_STRIDE;
-            for (id, mut node) in update.nodes {
-                let children: Vec<_> = node
-                    .children()
-                    .iter()
-                    .map(|child| AccessibilityNodeId(child.0 + offset))
-                    .collect();
-                node.set_children(children);
-                let shifted = AccessibilityNodeId(id.0 + offset);
-                if id == ROOT {
-                    root_children.push(shifted);
-                }
-                merged.nodes.push((shifted, node));
-            }
-        }
-
-        if let Some((_, root)) = merged.nodes.iter_mut().find(|(id, _)| *id == ROOT) {
-            root.set_children(root_children);
-        }
-        Some(merged)
     }
 
     fn mount_pending_popup_windows(&mut self) {
@@ -531,26 +531,183 @@ impl HeadlessRuntime {
         }
     }
 
+    /// Queues an input event for the next pump.
+    ///
+    /// A real windowing system delivers positional input to the topmost
+    /// window under the point: a mounted popup — a `.context_menu` floating
+    /// over the main window — owns the presses inside its frame, translated
+    /// to window-local coordinates before the popup sees them. Events outside
+    /// every popup frame keep landing on the main window's queue.
     pub fn push_input_event(&mut self, event: InputEvent) {
+        if let Some((x, y)) = event_position(&event) {
+            // The last mounted popup is the topmost one.
+            for popup in self.popup_windows.iter_mut().rev() {
+                let frame = crate::platform::validated_window_frame(popup.window.frame.snapshot());
+                let (fx, fy) = (frame.x(), frame.y());
+                if x >= fx && x < fx + frame.width() && y >= fy && y < fy + frame.height() {
+                    popup
+                        .platform
+                        .push_event(translate_input_event(event, fx, fy));
+                    return;
+                }
+            }
+        }
         self.runtime.platform.push_event(event);
     }
 
-    pub fn request_redraw(&mut self) {
-        self.runtime.platform.request_redraw();
+    /// Sets the pointer position the host reports when asked — independent
+    /// of the events it has delivered.
+    ///
+    /// An OS file drag carries no coordinates, and some platforms suppress
+    /// cursor events while the drag owns the pointer; this models a host
+    /// that still knows where the pointer is, so the runner's platform query
+    /// has an answer.
+    pub fn set_pointer_position(&mut self, position: Option<(f32, f32)>) {
+        self.runtime.platform.pointer_position = position;
     }
 
+    pub fn request_redraw(&mut self) {
+        self.runtime.request_redraw();
+        self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
+    }
+
+    /// The adapter and device this runtime renders on — attribution for a
+    /// `frame-profile` report, including whether the device was opened with
+    /// `TIMESTAMP_QUERY`.
+    #[cfg(feature = "frame-profile")]
+    #[must_use]
+    pub fn gpu_identity(&self) -> crate::GpuIdentity {
+        let surface = self.runtime.platform.inner.surface_ref();
+        crate::GpuIdentity {
+            adapter: surface.adapter().get_info(),
+            adapter_features: surface.adapter().features(),
+            device_features: surface.device().features(),
+        }
+    }
+
+    /// Performs an accessibility action against the merged tree.
+    ///
+    /// Popup-window node ids are shifted into their own stride in the merged
+    /// update (see [`SemanticCore::take_merged_accessibility_tree_update`]),
+    /// so a request whose target lands in a popup's range demuxes back to that
+    /// window's core — the action targets (a menu item's activation, a picker
+    /// row's selection) live there. Returns whether the action changed state,
+    /// in which case the next pump re-emits.
     #[cfg(feature = "accessibility")]
     pub fn perform_accessibility_action(&mut self, request: AccessibilityActionRequest) -> bool {
-        let action_env = self.env.extending(runtime_window_origin(&self.runtime));
-        let changed = self
-            .runtime
+        /// The same id range
+        /// [`SemanticCore::take_merged_accessibility_tree_update`] assigns
+        /// each popup.
+        const WINDOW_ID_STRIDE: u64 = 1 << 32;
+
+        let target = request.target_node.0;
+        let (window, request) = if target >= WINDOW_ID_STRIDE {
+            let index = target / WINDOW_ID_STRIDE - 1;
+            let popup = self
+                .popup_windows
+                .get_mut(index as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "hydrolysis headless runtime: accessibility action {:?} targets closed popup \
+                         node {target}",
+                        request.action
+                    )
+                });
+            let mut request = request;
+            request.target_node = accesskit::NodeId(target % WINDOW_ID_STRIDE);
+            (popup, request)
+        } else {
+            (&mut self.runtime, request)
+        };
+        let action_env = self.env.extending(runtime_window_origin(window));
+        let changed = window
             .renderer
             .handle_accessibility_action(request, &action_env);
         if changed {
-            self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
+            window.request_refresh();
+            window.request_redraw();
+            window.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
         changed
+    }
+
+    /// The accessibility tree of every open window, merged the same way a
+    /// pump publishes it — a read-only query: pending per-window updates are
+    /// included but stay pending for the next pump to publish, so the pump's
+    /// "the tree changed" signal is untouched. Popups keep the id stride the
+    /// published merge assigns. `None` when no window has ever produced a
+    /// tree.
+    #[cfg(feature = "accessibility")]
+    pub fn accessibility_tree(&mut self) -> Option<AccessibilityTreeUpdate> {
+        self.runtime.renderer.accessibility_tree(
+            self.popup_windows
+                .iter_mut()
+                .map(|popup| &mut *popup.renderer),
+        )
+    }
+
+    /// The point a pointer could actually reach inside `node`'s accessibility
+    /// bounds.
+    ///
+    /// Node bounds stay the logical rectangle; visibility is a projection
+    /// resolved here, at the point of use (water-rs/waterui#1323 §4). What
+    /// projects is the region a pointer can activate: for a node whose
+    /// `Click` was delegated by a silenced interaction owner (a `List` row
+    /// standing in for its `on_tap` strip), that owner's own hit region and
+    /// clip; otherwise the node's logical rectangle intersected with the
+    /// clip chain in effect when it registered — either way, intersected with
+    /// the window bounds (water-rs/waterui#1323 §5). The requested spot is
+    /// clamped into the visible fragment. The callers that must produce a
+    /// real point — a testing `tap_at`, an automation `pointer tap` —
+    /// resolve through this query instead of the bounds' centre, which may
+    /// sit inside a clipped region where nothing can be hit
+    /// (water-rs/hydrolysis#27). A node with no visible fragment fails with
+    /// [`AccessibilityActivationPointError::EmptyFragment`]; an off-screen
+    /// point is never returned.
+    ///
+    /// `(x_fraction, y_fraction)` pick a spot inside the projected region —
+    /// `0.5, 0.5` is its centre.
+    ///
+    /// Popup-window node ids are shifted into their own stride in the merged
+    /// update the same way [`Self::perform_accessibility_action`] demultiplexes
+    /// them back: a target in a popup's range resolves on that window's core —
+    /// its own clip and window bounds — and translates the result by the
+    /// popup frame's origin, so the returned point sits in the merged
+    /// coordinates a pointer tap pushed to this runtime resolves against.
+    /// A shifted id for a closed popup fails with
+    /// [`AccessibilityActivationPointError::NoNode`].
+    #[cfg(feature = "accessibility")]
+    pub fn accessibility_activation_point(
+        &self,
+        node_id: accesskit::NodeId,
+        x_fraction: f64,
+        y_fraction: f64,
+    ) -> Result<kurbo::Point, AccessibilityActivationPointError> {
+        /// The same id range
+        /// [`SemanticCore::take_merged_accessibility_tree_update`] assigns
+        /// each popup.
+        const WINDOW_ID_STRIDE: u64 = 1 << 32;
+
+        let target = node_id.0;
+        if target >= WINDOW_ID_STRIDE {
+            let index = target / WINDOW_ID_STRIDE - 1;
+            let Some(popup) = self.popup_windows.get(index as usize) else {
+                return Err(AccessibilityActivationPointError::NoNode);
+            };
+            let point = popup.renderer.accessibility_activation_point(
+                accesskit::NodeId(target % WINDOW_ID_STRIDE),
+                x_fraction,
+                y_fraction,
+            )?;
+            let frame = crate::platform::validated_window_frame(popup.window.frame.snapshot());
+            return Ok(kurbo::Point::new(
+                point.x + f64::from(frame.x()),
+                point.y + f64::from(frame.y()),
+            ));
+        }
+        self.runtime
+            .renderer
+            .accessibility_activation_point(node_id, x_fraction, y_fraction)
     }
 
     /// Where the runner would anchor the platform's input-method panel.
@@ -570,7 +727,8 @@ impl HeadlessRuntime {
         let changed = self.runtime.renderer.clear_ui_focus();
         if changed {
             self.runtime.request_refresh();
-            self.runtime.platform.request_redraw();
+            self.runtime.request_redraw();
+            self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
         }
         changed
     }
@@ -582,7 +740,8 @@ impl HeadlessRuntime {
     }
 
     /// Whether the runtime is quiescent: no queued input, no spawned work
-    /// awaiting a drain, no pending popup mounts, and no renderer-scheduled
+    /// awaiting a drain, no pending popup mounts, no window — the main window
+    /// or a popup — with a frame still pending, and no renderer-scheduled
     /// semantic work (patches, rebuilds, animations, gesture deadlines,
     /// gliding scrolls) in this window or any popup.
     ///
@@ -597,9 +756,11 @@ impl HeadlessRuntime {
         !self.runtime.platform.has_pending_events()
             && !self.local_executor.has_pending()
             && self.pending_window_queue.borrow().is_empty()
+            && !self.runtime.mode.is_pending()
             && !self.runtime.renderer.has_scheduled_semantic_work()
             && self.popup_windows.iter().all(|popup| {
-                !popup.platform.has_pending_events()
+                !popup.mode.is_pending()
+                    && !popup.platform.has_pending_events()
                     && !popup.renderer.has_scheduled_semantic_work()
             })
     }
@@ -615,19 +776,15 @@ impl HeadlessRuntime {
     /// up to date.
     #[must_use]
     pub fn has_pending_semantic_update(&self) -> bool {
-        self.runtime.renderer.has_pending_semantic_update()
-            || self
-                .popup_windows
-                .iter()
-                .any(|popup| popup.renderer.has_pending_semantic_update())
+        self.runtime.mode.is_unapplied_change()
+            || self.runtime.renderer.has_pending_semantic_update()
+            || self.popup_windows.iter().any(|popup| {
+                popup.mode.is_unapplied_change() || popup.renderer.has_pending_semantic_update()
+            })
     }
 
     pub fn pump(&mut self, capture_snapshot: bool) -> HeadlessPumpResult {
         self.pump_at(capture_snapshot, Instant::now())
-    }
-
-    pub fn pump_semantic(&mut self) -> HeadlessPumpResult {
-        self.pump_semantic_at(Instant::now())
     }
 
     pub fn pump_offscreen(&mut self) -> HeadlessPumpResult {
@@ -638,57 +795,90 @@ impl HeadlessRuntime {
         self.pump_at(true, Instant::now())
     }
 
-    pub fn pump_semantic_at(&mut self, at: Instant) -> HeadlessPumpResult {
-        let frame_started_at = Instant::now();
-        self.runtime.renderer.set_frame_instant(at);
-        let executor_before_started_at = Instant::now();
-        let drained_before = self.local_executor.drain();
-        let executor_before = executor_before_started_at.elapsed();
-        let input_started_at = Instant::now();
-        let _ = handle_input_events(&mut self.runtime, &self.env);
-        let input = input_started_at.elapsed();
-        let animation_started_at = Instant::now();
-        let _ = advance_runtime(&mut self.runtime, &self.env, at);
-        let animation = animation_started_at.elapsed();
-        self.mount_pending_popup_windows();
-        for popup in &mut self.popup_windows {
-            popup.renderer.set_frame_instant(at);
-            let _ = handle_input_events(popup, &self.env);
-            let _ = advance_runtime(popup, &self.env, at);
-        }
-        let rebuilt = pump_window_semantics(&mut self.runtime, &self.env);
-        for popup in &mut self.popup_windows {
-            let _ = pump_window_semantics(popup, &self.env);
-        }
-        let executor_after_started_at = Instant::now();
-        let drained_after = self.local_executor.drain();
-        let executor_after = executor_after_started_at.elapsed();
-
-        HeadlessPumpResult {
-            rebuilt: rebuilt || drained_before || drained_after,
-            profile: FrameProfile {
-                phases: FramePhases {
-                    executor_before,
-                    input,
-                    animation,
-                    executor_after,
-                    ..FramePhases::default()
-                },
-                ..FrameProfile::default()
-            }
-            .with_total(frame_started_at.elapsed()),
-            #[cfg(feature = "accessibility")]
-            tree_update: self.take_merged_accessibility_tree_update(),
-            snapshot: None,
-            #[cfg(feature = "accessibility")]
-            ui_focus: self.runtime.renderer.focused_ui_node(),
-        }
-    }
-
     /// The main window's renderer, for tests that assert on frame internals.
     #[cfg(test)]
     pub(crate) fn renderer(&self) -> &HydrolysisRenderer {
         &self.runtime.renderer
+    }
+
+    /// The main window's renderer mutably — editing-session tests write
+    /// projections through it.
+    #[cfg(test)]
+    pub(crate) fn renderer_mut(&mut self) -> &mut HydrolysisRenderer {
+        &mut self.runtime.renderer
+    }
+
+    /// The `Window` the `index`th mounted popup was built from — the value the
+    /// popup machinery emitted — so a test can assert on the window the
+    /// platform layer will realize.
+    #[cfg(test)]
+    pub(crate) fn popup_window(&self, index: usize) -> Option<&Window> {
+        self.popup_windows.get(index).map(|runtime| &runtime.window)
+    }
+
+    /// Captures the `index`th popup's own rendered frame through
+    /// `render_window_with_capture` — the same pump-and-present path the
+    /// winit runner drives per frame — rather than the semantic tree or the
+    /// composited main-window snapshot.
+    #[cfg(test)]
+    pub(crate) fn popup_frame(&mut self, index: usize) -> Option<HeadlessSnapshot> {
+        let popup = self.popup_windows.get_mut(index)?;
+        render_window_with_capture(popup, &self.env, FrameReader::Snapshot, &mut || {
+            self.local_executor.drain()
+        })
+        .snapshot
+    }
+
+    /// The mounted popup windows' logical frames — where each transient
+    /// window was anchored, in the same coordinate space pointer input is
+    /// delivered in — in mount order.
+    #[cfg(test)]
+    pub(crate) fn popup_frames(&self) -> Vec<waterui_core::layout::Rect> {
+        self.popup_windows
+            .iter()
+            .map(|popup| crate::platform::validated_window_frame(popup.window.frame.snapshot()))
+            .collect()
+    }
+
+    /// The open `.context_menu` presentation's drawn frames in hit space —
+    /// `(menu, accessory)` — or `None` when no drawn presentation is open.
+    /// The drawn menu mounts no popup window, so `popup_frames` stays empty
+    /// while it is up.
+    #[cfg(test)]
+    pub(crate) fn context_menu_presentation_frames(
+        &self,
+    ) -> Option<(kurbo::Rect, Option<kurbo::Rect>)> {
+        self.runtime.renderer.context_menu_presentation_frames()
+    }
+
+    /// The row frames inside the open drawn menu, in hit order — empty when
+    /// no drawn presentation is open.
+    #[cfg(test)]
+    pub(crate) fn context_menu_row_frames(&self) -> Vec<kurbo::Rect> {
+        self.runtime.renderer.context_menu_row_frames()
+    }
+
+    /// The drawn frames of the presented `.anchored_overlay` overlays, in hit
+    /// order — empty when none is presented.
+    #[cfg(test)]
+    pub(crate) fn anchored_overlay_frames(&self) -> Vec<kurbo::Rect> {
+        self.runtime.renderer.anchored_overlay_frames()
+    }
+
+    /// The lifted preview's frame in the open drawn `.context_menu`
+    /// presentation — the source's rect unless fitting the stack moved or
+    /// cropped it — or `None` when none is open.
+    #[cfg(test)]
+    pub(crate) fn context_menu_lift_frame(&self) -> Option<kurbo::Rect> {
+        self.runtime.renderer.context_menu_lift_frame()
+    }
+
+    /// Digest of the last layout pass's placed bounds — the frame-profile
+    /// example's byte-identical layout check.
+    #[cfg(feature = "frame-profile")]
+    #[must_use]
+    pub fn layout_signature(&self) -> Option<u64> {
+        self.runtime.renderer.layout_signature()
     }
 
     pub fn pump_at(&mut self, capture_snapshot: bool, at: Instant) -> HeadlessPumpResult {
@@ -709,51 +899,116 @@ impl HeadlessRuntime {
             let _ = handle_input_events(popup, &self.env);
             let _ = advance_runtime(popup, &self.env, at);
         }
+        // A popup whose state flipped `Closed` — its menu group dismissed it
+        // or a close request arrived — leaves the merged tree. Flag the main
+        // window so the update re-emits without it.
+        if self
+            .popup_windows
+            .iter()
+            .any(|popup| popup.window.state.snapshot() == waterui::window::WindowState::Closed)
+        {
+            self.popup_windows.retain(|popup| {
+                popup.window.state.snapshot() != waterui::window::WindowState::Closed
+            });
+            self.runtime.request_refresh();
+            self.runtime.request_redraw();
+            self.runtime.renderer.frame_work_counters_mut().host_wakeups += 1;
+        }
         let should_render = capture_snapshot
             || self.runtime.mode.is_pending()
             || self.runtime.platform.take_redraw_request();
         let mut render_result = should_render.then(|| {
-            render_window_with_capture(&mut self.runtime, &self.env, capture_snapshot, &mut || {
-                self.local_executor.drain()
-            })
+            render_window_with_capture(
+                &mut self.runtime,
+                &self.env,
+                FrameReader::headless(capture_snapshot),
+                &mut || self.local_executor.drain(),
+            )
         });
-        if capture_snapshot
-            && !self.popup_windows.is_empty()
-            && let Some(snapshot) = render_result
-                .as_mut()
-                .and_then(|result| result.snapshot.as_mut())
+        // The popup renders below can rebuild too; `rebuilt` reports the OR
+        // of every pass this pump ran, not only the main window's render.
+        let mut rebuilt = render_result.as_ref().is_some_and(|result| result.rebuilt);
+        // The pump's profile is the main window's frame: a capture's readback
+        // ran inside that same render — queued after the frame's submissions
+        // on the same queue — and the popup passes below only composite their
+        // snapshots into it.
+        let rendered_profile = render_result.as_ref().map(|result| result.profile);
+        // A popup window pumps its scene the way the main window does: the
+        // scene pump is where its retained tree — and with it the window's
+        // accessibility update — is built. A popup that only ever rendered on
+        // capture frames would composite into snapshots yet never reach the
+        // merged tree, so an open popup gets a frame whenever its own work is
+        // pending, while readback stays limited to the frames that composite
+        // it into a snapshot.
+        let mut popup_snapshots = Vec::new();
+        for (popup_index, popup) in self.popup_windows.iter_mut().enumerate() {
+            let composite = capture_snapshot
+                && render_result
+                    .as_ref()
+                    .is_some_and(|result| result.snapshot.is_some());
+            let redraw_requested = popup.platform.take_redraw_request();
+            if !(composite || popup.mode.is_pending() || redraw_requested) {
+                continue;
+            }
+            let popup_result = render_window_with_capture(
+                popup,
+                &self.env,
+                FrameReader::headless(composite),
+                &mut || self.local_executor.drain(),
+            );
+            rebuilt |= popup_result.rebuilt;
+            if let Some(popup_snapshot) = popup_result.snapshot {
+                popup_snapshots.push((
+                    popup_index,
+                    crate::platform::validated_window_frame(popup.window.frame.snapshot()),
+                    popup_snapshot,
+                ));
+            }
+        }
+        if let Some(snapshot) = render_result
+            .as_mut()
+            .and_then(|result| result.snapshot.as_mut())
         {
-            for popup in &mut self.popup_windows {
-                let Some(popup_snapshot) =
-                    render_window_with_capture(popup, &self.env, true, &mut || {
-                        self.local_executor.drain()
-                    })
-                    .snapshot
-                else {
-                    continue;
-                };
-                composite_popup_snapshot(snapshot, &popup_snapshot, popup.window.frame.get());
+            for (_, frame, popup_snapshot) in popup_snapshots {
+                composite_popup_snapshot(snapshot, &popup_snapshot, frame);
             }
         }
         let executor_after_started_at = Instant::now();
         let drained_after = self.local_executor.drain();
         let executor_after = executor_after_started_at.elapsed();
 
-        let mut profile = render_result
-            .as_ref()
-            .map_or_else(FrameProfile::default, |result| result.profile);
+        let mut profile = rendered_profile
+            .or_else(|| render_result.as_ref().map(|result| result.profile))
+            .unwrap_or_default();
+        if render_result.is_some() {
+            // The renderer's frame-work counters are sampled after the frame's
+            // render and its readback have both submitted on the same queue,
+            // so they cover all the GPU work this pump ran for it.
+            profile.counters.frame_work = self.runtime.renderer.frame_work_counters();
+        }
         profile.phases.executor_before = executor_before;
         profile.phases.input = input;
         profile.phases.animation = animation;
         profile.phases.executor_after = executor_after;
 
         HeadlessPumpResult {
-            rebuilt: render_result.as_ref().is_some_and(|result| result.rebuilt)
+            rebuilt: rebuilt
+                || render_result.as_ref().is_some_and(|result| result.rebuilt)
                 || drained_before
                 || drained_after,
             profile: profile.with_total(frame_started_at.elapsed()),
+            #[cfg(feature = "frame-profile")]
+            stages: render_result
+                .as_ref()
+                .map_or_else(crate::renderer::FrameStageTimes::default, |result| {
+                    result.stages
+                }),
             #[cfg(feature = "accessibility")]
-            tree_update: self.runtime.renderer.take_accessibility_tree_update(),
+            tree_update: self.runtime.renderer.take_merged_accessibility_tree_update(
+                self.popup_windows
+                    .iter_mut()
+                    .map(|popup| &mut *popup.renderer),
+            ),
             snapshot: render_result.and_then(|result| result.snapshot),
             #[cfg(feature = "accessibility")]
             ui_focus: self.runtime.renderer.focused_ui_node(),
@@ -810,4 +1065,97 @@ fn composite_pixel(target: &mut [u8], source: &[u8]) {
         target[channel] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     target[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+/// The window-local point a positional event carries, if it is one.
+fn event_position(event: &InputEvent) -> Option<(f32, f32)> {
+    match event {
+        InputEvent::PointerDown { x, y, .. }
+        | InputEvent::PointerUp { x, y, .. }
+        | InputEvent::PointerMove { x, y, .. }
+        | InputEvent::Scroll { x, y, .. }
+        | InputEvent::TrackpadPan { x, y, .. }
+        | InputEvent::Magnification { x, y, .. }
+        | InputEvent::Rotation { x, y, .. } => Some((*x, *y)),
+        _ => None,
+    }
+}
+
+/// Re-expresses a positional event in a mounted window's local coordinate
+/// space — the subtraction the windowing system performs before an event
+/// reaches the window under the point.
+fn translate_input_event(event: InputEvent, dx: f32, dy: f32) -> InputEvent {
+    match event {
+        InputEvent::PointerDown {
+            id,
+            kind,
+            x,
+            y,
+            button,
+        } => InputEvent::PointerDown {
+            id,
+            kind,
+            x: x - dx,
+            y: y - dy,
+            button,
+        },
+        InputEvent::PointerUp {
+            id,
+            kind,
+            x,
+            y,
+            button,
+        } => InputEvent::PointerUp {
+            id,
+            kind,
+            x: x - dx,
+            y: y - dy,
+            button,
+        },
+        InputEvent::PointerMove { id, kind, x, y } => InputEvent::PointerMove {
+            id,
+            kind,
+            x: x - dx,
+            y: y - dy,
+        },
+        InputEvent::Scroll {
+            x,
+            y,
+            dx: sx,
+            dy: sy,
+            is_line_delta,
+        } => InputEvent::Scroll {
+            x: x - dx,
+            y: y - dy,
+            dx: sx,
+            dy: sy,
+            is_line_delta,
+        },
+        InputEvent::TrackpadPan {
+            x,
+            y,
+            dx: px,
+            dy: py,
+            phase,
+        } => InputEvent::TrackpadPan {
+            x: x - dx,
+            y: y - dy,
+            dx: px,
+            dy: py,
+            phase,
+        },
+        InputEvent::Magnification { x, y, delta, phase } => InputEvent::Magnification {
+            x: x - dx,
+            y: y - dy,
+            delta,
+            phase,
+        },
+        InputEvent::Rotation { x, y, delta, phase } => InputEvent::Rotation {
+            x: x - dx,
+            y: y - dy,
+            delta,
+            phase,
+        },
+        other => other,
+    }
 }

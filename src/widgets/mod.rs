@@ -8,4 +8,4 @@ pub(crate) mod visual;
 
 pub(crate) use layout::{divider, scroll};
 pub(crate) use scroll::draw_scroll_indicators;
-pub(crate) use util::{inset_rect, widget_theme};
+pub(crate) use util::inset_rect;
