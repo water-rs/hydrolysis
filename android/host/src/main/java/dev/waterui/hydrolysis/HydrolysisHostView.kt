@@ -52,7 +52,8 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
 
     private val accessibilityProvider: HydrolysisAccessibilityProvider =
         HydrolysisAccessibilityProvider(this, session)
-    private val autofillBridge: AutofillBridge = AutofillBridge(accessibilityProvider)
+    private val autofillBridge: AutofillBridge =
+        AutofillBridge(this, accessibilityProvider)
 
     private var lastMetricsWidth = -1
     private var lastMetricsHeight = -1
@@ -76,6 +77,7 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
         isFocusable = true
         isFocusableInTouchMode = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
+        importantForAutofill = IMPORTANT_FOR_AUTOFILL_YES
         addView(platformViewRegistry.container)
         session?.bind(this)
     }
@@ -388,6 +390,25 @@ constructor(context: Context, internal val session: HydrolysisSession? = null) :
 
     internal fun notifyAccessibilityTreeChanged() {
         accessibilityProvider.notifyTreeChanged()
+    }
+
+    /** The session pushed a new placement set — pull and apply it. */
+    internal fun notifyPlatformViewsChanged() {
+        platformViewRegistry.notifyChanged()
+    }
+
+    /** Each a11y publish also drives the autofill enter/exit diff. */
+    internal fun autofillSnapshotChanged() {
+        autofillBridge.snapshotChanged()
+    }
+
+    /** The activity finishing commits the pending autofill save. */
+    internal fun autofillCommit() {
+        autofillBridge.commit()
+    }
+
+    internal fun autofillCancel() {
+        autofillBridge.cancel()
     }
 
     override fun onProvideAutofillVirtualStructure(structure: ViewStructure, flags: Int) {

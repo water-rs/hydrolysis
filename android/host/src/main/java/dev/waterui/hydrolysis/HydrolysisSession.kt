@@ -58,6 +58,11 @@ class HydrolysisSession internal constructor(context: Context) {
         hostView?.notifyAccessibilityTreeChanged()
     }
 
+    @Suppress("unused") // called from native
+    fun onNativePlatformViewsChanged() {
+        hostView?.notifyPlatformViewsChanged()
+    }
+
     /**
      * A fatal, unrecoverable failure on the native side (GPU device loss, an
      * explicit GPU error). The host raises it as an exception on the UI

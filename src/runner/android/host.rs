@@ -36,7 +36,6 @@ use super::fonts::android_fonts;
 use super::gpu::{AndroidGpuContext, AndroidSurface};
 use super::ime::ImeBridge;
 use super::jni::JniError;
-use super::platform_views::PlatformViewTable;
 use crate::engine::WidgetTheme;
 use crate::platform::{
     GpuSurfaceWindow, InputEvent, PlatformWindow, SurfaceProvider, TextInputState,
@@ -185,6 +184,13 @@ impl HostBridge {
     #[cfg(feature = "accessibility")]
     pub(crate) fn accessibility_tree_changed(&self) {
         self.call("onNativeAccessibilityTreeChanged", "()V", &[]);
+    }
+
+    /// Marks the published platform-view placement set dirty on the host
+    /// side — the registry re-reads `nativePlatformViewFrames` and re-lays
+    /// out its slots.
+    pub(crate) fn platform_views_changed(&self) {
+        self.call("onNativePlatformViewsChanged", "()V", &[]);
     }
 
     /// Delivers a fatal error (GPU loss, unrecoverable renderer failure) —
@@ -528,7 +534,9 @@ pub(crate) struct AndroidSession {
         expect(dead_code, reason = "read only under the accessibility feature")
     )]
     pub(crate) a11y: AccessibilitySnapshot,
-    pub(crate) platform_views: PlatformViewTable,
+    /// The platform-view sink the window's `PlatformView` leaves record into;
+    /// the published table is serialized for the Kotlin registry.
+    pub(crate) platform_views: crate::platform_view::PlatformViewSink,
     pub(crate) ime: ImeBridge,
     /// The live surface generation, as last reported by the host.
     surface_generation: u64,
@@ -619,6 +627,10 @@ impl AndroidSession {
             .clone();
         let safe_area = nami::binding(waterui_layout::padding::EdgeInsets::default());
         env.insert(crate::platform::WindowSafeArea(safe_area.clone()));
+        // The platform-view sink `PlatformView` leaves record their frames
+        // into; the published table is what `nativePlatformViewFrames` serves.
+        let platform_views = crate::platform_view::PlatformViewSink::new();
+        env.insert(platform_views.clone());
 
         let mut windows = VecDeque::from(windows);
         let window = windows
@@ -660,7 +672,7 @@ impl AndroidSession {
             gpu,
             pending_window_queue,
             a11y: AccessibilitySnapshot::default(),
-            platform_views: PlatformViewTable::default(),
+            platform_views,
             ime: ImeBridge::default(),
             surface_generation: 0,
             frame_deadline_in_nanos: None,
@@ -735,9 +747,11 @@ impl AndroidSession {
         let should_close = handle_input_events(&mut self.runtime, &self.env) || self.should_close();
         let now = Instant::now();
         let deadline = advance_runtime(&mut self.runtime, &self.env, now);
+        let mut flushed = false;
         if self.runtime.mode.is_pending() && self.runtime.platform.surface.is_attached() {
             let executor = self.executor.clone();
             let presented = render_window(&mut self.runtime, &self.env, &mut || executor.drain());
+            flushed = true;
             if presented {
                 self.presented_once.set(true);
             }
@@ -754,7 +768,7 @@ impl AndroidSession {
             self.runtime.platform.bridge.close_requested();
         }
         super::accessibility::publish_if_pending(self);
-        super::platform_views::publish_if_pending(self);
+        super::platform_views::publish_if_pending(self, flushed);
         self.editing_sync();
 
         // Popup windows mounting mid-frame land on the pending queue: the

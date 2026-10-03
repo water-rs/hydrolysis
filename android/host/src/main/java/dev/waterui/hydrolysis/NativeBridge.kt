@@ -14,9 +14,11 @@ object NativeBridge {
      * Incremented in lock-step with `JNI_SCHEMA` in the Rust runner.
      * History: 1 = surface/input/IME events; 2 = the InputConnection range
      * protocol (`nativeEditOp`/`nativeEditingState`, the `onNative*` editing
-     * pushes) and the `Context` handed to [nativeCreateSession].
+     * pushes) and the `Context` handed to [nativeCreateSession]; 3 =
+     * `nativeAccessibilityAction` takes the accesskit action index plus
+     * separate text and numeric payloads.
      */
-    private const val SCHEMA: Int = 2
+    private const val SCHEMA: Int = 3
 
     private var initialized = false
 
@@ -147,12 +149,19 @@ object NativeBridge {
     /** Serialized accesskit TreeUpdate, or null when nothing changed. */
     @JvmStatic external fun nativeAccessibilityTree(sessionPtr: Long): String?
 
+    /**
+     * An accessibility action on a virtual node. `action` is the *accesskit*
+     * action index (not an Android constant); `text` carries the `SetValue`
+     * string payload (empty = none) and `numeric` the `NumericValue`/
+     * `CustomAction` payload (NaN = none).
+     */
     @JvmStatic
     external fun nativeAccessibilityAction(
         sessionPtr: Long,
         virtualViewId: Long,
         action: Int,
-        value: String,
+        text: String,
+        numeric: Double,
     ): Boolean
 
     /** Platform-view placement frame set, or null when unchanged. */

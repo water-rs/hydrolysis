@@ -68,66 +68,94 @@ pub(crate) fn publish_if_pending(session: &mut super::host::AndroidSession) {
 #[cfg(not(feature = "accessibility"))]
 pub(crate) fn publish_if_pending(_session: &mut super::host::AndroidSession) {}
 
-/// The `android.view.accessibility` action constants the provider can
-/// dispatch, mapped onto `accesskit::Action`. Anything else is an explicit
-/// unsupported action — named in the error, never folded into a default.
+/// The `accesskit::Action` bitmask index the provider echoes back. The Kotlin
+/// side decodes a node's serialized `actions`/`childActions` bitmask and
+/// advertises the platform actions each bit implies; a performed action comes
+/// back as the same index, so the JNI edge carries no per-platform constants
+/// at all. The table is `accesskit`'s declaration order — the index IS the
+/// `ActionIndex`.
 #[cfg(feature = "accessibility")]
 fn map_action(action: i32) -> Result<accesskit::Action, JniError> {
-    // android.view.accessibility.AccessibilityNodeInfo constants
-    const ACTION_FOCUS: i32 = 0x00000001;
-    const ACTION_CLEAR_FOCUS: i32 = 0x00000002;
-    const ACTION_CLICK: i32 = 0x00000010;
-    const ACTION_ACCESSIBILITY_FOCUS: i32 = 0x00000040;
-    const ACTION_CLEAR_ACCESSIBILITY_FOCUS: i32 = 0x00000080;
-    const ACTION_SCROLL_FORWARD: i32 = 0x00001000;
-    const ACTION_SCROLL_BACKWARD: i32 = 0x00002000;
-    const ACTION_SET_TEXT: i32 = 0x00200000;
-    const ACTION_EXPAND: i32 = 0x00040000;
-    const ACTION_COLLAPSE: i32 = 0x00080000;
-    const ACTION_SCROLL_UP: i32 = 16908344;
-    const ACTION_SCROLL_DOWN: i32 = 16908345;
-    const ACTION_SCROLL_LEFT: i32 = 16908346;
-    const ACTION_SCROLL_RIGHT: i32 = 16908347;
-    const ACTION_SHOW_TOOLTIP: i32 = 16908373;
-    const ACTION_HIDE_TOOLTIP: i32 = 16908374;
-
     use accesskit::Action;
-    match action {
-        ACTION_FOCUS | ACTION_ACCESSIBILITY_FOCUS => Ok(Action::Focus),
-        ACTION_CLEAR_FOCUS | ACTION_CLEAR_ACCESSIBILITY_FOCUS => Ok(Action::Blur),
-        ACTION_CLICK => Ok(Action::Click),
-        ACTION_EXPAND => Ok(Action::Expand),
-        ACTION_COLLAPSE => Ok(Action::Collapse),
-        ACTION_SET_TEXT => Ok(Action::ReplaceSelectedText),
-        ACTION_SCROLL_FORWARD | ACTION_SCROLL_DOWN => Ok(Action::ScrollDown),
-        ACTION_SCROLL_BACKWARD | ACTION_SCROLL_UP => Ok(Action::ScrollUp),
-        ACTION_SCROLL_LEFT => Ok(Action::ScrollLeft),
-        ACTION_SCROLL_RIGHT => Ok(Action::ScrollRight),
-        ACTION_SHOW_TOOLTIP => Ok(Action::ShowTooltip),
-        ACTION_HIDE_TOOLTIP => Ok(Action::HideTooltip),
-        other => Err(JniError(format!(
-            "hydrolysis android: unsupported accessibility action {other}"
-        ))),
-    }
+    const ACTIONS: &[Action] = &[
+        Action::Click,
+        Action::Focus,
+        Action::Blur,
+        Action::Collapse,
+        Action::Expand,
+        Action::CustomAction,
+        Action::Decrement,
+        Action::Increment,
+        Action::HideTooltip,
+        Action::ShowTooltip,
+        Action::ReplaceSelectedText,
+        Action::ScrollDown,
+        Action::ScrollLeft,
+        Action::ScrollRight,
+        Action::ScrollUp,
+        Action::ScrollIntoView,
+        Action::ScrollToPoint,
+        Action::SetScrollOffset,
+        Action::SetTextSelection,
+        Action::SetSequentialFocusNavigationStartingPoint,
+        Action::SetValue,
+        Action::ShowContextMenu,
+    ];
+    usize::try_from(action)
+        .ok()
+        .and_then(|index| ACTIONS.get(index))
+        .copied()
+        .ok_or_else(|| {
+            JniError(format!(
+                "hydrolysis android: unsupported accessibility action {action}"
+            ))
+        })
 }
 
 /// Routes an action the provider dispatched for `virtual_view_id` (the
 /// accesskit `NodeId` value) back into the renderer — inside the frame
 /// boundary like any other input.
+///
+/// The provider sends the data kind the target's role expects: `text` for
+/// `SetValue` on an editable node (the whole replacement text — Android's
+/// `ACTION_SET_TEXT` replaces the full contents) and `numeric` for `SetValue`
+/// on a range node. A request carrying both is a provider bug, so it errors
+/// rather than guessing.
 #[cfg(feature = "accessibility")]
 pub(crate) fn perform_action(
     session: &mut super::host::AndroidSession,
     virtual_view_id: i64,
     action: i32,
-    value: Option<String>,
+    text: Option<String>,
+    numeric: Option<f64>,
 ) -> Result<bool, JniError> {
     use accesskit::{ActionData, ActionRequest, NodeId, TreeId};
 
+    // The action decides which payload channel is meaningful, so a provider
+    // that sends both (or the wrong one) errors instead of being guessed at.
+    let action = map_action(action)?;
+    let data = match (action, text, numeric) {
+        (accesskit::Action::CustomAction, None, Some(index)) => {
+            Some(ActionData::CustomAction(index as i32))
+        }
+        (accesskit::Action::SetValue, Some(text), None) => {
+            Some(ActionData::Value(text.into_boxed_str()))
+        }
+        (accesskit::Action::SetValue, None, Some(numeric)) => {
+            Some(ActionData::NumericValue(numeric))
+        }
+        (_, None, None) => None,
+        _ => {
+            return Err(JniError(format!(
+                "hydrolysis android: accessibility action {action:?} carries mismatched data"
+            )));
+        }
+    };
     let request = ActionRequest {
-        action: map_action(action)?,
+        action,
         target_tree: TreeId::ROOT,
         target_node: NodeId(virtual_view_id.max(0) as u64),
-        data: value.map(|value| ActionData::Value(value.into_boxed_str())),
+        data,
     };
     Ok(session
         .runtime
@@ -141,7 +169,8 @@ pub(crate) fn perform_action(
     _session: &mut super::host::AndroidSession,
     _virtual_view_id: i64,
     _action: i32,
-    _value: Option<String>,
+    _text: Option<String>,
+    _numeric: Option<f64>,
 ) -> Result<bool, JniError> {
     Ok(false)
 }

@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
+use jni::sys::{jboolean, jdouble, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 
 use crate::platform::{InputEvent, Modifiers, PointerButton, PointerKind};
@@ -24,8 +24,9 @@ use super::host::{AndroidSession, MetricsSnapshot};
 /// Schema history: 1 = initial surface/input/IME events; 2 = the
 /// `InputConnection` range protocol (`nativeEditOp`/`nativeEditingState`,
 /// `onNativeEditingState`/`onNativeCursorAnchorInfo` pushes) and the
-/// `Context` passed to `nativeCreateSession`.
-pub(crate) const JNI_SCHEMA: jint = 2;
+/// `Context` passed to `nativeCreateSession`; 3 = `nativeAccessibilityAction`
+/// takes the accesskit action index plus separate text/numeric payloads.
+pub(crate) const JNI_SCHEMA: jint = 3;
 
 /// A failure crossing the JNI boundary as an exception.
 #[derive(Debug)]
@@ -509,7 +510,10 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
     })
 }
 
-/// `value` carries the ACTION_SET_TEXT payload; empty string means no data.
+/// `action` is the accesskit action index the provider decoded from the
+/// node's `actions` bitmask; `text` carries a string payload (empty string
+/// means none) and `numeric` a numeric one (NaN means none) — exactly one is
+/// ever set, matching the data kind the target's role expects.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibilityAction(
     mut env: JNIEnv,
@@ -517,15 +521,17 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativeAccessibil
     session_ptr: jlong,
     virtual_view_id: jlong,
     action: jint,
-    value: JString,
+    text: JString,
+    numeric: jdouble,
 ) -> jboolean {
     guard_val(&mut env, 0, |env| {
-        let value = get_string(env, &value)?;
+        let text = get_string(env, &text)?;
         Ok(super::accessibility::perform_action(
             session(session_ptr),
             virtual_view_id,
             action,
-            (!value.is_empty()).then_some(value),
+            (!text.is_empty()).then_some(text),
+            (!numeric.is_nan()).then_some(numeric),
         )? as jboolean)
     })
 }
@@ -538,6 +544,8 @@ pub extern "system" fn Java_dev_waterui_hydrolysis_NativeBridge_nativePlatformVi
     session_ptr: jlong,
 ) -> jstring {
     guard_string(&mut env, |_env| {
-        session(session_ptr).platform_views.take_json()
+        Ok(Some(super::platform_views::placements_json(session(
+            session_ptr,
+        ))?))
     })
 }
