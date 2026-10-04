@@ -584,6 +584,10 @@ impl SceneContent for SceneProbe {
         self.invalidator = invalidator;
     }
 
+    fn rebuild_for_engine(&mut self) {
+        self.invalidator = None;
+    }
+
     fn wants_input_events(&self) -> bool {
         true
     }
@@ -602,7 +606,6 @@ impl SceneContent for SceneProbe {
     fn ime_caret(&self) -> Option<kurbo::Rect> {
         Some(kurbo::Rect::new(10.0, 20.0, 12.0, 38.0))
     }
-    fn rebuild_for_engine(&mut self) {}
 }
 
 #[test]
