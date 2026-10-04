@@ -312,6 +312,9 @@ pub(crate) fn navigation_view_accessibility(
         if let Some(label) = bar_label {
             bar_node.set_label(label);
         }
+        if let Some(value) = renderer.resolve_accessibility_value(env, None) {
+            bar_node.set_value(value);
+        }
         let mut title_node = AccessibilityNode::new(
             renderer.resolve_accessibility_role(env, AccessibilityNodeRole::Header),
         );
