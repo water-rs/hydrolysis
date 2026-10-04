@@ -97,11 +97,9 @@ use executor_core::spawn_local;
 use nami::{Binding, Signal};
 use waterkit_clipboard::Clipboard;
 use waterui::ViewExt;
-#[cfg(feature = "accessibility")]
-use waterui::accessibility::AccessibilityValue;
 use waterui::accessibility::{
     AccessibilityChildren, AccessibilityHidden, AccessibilityIdentifier, AccessibilityLabel,
-    AccessibilityRole, AccessibilityState, AccessibilityStateSignal,
+    AccessibilityRole, AccessibilityState, AccessibilityStateSignal, AccessibilityValue,
 };
 use waterui::animation::Animation;
 use waterui::background::{Background, MaterialBackground};
